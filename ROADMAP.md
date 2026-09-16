@@ -22,6 +22,7 @@ This document tracks upcoming capabilities, planned optimizations, and ecosystem
 - [ ] **Enforcement Policy Modes**: Configurable operational modes in `Manager`:
   - `PolicyStrict`: Fail closed / halt operations immediately upon expiration, scope mismatch, or limit overrun.
   - `PolicyDegraded`: Warn loudly in logs and fallback to community/free tier limits or read-only mode to prevent mission-critical pipeline crashes.
+- [ ] **BSL Transition Runtime Callback**: Add `OnBSLConverted` lifecycle callback in `Manager` to alert application logs or telemetry when a long-running service crosses its BSL Change Date into open-source Apache 2.0.
 
 ### 🔌 Framework Adapters & Middleware
 - [ ] **HTTP Server Middleware**: Standard Go `func(next http.Handler) http.Handler` to extract and verify tokens, inject `Claims` into `r.Context()`, and append telemetry headers (`X-License-Status`, `X-License-Expires`).
@@ -49,3 +50,30 @@ This document tracks upcoming capabilities, planned optimizations, and ecosystem
 ### ⚡ Performance & Telemetry
 - [ ] Zero-allocation validator optimizations for microservices processing high-frequency tenant licenses.
 - [ ] Export Prometheus / OpenTelemetry metrics from `Manager` for license status, days remaining, active limits, and validation latency.
+
+---
+
+## ✅ Delivered Capabilities
+
+- **Business Source License (BSL 1.1) Dual-Lifecycle & Clock Defense**:
+  - Autonomous 3-year conversion to open-source (`Apache-2.0`) with synthetic entitlement bypass.
+  - Authoritative reference clock defense (`WithAuthoritativeTime`) to detect forward host clock tampering.
+- **Perpetual License Version Locking & Maintenance Cutoffs**:
+  - `MaxVersion` and `AllowedVersions` zero-dependency SemVer upper-bound constraints.
+  - `MaintenanceExpiresAt` binary build timestamp cutoff enforcement.
+- **KeyRing Multi-Key Rotation & Revocation**:
+  - Multi-key PEM bundle parsing and serialization.
+  - Active, retiring, and revoked key lifecycle statuses with zero-downtime key rotation.
+  - Instant cryptographic revocation with `ErrKeyRevoked`.
+- **Infrastructure & Organizational Scoping**:
+  - Fine-grained matching across cloud environments, accounts, regions, clusters, namespaces, hosts, and custom dimensions.
+- **Grace Period Dynamics**:
+  - Operational buffer between license expiration and hard service shutoff, exposed in `VerificationResult`.
+- **Background Daemon Manager (`Manager`)**:
+  - Thread-safe background monitoring, hot-reloading from files/environment, and proactive warning callbacks.
+- **Zero-Dependency Ed25519 Core**:
+  - Asymmetric Ed25519 cryptography using Go standard library exclusively.
+  - Compact `DIV1.<payload>.<sig>` tokens and armored PEM block encoding.
+- **Standalone CLI Toolkit (`license-cli`)**:
+  - Subcommands for `keygen`, `issue`, `verify`, `inspect`, and `keyring` bundle inspection.
+
