@@ -602,16 +602,70 @@ func (v *Validator) VerifyFromFile(filePath string) (*Claims, error) {
 	return v.Verify(string(data))
 }
 
+func (v *Validator) effectiveBuildDate() time.Time {
+	return v.effectiveBuildDateWithProv(nil)
+}
+
+func (v *Validator) effectiveBuildDateWithProv(prov *ReleaseProvenance) time.Time {
+	if !v.buildDate.IsZero() {
+		return v.buildDate
+	}
+	if prov != nil && prov.Attested && prov.Claims != nil {
+		if !prov.Claims.BuildDate.IsZero() {
+			return prov.Claims.BuildDate
+		}
+		if !prov.Claims.ReleaseDate.IsZero() {
+			return prov.Claims.ReleaseDate
+		}
+	}
+	if !IsPlaceholderAttestation(v.releaseAttestation) {
+		if p, err := v.EvaluateProvenance(); err == nil && p != nil && p.Attested && p.Claims != nil {
+			if !p.Claims.BuildDate.IsZero() {
+				return p.Claims.BuildDate
+			}
+			if !p.Claims.ReleaseDate.IsZero() {
+				return p.Claims.ReleaseDate
+			}
+		}
+	}
+	return time.Time{}
+}
+
 // resolveEvaluationTime reconciles the local reference time with any configured authoritative time,
 // detecting forward and backward clock tampering attempts while respecting clock drift boundaries.
 func (v *Validator) resolveEvaluationTime(localNow time.Time) (evalTime time.Time, tampered bool, skew time.Duration, err error) {
+	return v.resolveEvaluationTimeWithProv(localNow, nil)
+}
+
+func (v *Validator) resolveEvaluationTimeWithProv(localNow time.Time, prov *ReleaseProvenance) (evalTime time.Time, tampered bool, skew time.Duration, err error) {
 	evalTime = localNow
+	localUTC := localNow.UTC()
+
+	buildTime := v.effectiveBuildDateWithProv(prov)
+	skewTolerance := v.clockSkew
+	if skewTolerance < 0 {
+		skewTolerance = 0
+	}
+
 	if v.authoritativeTime.IsZero() {
+		// Offline / air-gapped clock defense: local evaluation time cannot be physically prior to binary build date
+		if !buildTime.IsZero() {
+			earliest := buildTime.Add(-skewTolerance)
+			if localUTC.Before(earliest) {
+				drift := buildTime.Sub(localUTC)
+				return localNow, true, drift, &ClockTamperingError{
+					LocalTime:      localUTC,
+					ServerTime:     buildTime.UTC(),
+					Skew:           drift,
+					MaxAllowedSkew: skewTolerance,
+					Reason:         fmt.Sprintf("offline backward clock tampering detected: evaluation time %s is physically prior to binary build date %s", localUTC.Format(time.RFC3339), buildTime.UTC().Format(time.RFC3339)),
+				}
+			}
+		}
 		return evalTime, false, 0, nil
 	}
 
 	authTime := v.authoritativeTime.UTC()
-	localUTC := localNow.UTC()
 
 	drift := localUTC.Sub(authTime)
 	skew = drift
@@ -666,7 +720,22 @@ func (v *Validator) resolveEvaluationTime(localNow time.Time) (evalTime time.Tim
 		evalTime = authTime
 	}
 
-	return evalTime, false, skew, nil
+	// 4. Binary Build Date check: evaluation time cannot be physically prior to binary build date
+	if !buildTime.IsZero() {
+		earliest := buildTime.Add(-skewTolerance)
+		if evalTime.Before(earliest) {
+			drift := buildTime.Sub(evalTime)
+			return evalTime, true, drift, &ClockTamperingError{
+				LocalTime:      localUTC,
+				ServerTime:     buildTime.UTC(),
+				Skew:           drift,
+				MaxAllowedSkew: skewTolerance,
+				Reason:         fmt.Sprintf("backward clock tampering detected: evaluation time %s is physically prior to binary build date %s", evalTime.UTC().Format(time.RFC3339), buildTime.UTC().Format(time.RFC3339)),
+			}
+		}
+	}
+
+	return evalTime, tampered, skew, nil
 }
 
 // VerifyWithResultEnv resolves the license automatically from standard environment variables
@@ -753,6 +822,26 @@ func (v *Validator) verifyClaims(payloadJSON []byte, now time.Time) (*Claims, er
 }
 
 func (v *Validator) verifyClaimsWithDetails(payloadJSON []byte, now time.Time) (*Claims, *MachineFingerprint, bool, error) {
+	// 1. Backward clock tampering check against binary build date
+	buildTime := v.effectiveBuildDate()
+	if !buildTime.IsZero() {
+		skewTolerance := v.clockSkew
+		if skewTolerance < 0 {
+			skewTolerance = 0
+		}
+		earliest := buildTime.Add(-skewTolerance)
+		if now.Before(earliest) {
+			drift := buildTime.Sub(now)
+			return nil, nil, false, &ClockTamperingError{
+				LocalTime:      now.UTC(),
+				ServerTime:     buildTime.UTC(),
+				Skew:           drift,
+				MaxAllowedSkew: skewTolerance,
+				Reason:         fmt.Sprintf("backward clock tampering detected: evaluation time %s is physically prior to binary build date %s", now.UTC().Format(time.RFC3339), buildTime.UTC().Format(time.RFC3339)),
+			}
+		}
+	}
+
 	// 2. Decode claims
 	var claims Claims
 	if err := json.Unmarshal(payloadJSON, &claims); err != nil {
@@ -1085,7 +1174,7 @@ func (v *Validator) VerifyWithResultAt(rawLicense string, now time.Time) (*Verif
 		return nil, err
 	}
 
-	evalTime, tampered, skew, err := v.resolveEvaluationTime(now)
+	evalTime, tampered, skew, err := v.resolveEvaluationTimeWithProv(now, prov)
 	if err != nil {
 		return nil, err
 	}
@@ -1322,7 +1411,7 @@ func (v *Validator) EvaluateBSLEntitlement(req BSLUsageRequest) (*BSLEntitlement
 		evalTime = time.Now()
 	}
 
-	evalTime, _, _, err = v.resolveEvaluationTime(evalTime)
+	evalTime, _, _, err = v.resolveEvaluationTimeWithProv(evalTime, prov)
 	if err != nil {
 		return nil, err
 	}

@@ -167,10 +167,18 @@ func TestPerpetualLicense_MaintenanceCutoffDate(t *testing.T) {
 		t.Errorf("expected IsMaintenanceActiveAt to be true")
 	}
 
-	// 2. Binary built in March 2027 (after maintenance window expired) -> FAIL with ErrMaintenanceExpired
+	// 2. Binary built in March 2027 (after maintenance window expired)
 	buildMarch2027 := time.Date(2027, time.March, 1, 10, 0, 0, 0, time.UTC)
 	valExpired, _ := license.NewValidator(pub, license.WithBuildDate(buildMarch2027))
-	_, err = valExpired.Verify(token)
+
+	// 2a. Offline execution prior to binary build date -> FAIL with ErrClockTamperingDetected
+	_, err = valExpired.VerifyAt(token, time.Date(2026, time.September, 1, 0, 0, 0, 0, time.UTC))
+	if !errors.Is(err, license.ErrClockTamperingDetected) {
+		t.Fatalf("expected ErrClockTamperingDetected for offline evaluation prior to build date, got: %v", err)
+	}
+
+	// 2b. Execution at/after binary build date -> FAIL with ErrMaintenanceExpired
+	_, err = valExpired.VerifyAt(token, buildMarch2027.Add(24*time.Hour))
 	if !errors.Is(err, license.ErrMaintenanceExpired) {
 		t.Fatalf("expected ErrMaintenanceExpired for binary built after maintenance cutoff, got: %v", err)
 	}
@@ -187,6 +195,7 @@ func TestPerpetualLicense_CombinedVersionAndMaintenance(t *testing.T) {
 		Customer:             license.Customer{Name: "Airgapped Finance"},
 		MaxVersion:           "1.*",
 		MaintenanceExpiresAt: maintenanceCutoff,
+		// ExpiresAt zero -> perpetual runtime
 	})
 	if err != nil {
 		t.Fatalf("Sign failed: %v", err)
@@ -212,11 +221,20 @@ func TestPerpetualLicense_CombinedVersionAndMaintenance(t *testing.T) {
 	}
 
 	// Valid version (v1.5.0) but built after maintenance cutoff -> FAILS on maintenance
+	buildAugust2027 := time.Date(2027, time.August, 1, 0, 0, 0, 0, time.UTC)
 	val3, _ := license.NewValidator(pub,
 		license.WithCurrentVersion("1.5.0"),
-		license.WithBuildDate(time.Date(2027, time.August, 1, 0, 0, 0, 0, time.UTC)),
+		license.WithBuildDate(buildAugust2027),
 	)
-	_, err = val3.Verify(token)
+
+	// Offline execution prior to build date -> FAILS with ErrClockTamperingDetected
+	_, err = val3.VerifyAt(token, time.Date(2026, time.September, 1, 0, 0, 0, 0, time.UTC))
+	if !errors.Is(err, license.ErrClockTamperingDetected) {
+		t.Fatalf("expected ErrClockTamperingDetected for offline evaluation prior to build date, got: %v", err)
+	}
+
+	// Execution at/after build date -> FAILS on maintenance cutoff
+	_, err = val3.VerifyAt(token, buildAugust2027.Add(24*time.Hour))
 	if !errors.Is(err, license.ErrMaintenanceExpired) {
 		t.Fatalf("expected ErrMaintenanceExpired, got: %v", err)
 	}

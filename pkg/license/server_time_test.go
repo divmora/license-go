@@ -316,3 +316,287 @@ func TestValidator_WithServerTimeHeader(t *testing.T) {
 		t.Fatalf("expected ErrClockTamperingDetected for invalid date header, got %v", err)
 	}
 }
+
+func TestValidator_OfflineBackwardClockTampering_BuildDate(t *testing.T) {
+	pub, priv, err := GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("GenerateKeyPair failed: %v", err)
+	}
+	signer, err := NewSigner(priv)
+	if err != nil {
+		t.Fatalf("NewSigner failed: %v", err)
+	}
+
+	buildDate := time.Date(2026, time.June, 1, 12, 0, 0, 0, time.UTC)
+	issuedAt := time.Date(2026, time.June, 1, 0, 0, 0, 0, time.UTC)
+	expiresAt := time.Date(2026, time.December, 31, 23, 59, 59, 0, time.UTC)
+
+	token, err := signer.Sign(Claims{
+		Customer:  Customer{Name: "Acme Airgap"},
+		Product:   "gitlab-fleet-governor",
+		IssuedAt:  issuedAt,
+		ExpiresAt: expiresAt,
+	})
+	if err != nil {
+		t.Fatalf("Sign failed: %v", err)
+	}
+
+	v, err := NewValidator(pub,
+		WithProduct("gitlab-fleet-governor"),
+		WithBuildDate(buildDate),
+		WithClockSkew(5*time.Minute),
+	)
+	if err != nil {
+		t.Fatalf("NewValidator failed: %v", err)
+	}
+
+	// 1. Local clock is set prior to binary build date (e.g. 2025-01-01) -> MUST FAIL with ErrClockTamperingDetected
+	tamperedTime := time.Date(2025, time.January, 1, 0, 0, 0, 0, time.UTC)
+	_, err = v.VerifyAt(token, tamperedTime)
+	if !errors.Is(err, ErrClockTamperingDetected) {
+		t.Fatalf("expected ErrClockTamperingDetected when evaluating prior to build date, got: %v", err)
+	}
+
+	var clockErr *ClockTamperingError
+	if !errors.As(err, &clockErr) {
+		t.Fatalf("expected error to be *ClockTamperingError, got: %T", err)
+	}
+	if !clockErr.ServerTime.Equal(buildDate) {
+		t.Errorf("expected ServerTime anchor to be build date %v, got %v", buildDate, clockErr.ServerTime)
+	}
+	if clockErr.Skew <= 0 {
+		t.Errorf("expected positive skew drift, got %v", clockErr.Skew)
+	}
+	if clockErr.MaxAllowedSkew != 5*time.Minute {
+		t.Errorf("expected MaxAllowedSkew 5m, got %v", clockErr.MaxAllowedSkew)
+	}
+
+	// 2. VerifyWithResultAt also rejects with ErrClockTamperingDetected
+	_, err = v.VerifyWithResultAt(token, tamperedTime)
+	if !errors.Is(err, ErrClockTamperingDetected) {
+		t.Fatalf("expected VerifyWithResultAt to reject with ErrClockTamperingDetected, got: %v", err)
+	}
+
+	// 3. Legitimate evaluation time after build date -> SUCCESS
+	legitTime := time.Date(2026, time.July, 15, 12, 0, 0, 0, time.UTC)
+	res, err := v.VerifyWithResultAt(token, legitTime)
+	if err != nil {
+		t.Fatalf("expected legitimate verification after build date to succeed, got: %v", err)
+	}
+	if res.Status != StatusActive {
+		t.Errorf("expected StatusActive, got %v", res.Status)
+	}
+}
+
+func TestValidator_OfflineBackwardClockTampering_ClockSkewTolerance(t *testing.T) {
+	pub, priv, err := GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("GenerateKeyPair failed: %v", err)
+	}
+	signer, err := NewSigner(priv)
+	if err != nil {
+		t.Fatalf("NewSigner failed: %v", err)
+	}
+
+	buildDate := time.Date(2026, time.June, 1, 12, 0, 0, 0, time.UTC)
+	token, err := signer.Sign(Claims{
+		Customer:  Customer{Name: "Acme Corp"},
+		Product:   "gitlab-fleet-governor",
+		ExpiresAt: time.Date(2027, time.January, 1, 0, 0, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatalf("Sign failed: %v", err)
+	}
+
+	v, err := NewValidator(pub,
+		WithProduct("gitlab-fleet-governor"),
+		WithBuildDate(buildDate),
+		WithClockSkew(10*time.Minute),
+	)
+	if err != nil {
+		t.Fatalf("NewValidator failed: %v", err)
+	}
+
+	// Evaluation time is 8 minutes prior to build date (within 10m skew) -> ALLOWED
+	withinSkewTime := buildDate.Add(-8 * time.Minute)
+	if _, err := v.VerifyAt(token, withinSkewTime); err != nil {
+		t.Fatalf("expected evaluation within clock skew tolerance to succeed, got: %v", err)
+	}
+
+	// Evaluation time is 12 minutes prior to build date (exceeds 10m skew) -> REJECTED
+	beyondSkewTime := buildDate.Add(-12 * time.Minute)
+	_, err = v.VerifyAt(token, beyondSkewTime)
+	if !errors.Is(err, ErrClockTamperingDetected) {
+		t.Fatalf("expected ErrClockTamperingDetected when exceeding clock skew before build date, got: %v", err)
+	}
+}
+
+func TestValidator_OfflineBackwardClockTampering_ReleaseAttestation(t *testing.T) {
+	pub, priv, err := GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("GenerateKeyPair failed: %v", err)
+	}
+	signer, err := NewSigner(priv)
+	if err != nil {
+		t.Fatalf("NewSigner failed: %v", err)
+	}
+
+	attestationBuildDate := time.Date(2026, time.June, 1, 12, 0, 0, 0, time.UTC)
+	attestationToken, err := SignRelease(ReleaseClaims{
+		Product:   "gitlab-fleet-governor",
+		Version:   "1.5.0",
+		BuildDate: attestationBuildDate,
+		Authority: "divmora.com/release",
+	}, priv)
+	if err != nil {
+		t.Fatalf("SignRelease failed: %v", err)
+	}
+
+	token, err := signer.Sign(Claims{
+		Customer:  Customer{Name: "Airgap Military"},
+		Product:   "gitlab-fleet-governor",
+		ExpiresAt: time.Date(2027, time.January, 1, 0, 0, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatalf("Sign failed: %v", err)
+	}
+
+	// Validator has NO explicit WithBuildDate, but has WithReleaseAttestation
+	v, err := NewValidator(pub,
+		WithProduct("gitlab-fleet-governor"),
+		WithCurrentVersion("1.5.0"),
+		WithReleaseAttestation(attestationToken),
+	)
+	if err != nil {
+		t.Fatalf("NewValidator failed: %v", err)
+	}
+
+	// 1. Clock tampered prior to attested build date -> REJECT
+	tamperedTime := time.Date(2025, time.December, 1, 0, 0, 0, 0, time.UTC)
+	_, err = v.VerifyAt(token, tamperedTime)
+	if !errors.Is(err, ErrClockTamperingDetected) {
+		t.Fatalf("expected ErrClockTamperingDetected anchored to attested build date, got: %v", err)
+	}
+
+	// 2. Legitimate clock after attested build date -> PASS
+	legitTime := time.Date(2026, time.July, 1, 0, 0, 0, 0, time.UTC)
+	res, err := v.VerifyWithResultAt(token, legitTime)
+	if err != nil {
+		t.Fatalf("expected successful verification after attested build date, got: %v", err)
+	}
+	if res.Provenance == nil || !res.Provenance.Attested {
+		t.Errorf("expected Provenance.Attested == true")
+	}
+}
+
+func TestValidator_BSLEntitlement_OfflineBackwardClockTampering(t *testing.T) {
+	pub, _, err := GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("GenerateKeyPair failed: %v", err)
+	}
+
+	buildDate := time.Date(2026, time.June, 1, 12, 0, 0, 0, time.UTC)
+	policy := BSLPolicy{
+		Product:           "gitlab-fleet-governor",
+		ReleaseDate:       buildDate,
+		ChangePeriodYears: 3,
+		AdditionalUseGrants: []BSLAdditionalUseGrant{
+			{
+				Name:                "Non-Production Testing",
+				AllowedEnvironments: []string{"test"},
+			},
+		},
+	}
+
+	v, err := NewValidator(pub,
+		WithProduct("gitlab-fleet-governor"),
+		WithBSLPolicy(policy),
+		WithBuildDate(buildDate),
+	)
+	if err != nil {
+		t.Fatalf("NewValidator failed: %v", err)
+	}
+
+	// Request with evaluation time prior to binary build date -> REJECT with ErrClockTamperingDetected
+	_, err = v.EvaluateBSLEntitlement(BSLUsageRequest{
+		Environment: "test",
+		Time:        time.Date(2025, time.January, 1, 0, 0, 0, 0, time.UTC),
+	})
+	if !errors.Is(err, ErrClockTamperingDetected) {
+		t.Fatalf("expected ErrClockTamperingDetected for BSL request prior to build date, got: %v", err)
+	}
+
+	// Request after build date -> SUCCESS
+	ent, err := v.EvaluateBSLEntitlement(BSLUsageRequest{
+		Environment: "test",
+		Time:        time.Date(2026, time.June, 15, 0, 0, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatalf("expected successful BSL evaluation after build date, got: %v", err)
+	}
+	if !ent.Authorized {
+		t.Errorf("expected entitlement to be authorized under test grant")
+	}
+}
+
+func TestValidator_OnlineFallback_WhenLocalClockPriorToBuildDate(t *testing.T) {
+	pub, priv, err := GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("GenerateKeyPair failed: %v", err)
+	}
+	signer, err := NewSigner(priv)
+	if err != nil {
+		t.Fatalf("NewSigner failed: %v", err)
+	}
+
+	buildDate := time.Date(2026, time.June, 1, 12, 0, 0, 0, time.UTC)
+	authoritativeServerTime := time.Date(2026, time.June, 15, 12, 0, 0, 0, time.UTC)
+	tamperedHostClock := time.Date(2025, time.January, 1, 0, 0, 0, 0, time.UTC)
+
+	token, err := signer.Sign(Claims{
+		Customer:  Customer{Name: "Hybrid Cloud Corp"},
+		Product:   "gitlab-fleet-governor",
+		ExpiresAt: time.Date(2027, time.January, 1, 0, 0, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatalf("Sign failed: %v", err)
+	}
+
+	// 1. Non-strict mode: detects clock tampering, falls back to trusted server time, succeeds
+	vPermissive, err := NewValidator(pub,
+		WithProduct("gitlab-fleet-governor"),
+		WithBuildDate(buildDate),
+		WithAuthoritativeTime(authoritativeServerTime),
+		WithStrictClockDefense(false),
+	)
+	if err != nil {
+		t.Fatalf("NewValidator failed: %v", err)
+	}
+
+	res, err := vPermissive.VerifyWithResultAt(token, tamperedHostClock)
+	if err != nil {
+		t.Fatalf("expected non-strict validator to succeed by falling back to server time, got: %v", err)
+	}
+	if !res.ClockTampered {
+		t.Errorf("expected res.ClockTampered to be true")
+	}
+	if !res.EvaluationTime.Equal(authoritativeServerTime) {
+		t.Errorf("expected EvaluationTime to be server time %v, got %v", authoritativeServerTime, res.EvaluationTime)
+	}
+
+	// 2. Strict mode: rejects immediately with ErrClockTamperingDetected
+	vStrict, err := NewValidator(pub,
+		WithProduct("gitlab-fleet-governor"),
+		WithBuildDate(buildDate),
+		WithAuthoritativeTime(authoritativeServerTime),
+		WithStrictClockDefense(true),
+	)
+	if err != nil {
+		t.Fatalf("NewValidator failed: %v", err)
+	}
+
+	_, err = vStrict.VerifyWithResultAt(token, tamperedHostClock)
+	if !errors.Is(err, ErrClockTamperingDetected) {
+		t.Fatalf("expected strict validator to reject with ErrClockTamperingDetected, got: %v", err)
+	}
+}
