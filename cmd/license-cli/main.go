@@ -1,12 +1,14 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -45,6 +47,10 @@ func main() {
 		err = runVerifyRelease(args)
 	case "inspect-release":
 		err = runInspectRelease(args)
+	case "fingerprint":
+		err = runFingerprint(args)
+	case "request":
+		err = runRequest(args)
 	case "help", "-h", "--help", "-help":
 		printUsage()
 		return
@@ -77,6 +83,8 @@ Available Commands:
   sign-release    Mint a cryptographic release attestation token (DIVREL1)
   verify-release  Verify binary release attestation and SHA-256 checksum
   inspect-release Decode and inspect release attestation claims
+  fingerprint     Inspect deterministic machine/cluster hardware fingerprint
+  request         Generate air-gapped license request (.divreq) for offline nodes
   help            Display help information
 
 Use "license-cli <command> -help" for more information about a command.`)
@@ -145,19 +153,41 @@ func runIssue(args []string) error {
 	maxVersion := fs.String("max-version", "", "Maximum authorized software version for perpetual license (e.g. '1.*', '2.4.0')")
 	allowedVersionsFlag := fs.String("allowed-versions", "", "Comma-separated authorized versions or patterns (e.g. '1.*,2.0.*')")
 	maintenanceDays := fs.Int("maintenance-days", 0, "Maintenance/update entitlement duration in days from issue date")
+	reqPath := fs.String("request", "", "Path to air-gapped license request file (.divreq or PEM) to fulfill")
 
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+
+	var licReq *license.LicenseRequest
+	if *reqPath != "" {
+		parsed, err := license.ParseLicenseRequestFile(*reqPath)
+		if err != nil {
+			return fmt.Errorf("failed to load license request from %s: %w", *reqPath, err)
+		}
+		licReq = parsed
+		if *customer == "" {
+			*customer = licReq.Customer
+		}
+		if *product == "" {
+			*product = licReq.Product
+		}
+		if *plan == "enterprise" && licReq.Plan != "" {
+			*plan = licReq.Plan
+		}
+		if *fingerprint == "" && licReq.Fingerprint.Primary != "" {
+			*fingerprint = licReq.Fingerprint.Primary
+		}
 	}
 
 	if *privKeyPath == "" {
 		return fmt.Errorf("-private-key is required")
 	}
 	if *product == "" {
-		return fmt.Errorf("-product is required")
+		return fmt.Errorf("-product is required (or provide -request)")
 	}
 	if *customer == "" {
-		return fmt.Errorf("-customer is required")
+		return fmt.Errorf("-customer is required (or provide -request)")
 	}
 
 	var signerOpts []license.SignerOption
@@ -184,6 +214,8 @@ func runIssue(args []string) error {
 				features = append(features, f)
 			}
 		}
+	} else if licReq != nil && len(licReq.RequestedFeatures) > 0 {
+		features = licReq.RequestedFeatures
 	}
 
 	limits := make(map[string]int64)
@@ -197,6 +229,10 @@ func runIssue(args []string) error {
 				}
 				limits[strings.TrimSpace(parts[0])] = val
 			}
+		}
+	} else if licReq != nil && len(licReq.RequestedLimits) > 0 {
+		for k, v := range licReq.RequestedLimits {
+			limits[k] = v
 		}
 	}
 
@@ -1223,5 +1259,171 @@ func runBSLEval(args []string) error {
 	if !result.Authorized {
 		return fmt.Errorf("commercial license required under BSL 1.1 terms: %s", result.Reason)
 	}
+	return nil
+}
+
+func runFingerprint(args []string) error {
+	fs := flag.NewFlagSet("fingerprint", flag.ExitOnError)
+	platform := fs.String("platform", "auto", "Target platform resolver: auto, host, aws, k8s")
+	asJSON := fs.Bool("json", false, "Output machine fingerprint in JSON format")
+	quiet := fs.Bool("quiet", false, "Output only the primary fingerprint string (for scripts)")
+
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	var resolver license.FingerprintResolver
+	switch strings.ToLower(*platform) {
+	case "auto":
+		resolver = license.NewDefaultCompositeResolver()
+	case "host":
+		resolver = license.NewHostResolver()
+	case "aws", "aws-ec2", "ec2":
+		resolver = license.NewAWSEC2Resolver()
+	case "k8s", "kubernetes":
+		resolver = license.NewKubernetesResolver()
+	default:
+		return fmt.Errorf("unknown platform %q; valid values are: auto, host, aws, k8s", *platform)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	fp, err := resolver.Resolve(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to resolve machine fingerprint: %w", err)
+	}
+
+	if *quiet {
+		fmt.Println(fp.Primary)
+		return nil
+	}
+
+	if *asJSON {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(fp)
+	}
+
+	fmt.Println(strings.Repeat("=", 72))
+	fmt.Println("                       MACHINE FINGERPRINT")
+	fmt.Println(strings.Repeat("=", 72))
+	fmt.Printf("  %-20s %s\n", "Primary ID:", fp.Primary)
+	fmt.Printf("  %-20s %s\n", "Platform:", fp.Platform)
+	fmt.Printf("  %-20s %s\n", "Short Digest:", fp.ShortDigest)
+	fmt.Printf("  %-20s %s\n", "Canonical Digest:", fp.CanonicalDigest)
+	fmt.Printf("  %-20s %s\n", "Resolved At:", fp.ResolvedAt.Format(time.RFC3339))
+
+	if len(fp.Components) > 0 {
+		fmt.Println("\nHARDWARE & SYSTEM COMPONENTS:")
+		var keys []string
+		for k := range fp.Components {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			fmt.Printf("  • %-20s %s\n", k+":", fp.Components[k])
+		}
+	}
+	fmt.Println(strings.Repeat("=", 72))
+	return nil
+}
+
+func runRequest(args []string) error {
+	fs := flag.NewFlagSet("request", flag.ExitOnError)
+	customer := fs.String("customer", "", "Licensee / Customer name (required)")
+	product := fs.String("product", "", "Product name e.g. gitlab-fleet-governor (required)")
+	plan := fs.String("plan", "enterprise", "Requested license tier: starter, pro, enterprise")
+	platform := fs.String("platform", "auto", "Hardware resolver platform: auto, host, aws, k8s")
+	limitsFlag := fs.String("limits", "", "Comma-separated requested limits in key=val format (e.g. 'runners=50,users=100')")
+	featuresFlag := fs.String("features", "", "Comma-separated requested features (e.g. 'sso,audit-logs')")
+	notes := fs.String("notes", "", "Optional deployment notes or request context")
+	outFile := fs.String("out", "", "Output file path (default: stdout, e.g. 'request.divreq')")
+	asJSON := fs.Bool("json", false, "Output raw JSON instead of armored PEM block")
+
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	if *customer == "" {
+		return fmt.Errorf("-customer is required")
+	}
+	if *product == "" {
+		return fmt.Errorf("-product is required")
+	}
+
+	var resolver license.FingerprintResolver
+	switch strings.ToLower(*platform) {
+	case "auto":
+		resolver = license.NewDefaultCompositeResolver()
+	case "host":
+		resolver = license.NewHostResolver()
+	case "aws", "aws-ec2", "ec2":
+		resolver = license.NewAWSEC2Resolver()
+	case "k8s", "kubernetes":
+		resolver = license.NewKubernetesResolver()
+	default:
+		return fmt.Errorf("unknown platform %q; valid values are: auto, host, aws, k8s", *platform)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	fp, err := resolver.Resolve(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to resolve machine fingerprint: %w", err)
+	}
+
+	req := license.NewLicenseRequest(*customer, *product, *fp)
+	req.Plan = *plan
+	req.Notes = *notes
+
+	if *featuresFlag != "" {
+		for _, f := range strings.Split(*featuresFlag, ",") {
+			f = strings.TrimSpace(f)
+			if f != "" {
+				req.RequestedFeatures = append(req.RequestedFeatures, f)
+			}
+		}
+	}
+
+	if *limitsFlag != "" {
+		req.RequestedLimits = make(map[string]int64)
+		for _, item := range strings.Split(*limitsFlag, ",") {
+			parts := strings.SplitN(strings.TrimSpace(item), "=", 2)
+			if len(parts) == 2 {
+				val, err := strconv.ParseInt(strings.TrimSpace(parts[1]), 10, 64)
+				if err != nil {
+					return fmt.Errorf("invalid limit value in %q: %w", item, err)
+				}
+				req.RequestedLimits[strings.TrimSpace(parts[0])] = val
+			}
+		}
+	}
+
+	var outBytes []byte
+	if *asJSON {
+		outBytes, err = json.MarshalIndent(req, "", "  ")
+		if err != nil {
+			return fmt.Errorf("failed to encode JSON: %w", err)
+		}
+		outBytes = append(outBytes, '\n')
+	} else {
+		outBytes, err = req.Armored()
+		if err != nil {
+			return fmt.Errorf("failed to format armored request: %w", err)
+		}
+	}
+
+	if *outFile != "" {
+		if err := os.WriteFile(*outFile, outBytes, 0644); err != nil {
+			return fmt.Errorf("failed to write request file %s: %w", *outFile, err)
+		}
+		fmt.Printf("✓ Successfully generated air-gapped license request -> %s\n", *outFile)
+		fmt.Printf("  Primary Fingerprint: %s (%s)\n", fp.Primary, fp.Platform)
+	} else {
+		fmt.Print(string(outBytes))
+	}
+
 	return nil
 }
