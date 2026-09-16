@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.6.0](https://github.com/divmora/license-go/compare/v0.5.0...v0.6.0) (2026-09-16)
+
+
+### Features
+
+* add BSL 1.1 Additional Use Grant evaluator and bsl-eval CLI command ([b884de0](https://github.com/divmora/license-go/commit/b884de00a2c1770ecf95f8ac3f009864ba16fb40))
+* add cryptographic release attestation and provenance engine ([fe37115](https://github.com/divmora/license-go/commit/fe37115d2a2bc40f4352611d19fd53400260e003))
+* add standardized CLI license status formatter and license-cli status command ([55bf0e8](https://github.com/divmora/license-go/commit/55bf0e83fb36ef7b3cc124caf7a160eda9bce515))
+
 ## [0.5.0](https://github.com/divmora/license-go/compare/v0.4.0...v0.5.0) (2026-09-16)
 
 
