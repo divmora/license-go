@@ -21,7 +21,8 @@ license-go/
 │       ├── keys_test.go        # Key generation & PEM round-trip tests
 │       ├── keyring_test.go     # KeyRing rotation, revocation & multi-key tests
 │       ├── license_test.go     # Signing, verification, tampering, expiration tests
-│       └── manager_test.go     # Background daemon lifecycle & hot-reloading tests
+│       ├── manager_test.go     # Background daemon lifecycle & hot-reloading tests
+│       └── version_test.go     # Perpetual license version lock & maintenance cutoff tests
 ├── cmd/
 │   └── license-cli/            # Standalone CLI binary (keygen, issue, verify, inspect)
 │       └── main.go
@@ -43,6 +44,8 @@ license-go/
   4. Product identity match
   5. Machine/cluster fingerprint match (if applicable)
   6. NotBefore & Expiration checks (accounting for clock skew and grace periods)
+  7. Scope constraints check (environments, accounts, regions, clusters, namespaces, hosts)
+  8. Version constraints check (`MaxVersion` / `AllowedVersions`) and maintenance cutoff (`MaintenanceExpiresAt`)
 
 ---
 

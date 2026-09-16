@@ -28,6 +28,8 @@ type Validator struct {
 	currentNamespace    string
 	currentHost         string
 	currentCustomScope  map[string]string
+	currentVersion      string
+	buildDate           time.Time
 	allowExpired        bool
 	allowInactive       bool
 }
@@ -119,6 +121,20 @@ func WithCurrentCustomScope(dimension, value string) ValidatorOption {
 			v.currentCustomScope = make(map[string]string)
 		}
 		v.currentCustomScope[dimension] = value
+	}
+}
+
+// WithCurrentVersion asserts that the running software version satisfies the license version constraints (MaxVersion / AllowedVersions).
+func WithCurrentVersion(version string) ValidatorOption {
+	return func(v *Validator) {
+		v.currentVersion = strings.TrimSpace(version)
+	}
+}
+
+// WithBuildDate asserts that the binary build/release date is within the license maintenance window (MaintenanceExpiresAt).
+func WithBuildDate(buildDate time.Time) ValidatorOption {
+	return func(v *Validator) {
+		v.buildDate = buildDate
 	}
 }
 
@@ -370,6 +386,23 @@ func (v *Validator) verifyClaims(payloadJSON []byte, now time.Time) (*Claims, er
 	// 7. Scope constraints check
 	if err := v.checkScope(&claims); err != nil {
 		return nil, err
+	}
+
+	// 8. Version constraints check
+	if v.currentVersion != "" && !claims.IsVersionAllowed(v.currentVersion) {
+		return nil, &VersionNotEntitledError{
+			CurrentVersion: v.currentVersion,
+			MaxVersion:     claims.MaxVersion,
+			Allowed:        claims.AllowedVersions,
+		}
+	}
+
+	// 9. Maintenance / Support update cutoff check
+	if !v.buildDate.IsZero() && claims.HasMaintenanceExpired(v.buildDate) {
+		return nil, &MaintenanceExpiredError{
+			BuildDate:            v.buildDate.Format(time.RFC3339),
+			MaintenanceExpiresAt: claims.MaintenanceExpiresAt.Format(time.RFC3339),
+		}
 	}
 
 	return &claims, nil

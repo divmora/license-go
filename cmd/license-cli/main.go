@@ -125,6 +125,9 @@ func runIssue(args []string) error {
 	armored := fs.Bool("armored", true, "Output license in armored text format (default: true)")
 	outFile := fs.String("out", "", "Output file path (default: stdout)")
 	kid := fs.String("kid", "", "Optional Key ID or descriptor to embed in token claims (e.g. 'divmora-2026-root')")
+	maxVersion := fs.String("max-version", "", "Maximum authorized software version for perpetual license (e.g. '1.*', '2.4.0')")
+	allowedVersionsFlag := fs.String("allowed-versions", "", "Comma-separated authorized versions or patterns (e.g. '1.*,2.0.*')")
+	maintenanceDays := fs.Int("maintenance-days", 0, "Maintenance/update entitlement duration in days from issue date")
 
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -223,22 +226,30 @@ func runIssue(args []string) error {
 		}
 	}
 
+	var maintenanceExpiresAt time.Time
+	if *maintenanceDays > 0 {
+		maintenanceExpiresAt = now.Add(time.Duration(*maintenanceDays) * 24 * time.Hour)
+	}
+
 	claims := license.Claims{
 		Customer: license.Customer{
 			Name:  *customer,
 			Email: *email,
 			OrgID: *orgID,
 		},
-		Product:         *product,
-		Plan:            *plan,
-		IssuedAt:        now,
-		ExpiresAt:       expiresAt,
-		GracePeriodDays: *graceDays,
-		Features:        features,
-		Limits:          limits,
-		Scope:           scope,
-		Fingerprint:     *fingerprint,
-		Metadata:        meta,
+		Product:              *product,
+		Plan:                 *plan,
+		IssuedAt:             now,
+		ExpiresAt:            expiresAt,
+		GracePeriodDays:      *graceDays,
+		Features:             features,
+		Limits:               limits,
+		Scope:                scope,
+		Fingerprint:          *fingerprint,
+		MaxVersion:           *maxVersion,
+		AllowedVersions:      parseSlice(*allowedVersionsFlag),
+		MaintenanceExpiresAt: maintenanceExpiresAt,
+		Metadata:             meta,
 	}
 
 	var output string
@@ -275,6 +286,8 @@ func runVerify(args []string) error {
 	cluster := fs.String("cluster", "", "Current cluster identifier to assert against Scope.Clusters")
 	namespace := fs.String("namespace", "", "Current project/group namespace to assert against Scope.Namespaces")
 	host := fs.String("host", "", "Current hostname or domain to assert against Scope.Hosts")
+	version := fs.String("version", "", "Current running software version to assert (e.g. '1.2.0')")
+	buildDateFlag := fs.String("build-date", "", "Software binary build/release date to assert against maintenance window (RFC3339 or YYYY-MM-DD)")
 	allowExpired := fs.Bool("allow-expired", false, "Allow signature verification even if license has expired")
 
 	if err := fs.Parse(args); err != nil {
@@ -314,6 +327,19 @@ func runVerify(args []string) error {
 	}
 	if *host != "" {
 		opts = append(opts, license.WithCurrentHost(*host))
+	}
+	if *version != "" {
+		opts = append(opts, license.WithCurrentVersion(*version))
+	}
+	if *buildDateFlag != "" {
+		bDate, err := time.Parse(time.RFC3339, *buildDateFlag)
+		if err != nil {
+			bDate, err = time.Parse("2006-01-02", *buildDateFlag)
+			if err != nil {
+				return fmt.Errorf("invalid -build-date %q: expected RFC3339 (2006-01-02T15:04:05Z07:00) or YYYY-MM-DD", *buildDateFlag)
+			}
+		}
+		opts = append(opts, license.WithBuildDate(bDate))
 	}
 	if *allowExpired {
 		opts = append(opts, license.WithAllowExpired(true))
@@ -381,6 +407,15 @@ func runInspect(args []string) error {
 		fmt.Printf("Validity: EXPIRED on %s\n", claims.ExpiresAt.Format(time.RFC3339))
 	} else {
 		fmt.Printf("Validity: Active (%d days remaining, expires %s)\n", claims.DaysRemaining(), claims.ExpiresAt.Format(time.RFC3339))
+	}
+	if claims.MaxVersion != "" {
+		fmt.Printf("Max Authorized Version: %s\n", claims.MaxVersion)
+	}
+	if len(claims.AllowedVersions) > 0 {
+		fmt.Printf("Allowed Versions: %v\n", claims.AllowedVersions)
+	}
+	if !claims.MaintenanceExpiresAt.IsZero() {
+		fmt.Printf("Maintenance / Updates Cutoff: %s\n", claims.MaintenanceExpiresAt.Format(time.RFC3339))
 	}
 	return nil
 }

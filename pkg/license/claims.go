@@ -2,6 +2,8 @@ package license
 
 import (
 	"path"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -91,6 +93,18 @@ type Claims struct {
 
 	// Fingerprint binds the license to a specific cluster ID, hardware signature, or machine hash.
 	Fingerprint string `json:"fingerprint,omitempty"`
+
+	// MaxVersion defines the maximum authorized software version (e.g., "1.*", "2.4.0", "<=2.5.0").
+	// Constrains perpetual licenses from running unpurchased major upgrades.
+	MaxVersion string `json:"max_version,omitempty"`
+
+	// AllowedVersions defines an explicit allowlist of version patterns (e.g. ["1.*", "2.0.*"]).
+	AllowedVersions []string `json:"allowed_versions,omitempty"`
+
+	// MaintenanceExpiresAt specifies the maintenance/support update cutoff date.
+	// For perpetual licenses, binaries built/released on or before this date are entitled to run forever.
+	// Binaries built after this date require a maintenance renewal.
+	MaintenanceExpiresAt time.Time `json:"maintenance_expires_at,omitempty"`
 
 	// Metadata contains arbitrary key-value custom properties.
 	Metadata map[string]string `json:"metadata,omitempty"`
@@ -561,4 +575,205 @@ func matchesScopeSlice(allowed []string, target string) bool {
 		}
 	}
 	return false
+}
+
+// IsVersionAllowed evaluates whether the given software version is authorized by the license.
+// If neither MaxVersion nor AllowedVersions is specified, all versions are permitted (returns true).
+// If version is empty, it returns false when version constraints are configured.
+func (c *Claims) IsVersionAllowed(version string) bool {
+	v := strings.TrimSpace(version)
+	if c.MaxVersion == "" && len(c.AllowedVersions) == 0 {
+		return true // unconstrained
+	}
+	if v == "" {
+		return false
+	}
+
+	// 1. Check AllowedVersions if configured
+	if len(c.AllowedVersions) > 0 {
+		matched := false
+		for _, pattern := range c.AllowedVersions {
+			if matchVersionPattern(pattern, v) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
+
+	// 2. Check MaxVersion if configured
+	if c.MaxVersion != "" {
+		if !checkMaxVersion(c.MaxVersion, v) {
+			return false
+		}
+	}
+
+	return true
+}
+
+// IsMaintenanceActiveAt reports whether software updates/releases built at buildDate are entitled.
+// If MaintenanceExpiresAt is zero, returns true (no cutoff configured).
+func (c *Claims) IsMaintenanceActiveAt(buildDate time.Time) bool {
+	if c.MaintenanceExpiresAt.IsZero() {
+		return true
+	}
+	if buildDate.IsZero() {
+		return false
+	}
+	return !buildDate.After(c.MaintenanceExpiresAt)
+}
+
+// HasMaintenanceExpired reports whether a build date exceeds the maintenance cutoff.
+func (c *Claims) HasMaintenanceExpired(buildDate time.Time) bool {
+	if c.MaintenanceExpiresAt.IsZero() {
+		return false
+	}
+	if buildDate.IsZero() {
+		return false
+	}
+	return buildDate.After(c.MaintenanceExpiresAt)
+}
+
+// matchVersionPattern checks if a target version matches a pattern.
+// Supported patterns:
+//   - "*" or "all": matches any version
+//   - "1.*", "v1.*", "1.x": matches any minor/patch in major 1
+//   - "1.2.*", "1.2.x": matches any patch in 1.2
+//   - exact match: "1.2.3" or "v1.2.3"
+func matchVersionPattern(pattern, version string) bool {
+	p := cleanVersionString(pattern)
+	v := cleanVersionString(version)
+
+	if p == "*" || p == "all" {
+		return true
+	}
+	if p == v {
+		return true
+	}
+
+	// Convert "x" or "X" to "*"
+	p = strings.ReplaceAll(p, "x", "*")
+	p = strings.ReplaceAll(p, "X", "*")
+
+	if strings.Contains(p, "*") {
+		matched, err := filepath.Match(p, v)
+		if err == nil && matched {
+			return true
+		}
+		// Also handle prefix wildcard matching e.g. "1.*" matching "1.4.2"
+		prefix := strings.TrimSuffix(p, "*")
+		if strings.HasPrefix(v, prefix) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// checkMaxVersion asserts that version does not exceed maxVersion.
+// Supports:
+//   - "<=2.5.0", "<=2.5", "2.5.0"
+//   - "1.*", "1.x" (allows any version with major <= 1)
+func checkMaxVersion(maxVersion, version string) bool {
+	maxClean := cleanVersionString(maxVersion)
+	vClean := cleanVersionString(version)
+
+	maxClean = strings.TrimPrefix(maxClean, "<=")
+	maxClean = strings.TrimSpace(maxClean)
+
+	// If wildcard like "1.*" or "1.x"
+	if strings.ContainsAny(maxClean, "*xX") {
+		pMajor, _, _, pOk := parseSemVer(maxClean)
+		vMajor, _, _, vOk := parseSemVer(vClean)
+		if pOk && vOk {
+			return vMajor <= pMajor
+		}
+	}
+
+	// Direct semver comparison: version <= maxVersion
+	cmp, ok := compareSemVer(vClean, maxClean)
+	if ok {
+		return cmp <= 0
+	}
+
+	// Fallback to exact or pattern match
+	return matchVersionPattern(maxVersion, version)
+}
+
+func cleanVersionString(s string) string {
+	s = strings.TrimSpace(s)
+	s = strings.TrimPrefix(s, "v")
+	s = strings.TrimPrefix(s, "V")
+	return s
+}
+
+// parseSemVer extracts major, minor, patch numbers from a version string.
+func parseSemVer(s string) (major, minor, patch int, ok bool) {
+	s = cleanVersionString(s)
+	// Strip pre-release or build metadata: 1.2.3-rc1 -> 1.2.3
+	if idx := strings.IndexAny(s, "-+"); idx != -1 {
+		s = s[:idx]
+	}
+
+	parts := strings.Split(s, ".")
+	if len(parts) == 0 {
+		return 0, 0, 0, false
+	}
+
+	var err error
+	major, err = strconv.Atoi(parts[0])
+	if err != nil {
+		return 0, 0, 0, false
+	}
+
+	if len(parts) > 1 {
+		minor, err = strconv.Atoi(parts[1])
+		if err != nil {
+			return major, 0, 0, true
+		}
+	}
+
+	if len(parts) > 2 {
+		patch, err = strconv.Atoi(parts[2])
+		if err != nil {
+			return major, minor, 0, true
+		}
+	}
+
+	return major, minor, patch, true
+}
+
+// compareSemVer compares two semver strings:
+// returns -1 if v1 < v2, 0 if v1 == v2, 1 if v1 > v2.
+func compareSemVer(v1, v2 string) (int, bool) {
+	maj1, min1, pat1, ok1 := parseSemVer(v1)
+	maj2, min2, pat2, ok2 := parseSemVer(v2)
+	if !ok1 || !ok2 {
+		return 0, false
+	}
+
+	if maj1 != maj2 {
+		if maj1 < maj2 {
+			return -1, true
+		}
+		return 1, true
+	}
+
+	if min1 != min2 {
+		if min1 < min2 {
+			return -1, true
+		}
+		return 1, true
+	}
+
+	if pat1 != pat2 {
+		if pat1 < pat2 {
+			return -1, true
+		}
+		return 1, true
+	}
+
+	return 0, true
 }

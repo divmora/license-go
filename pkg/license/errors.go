@@ -47,6 +47,12 @@ var (
 
 	// ErrKeyNotFound is returned when a requested Key ID is not found in the KeyRing.
 	ErrKeyNotFound = errors.New("license: key not found in keyring")
+
+	// ErrVersionNotEntitled is returned when the running software version is not authorized by the license.
+	ErrVersionNotEntitled = errors.New("license: software version not entitled")
+
+	// ErrMaintenanceExpired is returned when the running binary release/build date is past the maintenance entitlement period.
+	ErrMaintenanceExpired = errors.New("license: software maintenance/update period has expired")
 )
 
 // LimitExceededError provides structured detail when a quota is exceeded.
@@ -93,4 +99,39 @@ func (e *ScopeMismatchError) Error() string {
 
 func (e *ScopeMismatchError) Is(target error) bool {
 	return target == ErrScopeMismatch
+}
+
+// VersionNotEntitledError provides structured details when a version authorization check fails.
+type VersionNotEntitledError struct {
+	CurrentVersion string
+	MaxVersion     string
+	Allowed        []string
+}
+
+func (e *VersionNotEntitledError) Error() string {
+	if e.MaxVersion != "" {
+		return fmt.Sprintf("license: software version %q is not entitled (maximum authorized version is %q)", e.CurrentVersion, e.MaxVersion)
+	}
+	if len(e.Allowed) > 0 {
+		return fmt.Sprintf("license: software version %q is not entitled (authorized versions: %v)", e.CurrentVersion, e.Allowed)
+	}
+	return fmt.Sprintf("license: software version %q is not entitled under this license", e.CurrentVersion)
+}
+
+func (e *VersionNotEntitledError) Is(target error) bool {
+	return target == ErrVersionNotEntitled
+}
+
+// MaintenanceExpiredError provides structured details when a binary release date exceeds the maintenance cutoff.
+type MaintenanceExpiredError struct {
+	BuildDate            string
+	MaintenanceExpiresAt string
+}
+
+func (e *MaintenanceExpiredError) Error() string {
+	return fmt.Sprintf("license: software build date %s exceeds maintenance cutoff date %s; upgrades not entitled", e.BuildDate, e.MaintenanceExpiresAt)
+}
+
+func (e *MaintenanceExpiredError) Is(target error) bool {
+	return target == ErrMaintenanceExpired
 }

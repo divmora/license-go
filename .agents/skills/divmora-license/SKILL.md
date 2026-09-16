@@ -59,6 +59,9 @@ type Claims struct {
     Scope           *Scope            `json:"scope,omitempty"`     // Infrastructure and operational boundary scoping
     Environment     string            `json:"environment,omitempty"` // "production", "staging"
     Fingerprint     string            `json:"fingerprint,omitempty"` // Optional cluster/hardware binding
+    MaxVersion      string            `json:"max_version,omitempty"` // Max authorized version (e.g. "1.*", "<=2.5.0")
+    AllowedVersions []string          `json:"allowed_versions,omitempty"` // Explicit authorized versions ["1.*", "2.0.*"]
+    MaintenanceExpiresAt time.Time    `json:"maintenance_expires_at,omitempty"` // Cutoff for updates in perpetual licenses
     Metadata        map[string]string `json:"metadata,omitempty"`  // Custom key-value pairs
 }
 ```
@@ -263,6 +266,47 @@ validator, err := license.NewValidatorWithKeyRing(ring)
 
 ---
 
+### Workflow G: Perpetual Licenses with Version Locking & Maintenance Cutoff
+
+Perpetual licenses run indefinitely (`-valid-days 0`), but are usually locked to a maximum authorized major/minor version or a maintenance cutoff date:
+
+```bash
+# Issue perpetual license locked to version 1.* with 365 days of included software updates:
+license-cli issue \
+  -private-key ./private.pem \
+  -customer "Acme Corp" \
+  -product "gitlab-fleet-governor" \
+  -valid-days 0 \
+  -max-version "1.*" \
+  -maintenance-days 365 \
+  -out ./perpetual.key
+```
+
+In the consuming service, configure the current binary version and build timestamp:
+
+```go
+var (
+	// Injected at build time via ldflags:
+	// go build -ldflags "-X main.Version=v1.4.2 -X main.BuildDate=2026-06-15T12:00:00Z"
+	Version   = "v1.4.2"
+	BuildDate = "2026-06-15T12:00:00Z"
+)
+
+func verifyServiceLicense() {
+	bTime, _ := time.Parse(time.RFC3339, BuildDate)
+
+	validator, err := license.NewValidatorFromPEMFile(
+		"/etc/divmora/public.pem",
+		license.WithProduct("gitlab-fleet-governor"),
+		license.WithCurrentVersion(Version), // Rejects if Version > claims.MaxVersion (ErrVersionNotEntitled)
+		license.WithBuildDate(bTime),        // Rejects if bTime > claims.MaintenanceExpiresAt (ErrMaintenanceExpired)
+	)
+	...
+}
+```
+
+---
+
 ## 4. Troubleshooting & Sentinel Errors
 
 | Error | Cause | Resolution |
@@ -276,3 +320,5 @@ validator, err := license.NewValidatorWithKeyRing(ring)
 | `ErrLimitExceeded` | Current resource count exceeds `claims.Limits` | Increase quota limit during issuance. |
 | `ErrFingerprintMismatch` | License node/cluster fingerprint does not match host | Pass expected host fingerprint or check machine identity. |
 | `ErrScopeMismatch` | Deployment environment, cloud account, region, host, or cluster is not allowed | Verify the license `Scope` allowlist contains the target deployment infrastructure. |
+| `ErrVersionNotEntitled` | Running software version exceeds `claims.MaxVersion` or is not in `claims.AllowedVersions` | Upgrade perpetual license to entitle the newer major version. |
+| `ErrMaintenanceExpired` | Software build date exceeds `claims.MaintenanceExpiresAt` | Customer's annual maintenance contract has expired. Renew maintenance to unlock newer binary releases. |
