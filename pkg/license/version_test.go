@@ -221,3 +221,133 @@ func TestPerpetualLicense_CombinedVersionAndMaintenance(t *testing.T) {
 		t.Fatalf("expected ErrMaintenanceExpired, got: %v", err)
 	}
 }
+
+func TestPerpetualLicense_WildcardMinorVersionBounds(t *testing.T) {
+	pub, priv, err := license.GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("GenerateKeyPair failed: %v", err)
+	}
+	signer, err := license.NewSigner(priv)
+	if err != nil {
+		t.Fatalf("NewSigner failed: %v", err)
+	}
+
+	// Issue Perpetual License locked to Version 1.2.*
+	token, err := signer.Sign(license.Claims{
+		Product:    "gitlab-fleet-governor",
+		Customer:   license.Customer{Name: "Acme Minor Lock"},
+		Plan:       "enterprise",
+		MaxVersion: "1.2.*",
+	})
+	if err != nil {
+		t.Fatalf("Sign failed: %v", err)
+	}
+
+	testCases := []struct {
+		version string
+		allowed bool
+	}{
+		{"0.9.0", true},
+		{"1.0.0", true},
+		{"1.1.9", true},
+		{"1.2.0", true},
+		{"v1.2.5", true},
+		{"1.2.99", true},
+		{"1.2", true},
+		{"1.3.0", false}, // Exceeds minor 2!
+		{"1.3.1", false},
+		{"1.99.0", false}, // Must not allow 1.99.0 on a 1.2.* license!
+		{"2.0.0", false},
+	}
+
+	for _, tc := range testCases {
+		t.Run("ver_"+tc.version, func(t *testing.T) {
+			v, err := license.NewValidator(pub,
+				license.WithProduct("gitlab-fleet-governor"),
+				license.WithCurrentVersion(tc.version),
+			)
+			if err != nil {
+				t.Fatalf("NewValidator failed: %v", err)
+			}
+			_, err = v.Verify(token)
+			if tc.allowed && err != nil {
+				t.Errorf("expected version %s to be allowed on 1.2.*, but got: %v", tc.version, err)
+			}
+			if !tc.allowed && err == nil {
+				t.Errorf("expected version %s to be REJECTED on 1.2.*, but it was accepted!", tc.version)
+			}
+		})
+	}
+}
+
+func TestPerpetualLicense_WildcardMinorVersionWithX(t *testing.T) {
+	claims := license.Claims{
+		Product:    "gitlab-fleet-governor",
+		MaxVersion: "1.2.x",
+	}
+
+	if !claims.IsVersionAllowed("1.2.0") {
+		t.Errorf("expected 1.2.0 to be allowed on 1.2.x")
+	}
+	if !claims.IsVersionAllowed("1.2.8") {
+		t.Errorf("expected 1.2.8 to be allowed on 1.2.x")
+	}
+	if !claims.IsVersionAllowed("1.1.5") {
+		t.Errorf("expected 1.1.5 to be allowed on 1.2.x")
+	}
+	if claims.IsVersionAllowed("1.3.0") {
+		t.Errorf("expected 1.3.0 to be REJECTED on 1.2.x")
+	}
+	if claims.IsVersionAllowed("1.99.0") {
+		t.Errorf("expected 1.99.0 to be REJECTED on 1.2.x")
+	}
+	if claims.IsVersionAllowed("2.0.0") {
+		t.Errorf("expected 2.0.0 to be REJECTED on 1.2.x")
+	}
+}
+
+func TestPerpetualLicense_StrictLessThan(t *testing.T) {
+	claims := license.Claims{
+		Product:    "gitlab-fleet-governor",
+		MaxVersion: "<2.0.0",
+	}
+
+	if !claims.IsVersionAllowed("1.9.9") {
+		t.Errorf("expected 1.9.9 to be allowed on <2.0.0")
+	}
+	if claims.IsVersionAllowed("2.0.0") {
+		t.Errorf("expected 2.0.0 to be REJECTED on <2.0.0")
+	}
+	if claims.IsVersionAllowed("2.0.1") {
+		t.Errorf("expected 2.0.1 to be REJECTED on <2.0.0")
+	}
+
+	// Wildcard with strict less than: <2.*
+	claimsWild := license.Claims{
+		Product:    "gitlab-fleet-governor",
+		MaxVersion: "<2.*",
+	}
+	if !claimsWild.IsVersionAllowed("1.99.0") {
+		t.Errorf("expected 1.99.0 to be allowed on <2.*")
+	}
+	if claimsWild.IsVersionAllowed("2.0.0") {
+		t.Errorf("expected 2.0.0 to be REJECTED on <2.*")
+	}
+}
+
+func TestPerpetualLicense_LeadingVPrefix(t *testing.T) {
+	claims := license.Claims{
+		Product:    "gitlab-fleet-governor",
+		MaxVersion: "<=v2.5.0",
+	}
+
+	if !claims.IsVersionAllowed("v2.5.0") {
+		t.Errorf("expected v2.5.0 to be allowed on <=v2.5.0")
+	}
+	if !claims.IsVersionAllowed("2.5.0") {
+		t.Errorf("expected 2.5.0 to be allowed on <=v2.5.0")
+	}
+	if claims.IsVersionAllowed("v2.5.1") {
+		t.Errorf("expected v2.5.1 to be REJECTED on <=v2.5.0")
+	}
+}

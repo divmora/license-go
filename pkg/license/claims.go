@@ -3,7 +3,6 @@ package license
 import (
 	"fmt"
 	"path"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -1126,18 +1125,21 @@ func matchVersionPattern(pattern, version string) bool {
 		return true
 	}
 
+	normV := normalizeSemVerString(v)
+	normP := normalizeSemVerString(p)
+	if normP == normV || p == normV {
+		return true
+	}
+
 	// Convert "x" or "X" to "*"
 	p = strings.ReplaceAll(p, "x", "*")
 	p = strings.ReplaceAll(p, "X", "*")
 
 	if strings.Contains(p, "*") {
-		matched, err := filepath.Match(p, v)
-		if err == nil && matched {
+		if matched, err := path.Match(p, normV); err == nil && matched {
 			return true
 		}
-		// Also handle prefix wildcard matching e.g. "1.*" matching "1.4.2"
-		prefix := strings.TrimSuffix(p, "*")
-		if strings.HasPrefix(v, prefix) {
+		if matched, err := path.Match(p, v); err == nil && matched {
 			return true
 		}
 	}
@@ -1148,31 +1150,131 @@ func matchVersionPattern(pattern, version string) bool {
 // checkMaxVersion asserts that version does not exceed maxVersion.
 // Supports:
 //   - "<=2.5.0", "<=2.5", "2.5.0"
+//   - "<2.5.0", "<2.5"
 //   - "1.*", "1.x" (allows any version with major <= 1)
+//   - "1.2.*", "1.2.x" (allows any version with major < 1 || (major == 1 && minor <= 2))
 func checkMaxVersion(maxVersion, version string) bool {
-	maxClean := cleanVersionString(maxVersion)
+	maxClean := strings.TrimSpace(maxVersion)
+	isStrictLess := false
+	if strings.HasPrefix(maxClean, "<=") {
+		maxClean = strings.TrimSpace(strings.TrimPrefix(maxClean, "<="))
+	} else if strings.HasPrefix(maxClean, "<") {
+		isStrictLess = true
+		maxClean = strings.TrimSpace(strings.TrimPrefix(maxClean, "<"))
+	}
+	maxClean = cleanVersionString(maxClean)
 	vClean := cleanVersionString(version)
 
-	maxClean = strings.TrimPrefix(maxClean, "<=")
-	maxClean = strings.TrimSpace(maxClean)
+	if maxClean == "*" || maxClean == "all" {
+		return true
+	}
 
-	// If wildcard like "1.*" or "1.x"
-	if strings.ContainsAny(maxClean, "*xX") {
-		pMajor, _, _, pOk := parseSemVer(maxClean)
-		vMajor, _, _, vOk := parseSemVer(vClean)
-		if pOk && vOk {
-			return vMajor <= pMajor
+	vMajor, vMinor, vPatch, vOk := parseSemVer(vClean)
+	if !vOk {
+		return false
+	}
+
+	// Normalize wildcards: replace 'x' or 'X' with '*'
+	normalizedMax := strings.ReplaceAll(maxClean, "x", "*")
+	normalizedMax = strings.ReplaceAll(normalizedMax, "X", "*")
+
+	// If maxVersion contains wildcard '*'
+	if strings.Contains(normalizedMax, "*") {
+		parts := strings.Split(normalizedMax, ".")
+		if len(parts) == 1 {
+			return true
+		}
+
+		// Major only wildcard, e.g. "1.*"
+		if len(parts) >= 2 && parts[1] == "*" {
+			pMajor, err := strconv.Atoi(parts[0])
+			if err == nil {
+				if isStrictLess {
+					return vMajor < pMajor
+				}
+				return vMajor <= pMajor
+			}
+		}
+
+		// Major.Minor wildcard, e.g. "1.2.*"
+		if len(parts) >= 3 && parts[2] == "*" {
+			pMajor, err1 := strconv.Atoi(parts[0])
+			pMinor, err2 := strconv.Atoi(parts[1])
+			if err1 == nil && err2 == nil {
+				if vMajor < pMajor {
+					return true
+				}
+				if vMajor > pMajor {
+					return false
+				}
+				// vMajor == pMajor
+				if isStrictLess {
+					return vMinor < pMinor
+				}
+				return vMinor <= pMinor
+			}
+		}
+
+		// Major.Minor.Patch wildcard, e.g. "1.2.3.*"
+		if len(parts) >= 4 && parts[3] == "*" {
+			pMajor, err1 := strconv.Atoi(parts[0])
+			pMinor, err2 := strconv.Atoi(parts[1])
+			pPatch, err3 := strconv.Atoi(parts[2])
+			if err1 == nil && err2 == nil && err3 == nil {
+				if vMajor < pMajor {
+					return true
+				}
+				if vMajor > pMajor {
+					return false
+				}
+				if vMinor < pMinor {
+					return true
+				}
+				if vMinor > pMinor {
+					return false
+				}
+				// vMajor == pMajor && vMinor == pMinor
+				if isStrictLess {
+					return vPatch < pPatch
+				}
+				return vPatch <= pPatch
+			}
 		}
 	}
 
-	// Direct semver comparison: version <= maxVersion
+	// Direct semver comparison: version <= maxVersion (or version < maxVersion if strict)
 	cmp, ok := compareSemVer(vClean, maxClean)
 	if ok {
+		if isStrictLess {
+			return cmp < 0
+		}
 		return cmp <= 0
 	}
 
 	// Fallback to exact or pattern match
 	return matchVersionPattern(maxVersion, version)
+}
+
+// normalizeSemVerString normalizes partial version strings (e.g. "1", "1.2") into standard 3-part SemVer ("1.0.0", "1.2.0").
+func normalizeSemVerString(s string) string {
+	s = cleanVersionString(s)
+	pre := ""
+	if idx := strings.IndexAny(s, "-+"); idx != -1 {
+		pre = s[idx:]
+		s = s[:idx]
+	}
+	parts := strings.Split(s, ".")
+	switch len(parts) {
+	case 1:
+		if parts[0] != "" && parts[0] != "*" {
+			s = parts[0] + ".0.0"
+		}
+	case 2:
+		if parts[1] != "*" {
+			s = parts[0] + "." + parts[1] + ".0"
+		}
+	}
+	return s + pre
 }
 
 func cleanVersionString(s string) string {

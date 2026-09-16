@@ -21,7 +21,6 @@ This document tracks upcoming capabilities, planned optimizations, and ecosystem
 - [ ] **`Manager` Expiration Enforcement (#12)**: Enforce license active state within `HasFeature()` and `CheckLimit()` during post-expiration.
 - [ ] **Cross-Directory Wildcard Isolation (#13)**: Prevent `*` in `matchFeaturePattern()` from matching across `/` hierarchy delimiters.
 - [ ] **Kubernetes Cluster Fingerprint Hardening (#14)**: Prevent cluster fingerprint collision across identical namespaces when API RBAC is restricted.
-- [ ] **Wildcard SemVer Minor Bounds (#15)**: Respect minor and patch limits when evaluating wildcard versions in `checkMaxVersion()`.
 - [ ] **Environment Scope Fallback (#16)**: Fallback to process environment when `claims.Environment` is set and validator environment is empty.
 - [ ] **Compile-Time Build Date Clock Defense (#17)**: Reject offline backward system clock manipulation set prior to binary compilation date.
 - [ ] **Clock Skew Lifecycle State Consistency (#18)**: Reconcile `StatusAt()` lifecycle state reporting with validator clock skew buffer.
