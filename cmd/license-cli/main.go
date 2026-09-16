@@ -294,7 +294,9 @@ func runVerify(args []string) error {
 	buildDateFlag := fs.String("build-date", "", "Software binary build/release date to assert against maintenance window (RFC3339 or YYYY-MM-DD)")
 	bslRelease := fs.String("bsl-release-date", "", "Software release date to configure BSL 1.1 Change Date (RFC3339 or YYYY-MM-DD)")
 	bslYears := fs.Int("bsl-years", 3, "Duration in years before BSL 1.1 converts to Apache 2.0 (default: 3)")
-	authTimeFlag := fs.String("authoritative-time", "", "Authoritative server timestamp to defend against clock tampering (RFC3339)")
+	authTimeFlag := fs.String("authoritative-time", "", "Authoritative server timestamp (RFC3339 or HTTP Date header)")
+	maxSkewFlag := fs.Duration("max-skew", 0, "Maximum allowed clock skew threshold (e.g. 5m, 1h) when using authoritative server time")
+	strictClockFlag := fs.Bool("strict-clock", false, "Fail verification if clock tampering or excessive skew is detected")
 	allowExpired := fs.Bool("allow-expired", false, "Allow signature verification even if license has expired")
 
 	if err := fs.Parse(args); err != nil {
@@ -394,11 +396,14 @@ func runVerify(args []string) error {
 		}))
 	}
 	if *authTimeFlag != "" {
-		aDate, err := time.Parse(time.RFC3339, *authTimeFlag)
+		aDate, err := license.ParseServerTimeHeader(*authTimeFlag)
 		if err != nil {
-			return fmt.Errorf("invalid -authoritative-time %q: expected RFC3339", *authTimeFlag)
+			return fmt.Errorf("invalid -authoritative-time %q: %w", *authTimeFlag, err)
 		}
-		opts = append(opts, license.WithAuthoritativeTime(aDate))
+		opts = append(opts, license.WithServerTimeAttestation(aDate, *maxSkewFlag))
+		if *strictClockFlag {
+			opts = append(opts, license.WithStrictClockDefense(true))
+		}
 	}
 	if *allowExpired {
 		opts = append(opts, license.WithAllowExpired(true))
@@ -424,7 +429,11 @@ func runVerify(args []string) error {
 			result.EffectiveLicense, result.ChangeDate.Format("2006-01-02"))
 	}
 	if result.ClockTampered {
-		fmt.Println("⚠️  WARNING: Local clock contradiction detected; anchored evaluation to authoritative server time.")
+		fmt.Printf("⚠️  WARNING: Clock tampering/skew detected (skew: %s); anchored evaluation to authoritative server time (%s).\n",
+			result.ClockSkew, result.ServerTime.Format(time.RFC3339))
+	} else if result.ServerTimeAttested {
+		fmt.Printf("⏱️  Authoritative server time attested: %s (local skew: %s)\n",
+			result.ServerTime.Format(time.RFC3339), result.ClockSkew)
 	}
 	if result.VerifiedByKeyID != "" {
 		fmt.Printf("🔑 Verified by Key: %s (Status: %s)\n", result.VerifiedByKeyID, result.VerifiedByKeyStatus)

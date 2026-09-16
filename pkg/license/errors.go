@@ -3,6 +3,7 @@ package license
 import (
 	"errors"
 	"fmt"
+	"time"
 )
 
 var (
@@ -146,4 +147,26 @@ func (e *MaintenanceExpiredError) Error() string {
 
 func (e *MaintenanceExpiredError) Is(target error) bool {
 	return target == ErrMaintenanceExpired
+}
+
+// ClockTamperingError provides structured details when local system clock tampering or excessive skew is detected.
+type ClockTamperingError struct {
+	LocalTime      time.Time
+	ServerTime     time.Time
+	Skew           time.Duration
+	MaxAllowedSkew time.Duration
+	Reason         string
+}
+
+func (e *ClockTamperingError) Error() string {
+	if e.Reason != "" {
+		return fmt.Sprintf("license: clock tampering detected: %s (local: %s, server: %s, skew: %s, max allowed: %s)",
+			e.Reason, e.LocalTime.Format(time.RFC3339), e.ServerTime.Format(time.RFC3339), e.Skew, e.MaxAllowedSkew)
+	}
+	return fmt.Sprintf("license: clock tampering detected: local clock (%s) differs from authoritative server time (%s) by %s (max allowed: %s)",
+		e.LocalTime.Format(time.RFC3339), e.ServerTime.Format(time.RFC3339), e.Skew, e.MaxAllowedSkew)
+}
+
+func (e *ClockTamperingError) Is(target error) bool {
+	return target == ErrClockTamperingDetected
 }

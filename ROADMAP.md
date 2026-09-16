@@ -18,7 +18,6 @@ This document tracks upcoming capabilities, planned optimizations, and ecosystem
 
 ### 🛡️ Validation & Diagnostic Reporting
 - [ ] **Diagnostic Human Status Message (`VerificationResult.StatusMessage()`)**: Add `StatusMessage()` on `VerificationResult` generating standard human-readable descriptions (active status with remaining days, in-grace-period notices with remaining grace days, perpetual active status, and expired notices) to unify CLI banners and log messaging across products.
-- [ ] **Authoritative Server Time Attestation & Clock Skew Defense (`WithServerTimeAttestation`)**: Add a `ValidatorOption` to validate licenses against an authoritative external server timestamp (e.g., parsed from HTTP response `Date` headers) with a configurable maximum allowed skew threshold to prevent local client clock tampering.
 
 ### 🖥️ Developer Experience & CLI Tooling
 - [ ] **Reusable Terminal Claims Inspection Formatter (`Claims.FormatInspect()`)**: Provide a reusable multi-line or tabular formatter for claims metadata (Customer, Tier, Product, Features, Limits, Scope, Version Bounds, Maintenance, Expiration) to standardize `license inspect` CLI subcommands across downstream binaries.
@@ -57,6 +56,13 @@ This document tracks upcoming capabilities, planned optimizations, and ecosystem
 
 ## ✅ Delivered Capabilities
 
+- **Authoritative Server Time Attestation & Clock Skew Defense (`WithServerTimeAttestation`)**:
+  - `WithServerTimeAttestation(serverTime, maxAllowedSkew)`: Validates licenses against authoritative external server timestamps (e.g. from HTTP response `Date` headers, cloud metadata, or central licensing API) with configurable maximum allowed clock drift/skew threshold.
+  - `WithServerTimeHeader(headerValue, maxAllowedSkew)` and `ParseServerTimeHeader`: Multi-format parser supporting HTTP Date (RFC 1123, RFC 1123Z, RFC 850, ANSI C), ISO 8601/RFC 3339, and SQL timestamp formats.
+  - Clock tampering defense: Defeats both backward clock tampering (attempting to keep expired licenses active) and forward clock tampering (attempting to trigger premature BSL 1.1 open-source conversion or skip `NotBefore`), securely anchoring claims evaluation to the authoritative server time.
+  - `WithStrictClockDefense(strict)` and typed `ClockTamperingError`: Enables immediate rejection with `ErrClockTamperingDetected` when skew threshold is violated.
+  - Detailed reporting in `VerificationResult`: Exposes `ServerTimeAttested`, `ServerTime`, `ClockSkew`, and `ClockTampered`.
+  - CLI flags for `license-cli verify`: `-authoritative-time`, `-max-skew`, and `-strict-clock`.
 - **Hierarchical Namespace & Group Tree Scope Matching (`Scope.Namespaces`)**:
   - `NormalizeNamespace` utility to automatically strip schemes (`https://`, `http://`, `git://`, `ssh://`, `//`), SCP git syntax (`git@gitlab.com:org/repo.git`), user credentials, ports, trailing `.git` extensions, query parameters, and fragments.
   - Hierarchical tree path matching: scopes like `"devops"` or `"devops/*"` authorize root group `"devops"` as well as all descendant sub-groups and repositories (`"devops/backend/service"`).

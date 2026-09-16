@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+	"time"
 
 	license "github.com/divmora/license-go/pkg/license"
 )
@@ -216,6 +217,40 @@ func TestCLI_IssueVerifyInspect_StandardAndCustomScopeAndMeta(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected runVerify to fail for custom scope tier=bronze, but succeeded")
+	}
+
+	// 10. Verify with authoritative server timestamp in HTTP Date format
+	nowHTTPDate := time.Now().UTC().Format(time.RFC1123)
+	err = runVerify([]string{
+		"-public-key", pubKeyPath,
+		"-license", licensePath,
+		"-product", "gitlab-fleet-governor",
+		"-env", "production",
+		"-account", "123456789012",
+		"-region", "us-east-1",
+		"-cluster", "prod-eks-01",
+		"-namespace", "gitlab.com/acme/project-1",
+		"-host", "runner-01.acme.corp",
+		"-custom-scope", "tier=platinum,datacenter=dc-east",
+		"-authoritative-time", nowHTTPDate,
+		"-max-skew", "1h",
+	})
+	if err != nil {
+		t.Fatalf("runVerify with HTTP Date authoritative-time failed: %v", err)
+	}
+
+	// 11. Verify with strict-clock defense on tampered time should fail
+	err = runVerify([]string{
+		"-public-key", pubKeyPath,
+		"-license", licensePath,
+		"-product", "gitlab-fleet-governor",
+		"-env", "production",
+		"-authoritative-time", "2020-01-01T00:00:00Z",
+		"-max-skew", "5m",
+		"-strict-clock",
+	})
+	if err == nil {
+		t.Fatal("expected runVerify with -strict-clock to fail on tampered authoritative-time, but succeeded")
 	}
 
 	// 6. Direct claims verification for metadata
