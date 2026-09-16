@@ -319,8 +319,10 @@ make clean         # Remove temporary build artifacts
 
 ---
 
-## Community & Contributing
+## Documentation & Specifications
 
+- **[Protocol Specification (`SPEC.md`)](SPEC.md)**: Formal RFC specification covering `DIV1` envelope encoding, Ed25519 cryptography, canonical data signing, JSON claims schema, BSL 1.1 state machine, operational policies, and strict 10-step verification algorithm.
+- **[Living Product Roadmap (`ROADMAP.md`)](ROADMAP.md)**: Upcoming capabilities and delivered enterprise features.
 - **[Contributing Guide](CONTRIBUTING.md)**: Development setup, make targets, and Conventional Commits guidelines.
 - **[Code of Conduct](https://github.com/divmora/.github/blob/main/CODE_OF_CONDUCT.md)**: Community standards and expectations.
 - **[Security Policy](SECURITY.md)**: Responsible vulnerability disclosure and 48-hour response SLA.

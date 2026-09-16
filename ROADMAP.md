@@ -38,7 +38,6 @@ This document tracks upcoming capabilities, planned optimizations, and ecosystem
 - [ ] Centralized Cryptographic Revocation List (CRL) fetching and background caching.
 
 ### 📑 Ecosystem & Cross-Language Parity
-- [ ] **Divmora Token Protocol Specification (`SPEC.md`)**: Comprehensive RFC documentation covering `DIV1` envelope encoding, Ed25519 signature format, and standard claims schema.
 - [ ] **`license-portal` Sync**: Update Cloudflare Pages Functions in `divmora/license-portal` to issue `DIV1` tokens and match the unified `Scope` and `Customer` schema.
 
 ### ⚡ Performance & Telemetry
@@ -49,6 +48,8 @@ This document tracks upcoming capabilities, planned optimizations, and ecosystem
 
 ## ✅ Delivered Capabilities
 
+- **Divmora Token Protocol Specification (`SPEC.md`)**:
+  - Full RFC specification covering `DIV1` envelope encoding, Ed25519 digital signatures, canonical signed data (`DIV1.<payloadB64>`), JSON claims schema, BSL 1.1 state machine, operational policies, and strict 10-step verification algorithm.
 - **Operational Enforcement Policies & Graceful Degradation (`Manager`)**:
   - `PolicyStrict`: Fail-closed enforcement on expiration, scope mismatch, or verification failure.
   - `PolicyDegraded`: Continuous operation with fallback community claims, read-only mutation restrictions (`DegradedReadOnly`), and non-disruptive `OnDegraded` and `OnRecovered` lifecycle hooks.
