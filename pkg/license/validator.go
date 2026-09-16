@@ -298,6 +298,37 @@ func NewValidatorFromBase64(pubB64 string, opts ...ValidatorOption) (*Validator,
 	return NewValidator(pubKey, opts...)
 }
 
+// NewValidatorFromEmbeddedPEM creates a Validator using embedded PKIX PEM public key bytes.
+// This is an alias/helper for NewValidatorFromPEM designed for compile-time //go:embed directives.
+func NewValidatorFromEmbeddedPEM(pemBytes []byte, opts ...ValidatorOption) (*Validator, error) {
+	return NewValidatorFromPEM(pemBytes, opts...)
+}
+
+// NewValidatorFromEnv creates a Validator by automatically resolving public verification keys
+// from the environment (DIVMORA_PUBLIC_KEYS_PEM, DIVMORA_PUBLIC_KEY, DIVMORA_PUBLIC_KEY_FILE, /etc/divmora/public.pem),
+// and applying any ValidatorOptions.
+func NewValidatorFromEnv(opts ...ValidatorOption) (*Validator, error) {
+	ring, err := ResolveKeyRing()
+	if err != nil {
+		return nil, err
+	}
+	return NewValidatorWithKeyRing(ring, opts...)
+}
+
+// NewValidatorWithFallbackKey creates a Validator by automatically resolving public verification keys
+// from the environment, falling back to the specified key string (base64, PEM, or file path) if no environment variable is set.
+func NewValidatorWithFallbackKey(fallbackKey string, opts ...ValidatorOption) (*Validator, error) {
+	var fallbacks []string
+	if strings.TrimSpace(fallbackKey) != "" {
+		fallbacks = append(fallbacks, strings.TrimSpace(fallbackKey))
+	}
+	ring, err := ResolveKeyRing(fallbacks...)
+	if err != nil {
+		return nil, err
+	}
+	return NewValidatorWithKeyRing(ring, opts...)
+}
+
 // Verify decodes, verifies the cryptographic signature, and checks all claims against current time.
 func (v *Validator) Verify(rawLicense string) (*Claims, error) {
 	return v.VerifyAt(rawLicense, time.Now())

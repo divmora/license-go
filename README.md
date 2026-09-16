@@ -94,7 +94,9 @@ func main() {
 
 ### 2. Standardized Environment Resolution
 
-`license-go` provides a standardized resolution hierarchy eliminating custom loading boilerplate:
+`license-go` provides standardized resolution hierarchies eliminating custom loading boilerplate for both licenses and verification public keys:
+
+#### License Resolution Hierarchy
 
 | Priority | Source | Description |
 | :--- | :--- | :--- |
@@ -103,10 +105,32 @@ func main() {
 | **3** | `DIVMORA_LICENSE_FILE` | Environment variable containing filesystem path to license file. Ideal for Kubernetes Secrets & ConfigMap mounts. |
 | **4** | `/etc/divmora/license.key` | Default Linux/container filesystem location if file exists. |
 
+#### Public Verification KeyRing Resolution Hierarchy
+
+| Priority | Source | Description |
+| :--- | :--- | :--- |
+| **0** | Programmatic Override | In-memory override via `SetVerificationPublicKey(key)` or `SetVerificationKeyRing(ring)` (ideal for automated unit/integration tests). |
+| **1** | `DIVMORA_PUBLIC_KEYS_PEM` | Multi-key or single-key PKIX PEM bundle text string or filesystem path. |
+| **2** | `DIVMORA_PUBLIC_KEY` | Single Ed25519 public key (base64 raw 32-byte, base64 PKIX DER, inline PEM, or filesystem path). |
+| **3** | `DIVMORA_PUBLIC_KEY_FILE` | Filesystem path to public key file on disk. |
+| **4** | `/etc/divmora/public.pem` | Default Linux/container filesystem location if file exists. |
+| **5** | `fallbackKeys...` | Embedded fallback public keys passed to `ResolveKeyRing()` or `NewValidatorWithFallbackKey()`. |
+
 ```go
 // Direct resolution helpers:
-token, err := license.ResolveToken() // Returns token string from env/file
+token, err := license.ResolveToken() // Returns license token string from env/file
 resolved, err := license.ResolveLicense() // Returns content + FilePath for hot reloading
+
+// Public verification KeyRing resolution:
+ring, err := license.ResolveKeyRing(embeddedFallbackKey) // Resolves trusted KeyRing
+pubKey, err := license.ResolvePublicKey(embeddedFallbackKey) // Resolves primary public key
+
+// Zero-boilerplate validator initialization:
+validator, err := license.NewValidatorFromEnv(license.WithProduct("gitlab-fleet-governor"))
+// Or compile-time //go:embed helper:
+// //go:embed public.pem
+// var embeddedPublicKey []byte
+validator, err := license.NewValidatorFromEmbeddedPEM(embeddedPublicKey, license.WithProduct("gitlab-fleet-governor"))
 ```
 
 ---
@@ -291,10 +315,9 @@ license-cli verify \
   -fingerprint "node-cluster-01" \
   -license ./acme.license.key
 
-# Or verify automatically from $DIVMORA_LICENSE_KEY or $DIVMORA_LICENSE_FILE:
-license-cli verify \
-  -public-key ./keys/public.pem \
-  -product "gitlab-fleet-governor"
+# Or verify automatically with zero configuration (resolves license from DIVMORA_LICENSE_KEY/FILE
+# and public key from DIVMORA_PUBLIC_KEY / DIVMORA_PUBLIC_KEYS_PEM / /etc/divmora/public.pem):
+license-cli verify -product "gitlab-fleet-governor"
 ```
 
 ### 4. Inspect a License (No Key Required)

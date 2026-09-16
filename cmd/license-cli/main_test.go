@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -170,5 +171,90 @@ func TestCLI_IssueVerifyInspect_StandardAndCustomScopeAndMeta(t *testing.T) {
 	}
 	if len(claims.Scope.Custom["tier"]) != 2 || claims.Scope.Custom["tier"][0] != "platinum" {
 		t.Errorf("unexpected Scope.Custom['tier']: %+v", claims.Scope.Custom["tier"])
+	}
+}
+
+func TestCLI_VerifyAndKeyringAutoResolveKeyRing(t *testing.T) {
+	license.ResetVerificationKeyRing()
+	tmpDir := t.TempDir()
+	privKeyPath := filepath.Join(tmpDir, "private.pem")
+	pubKeyPath := filepath.Join(tmpDir, "public.pem")
+	licensePath := filepath.Join(tmpDir, "test.license.key")
+
+	err := runKeygen([]string{
+		"-out-dir", tmpDir,
+		"-priv-name", "private.pem",
+		"-pub-name", "public.pem",
+	})
+	if err != nil {
+		t.Fatalf("runKeygen failed: %v", err)
+	}
+
+	pubBytes, err := os.ReadFile(pubKeyPath)
+	if err != nil {
+		t.Fatalf("ReadFile pubKeyPath failed: %v", err)
+	}
+	pubKey, err := license.ParsePublicKeyFromPEM(pubBytes)
+	if err != nil {
+		t.Fatalf("ParsePublicKeyFromPEM failed: %v", err)
+	}
+	pubB64 := license.EncodePublicKeyToBase64(pubKey)
+
+	err = runIssue([]string{
+		"-private-key", privKeyPath,
+		"-customer", "Acme",
+		"-product", "gitlab-fleet-governor",
+		"-valid-days", "30",
+		"-out", licensePath,
+	})
+	if err != nil {
+		t.Fatalf("runIssue failed: %v", err)
+	}
+
+	// 1. Verify with DIVMORA_PUBLIC_KEY (base64) when -public-key is omitted
+	t.Setenv(license.EnvPublicKeysPEM, "")
+	t.Setenv(license.EnvPublicKey, pubB64)
+	t.Setenv(license.EnvPublicKeyFile, "")
+	err = runVerify([]string{
+		"-license", licensePath,
+		"-product", "gitlab-fleet-governor",
+	})
+	if err != nil {
+		t.Fatalf("runVerify with DIVMORA_PUBLIC_KEY failed: %v", err)
+	}
+
+	// 2. Verify with DIVMORA_PUBLIC_KEYS_PEM (PEM bundle) when -public-key is omitted
+	t.Setenv(license.EnvPublicKeysPEM, string(pubBytes))
+	t.Setenv(license.EnvPublicKey, "")
+	err = runVerify([]string{
+		"-license", licensePath,
+		"-product", "gitlab-fleet-governor",
+	})
+	if err != nil {
+		t.Fatalf("runVerify with DIVMORA_PUBLIC_KEYS_PEM failed: %v", err)
+	}
+
+	// 3. Keyring auto-resolve from DIVMORA_PUBLIC_KEYS_PEM when args omitted
+	err = runKeyring([]string{})
+	if err != nil {
+		t.Fatalf("runKeyring auto-resolve failed: %v", err)
+	}
+
+	// 4. Verify fails with informative error when neither -public-key nor env is set
+	t.Setenv(license.EnvPublicKeysPEM, "")
+	t.Setenv(license.EnvPublicKey, "")
+	t.Setenv(license.EnvPublicKeyFile, "")
+	err = runVerify([]string{
+		"-license", licensePath,
+		"-product", "gitlab-fleet-governor",
+	})
+	if err == nil {
+		t.Fatal("expected runVerify to fail when no public key is provided")
+	}
+
+	// 5. Keyring fails with usage error when neither args nor env is set
+	err = runKeyring([]string{})
+	if err == nil {
+		t.Fatal("expected runKeyring to fail when no public key is provided")
 	}
 }

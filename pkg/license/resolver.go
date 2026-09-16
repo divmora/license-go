@@ -1,9 +1,11 @@
 package license
 
 import (
+	"crypto/ed25519"
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 )
 
 const (
@@ -15,7 +17,79 @@ const (
 
 	// DefaultLicensePath is the standard Linux/container filesystem path for Divmora licenses.
 	DefaultLicensePath = "/etc/divmora/license.key"
+
+	// EnvPublicKeysPEM is the environment variable containing a multi-key or single-key PKIX PEM bundle,
+	// or a filesystem path to a PEM bundle file on disk.
+	EnvPublicKeysPEM = "DIVMORA_PUBLIC_KEYS_PEM"
+
+	// EnvPublicKey is the environment variable containing a single Ed25519 public key (base64-encoded raw
+	// 32-byte key, base64 PKIX DER, or PKIX PEM string), or a filesystem path to a public key file on disk.
+	EnvPublicKey = "DIVMORA_PUBLIC_KEY"
+
+	// EnvPublicKeyFile is the environment variable containing a filesystem path to a public key or PEM bundle file on disk.
+	EnvPublicKeyFile = "DIVMORA_PUBLIC_KEY_FILE"
+
+	// DefaultPublicKeyPath is the standard Linux/container filesystem path for Divmora trusted public keys.
+	DefaultPublicKeyPath = "/etc/divmora/public.pem"
 )
+
+var (
+	overrideKeyRingLock sync.RWMutex
+	overrideKeyRing     *KeyRing
+)
+
+// SetVerificationKeyRing configures an in-memory programmatic override KeyRing.
+// When set, ResolveKeyRing and ResolvePublicKey return keys from this KeyRing immediately
+// without checking environment variables or fallbacks. Primarily used in automated tests and embedded runtimes.
+func SetVerificationKeyRing(ring *KeyRing) {
+	overrideKeyRingLock.Lock()
+	defer overrideKeyRingLock.Unlock()
+	overrideKeyRing = ring
+}
+
+// SetVerificationPublicKey configures an in-memory programmatic single public key override.
+// When set, ResolveKeyRing and ResolvePublicKey return a KeyRing containing this key.
+func SetVerificationPublicKey(pub ed25519.PublicKey) {
+	if len(pub) != ed25519.PublicKeySize {
+		return
+	}
+	SetVerificationKeyRing(NewKeyRing(pub))
+}
+
+// ResetVerificationKeyRing clears any in-memory programmatic KeyRing override,
+// returning resolution to environment variables and embedded fallbacks.
+func ResetVerificationKeyRing() {
+	overrideKeyRingLock.Lock()
+	defer overrideKeyRingLock.Unlock()
+	overrideKeyRing = nil
+}
+
+// ResetVerificationPublicKey clears any in-memory programmatic public key override.
+func ResetVerificationPublicKey() {
+	ResetVerificationKeyRing()
+}
+
+// ResolvedKeyRing contains the resolved KeyRing alongside origin metadata.
+type ResolvedKeyRing struct {
+	// KeyRing holds the collection of trusted public keys.
+	KeyRing *KeyRing
+
+	// Source identifies how the key was located (e.g., "programmatic_override",
+	// "env:DIVMORA_PUBLIC_KEYS_PEM", "env:DIVMORA_PUBLIC_KEY", "env:DIVMORA_PUBLIC_KEY_FILE",
+	// "default_file", "fallback").
+	Source string
+
+	// FilePath is non-empty if the key was resolved from a file on disk.
+	FilePath string
+}
+
+// Primary returns the primary public key of the resolved KeyRing, or nil if empty.
+func (r *ResolvedKeyRing) Primary() ed25519.PublicKey {
+	if r != nil && r.KeyRing != nil && r.KeyRing.Primary() != nil {
+		return r.KeyRing.Primary().PublicKey
+	}
+	return nil
+}
 
 // ResolvedLicense contains the resolved license contents and origin metadata.
 type ResolvedLicense struct {
@@ -113,4 +187,207 @@ func ResolveToken(explicitSource ...string) (string, error) {
 		return "", err
 	}
 	return resolved.Content, nil
+}
+
+// ParseKeyRingFromString parses public key(s) from a string that may contain PEM blocks,
+// base64-encoded raw/DER keys, or a filesystem path to a key file.
+func ParseKeyRingFromString(s string) (*KeyRing, error) {
+	trimmed := strings.TrimSpace(s)
+	if trimmed == "" {
+		return nil, ErrMissingPublicKey
+	}
+
+	// 1. If it contains PEM header
+	if strings.Contains(trimmed, "-----BEGIN") {
+		return NewKeyRingFromPEM([]byte(trimmed))
+	}
+
+	// 2. If it points to an existing file on disk
+	if fi, err := os.Stat(trimmed); err == nil && !fi.IsDir() {
+		data, err := os.ReadFile(trimmed)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read key file %s: %w", trimmed, err)
+		}
+		// Try PEM first
+		if ring, err := NewKeyRingFromPEM(data); err == nil {
+			return ring, nil
+		}
+		// Try Base64
+		pub, err := ParsePublicKeyFromBase64(strings.TrimSpace(string(data)))
+		if err == nil {
+			return NewKeyRing(pub), nil
+		}
+		return nil, fmt.Errorf("failed to parse public key from file %s: invalid PEM or Base64 format", trimmed)
+	}
+
+	// 3. Try base64 decoding (raw 32-byte Ed25519 or PKIX DER)
+	pub, err := ParsePublicKeyFromBase64(trimmed)
+	if err == nil {
+		return NewKeyRing(pub), nil
+	}
+
+	return nil, fmt.Errorf("unable to parse public key: %w", err)
+}
+
+// ParsePublicKeyFromString parses an Ed25519 public key from a string which can be a filesystem path,
+// a PKIX PEM block, or a base64-encoded string.
+func ParsePublicKeyFromString(s string) (ed25519.PublicKey, error) {
+	ring, err := ParseKeyRingFromString(s)
+	if err != nil {
+		return nil, err
+	}
+	if ring.Primary() == nil {
+		return nil, ErrMissingPublicKey
+	}
+	return ring.Primary().PublicKey, nil
+}
+
+// ResolveKeyRingWithSource locates and resolves trusted public verification keys following a standardized hierarchy:
+//  1. In-memory programmatic override (via SetVerificationKeyRing or SetVerificationPublicKey).
+//  2. DIVMORA_PUBLIC_KEYS_PEM environment variable (multi-key PKIX PEM bundle string or file path).
+//  3. DIVMORA_PUBLIC_KEY environment variable (base64-encoded raw/DER key, inline PEM string, or file path).
+//  4. DIVMORA_PUBLIC_KEY_FILE environment variable (path to public key file on disk).
+//  5. Default system public key path (/etc/divmora/public.pem) if it exists.
+//  6. Fallback keys provided via arguments (base64 strings, PEM blocks, or file paths).
+//  7. If none succeed, returns ErrPublicKeyNotFound wrapping ErrMissingPublicKey.
+func ResolveKeyRingWithSource(fallbackKeys ...string) (*ResolvedKeyRing, error) {
+	// 1. Programmatic in-memory override
+	overrideKeyRingLock.RLock()
+	if overrideKeyRing != nil {
+		ring := overrideKeyRing
+		overrideKeyRingLock.RUnlock()
+		return &ResolvedKeyRing{
+			KeyRing: ring,
+			Source:  "programmatic_override",
+		}, nil
+	}
+	overrideKeyRingLock.RUnlock()
+
+	// 2. DIVMORA_PUBLIC_KEYS_PEM (multi-key PKIX PEM bundle or file path)
+	if pemVal := strings.TrimSpace(os.Getenv(EnvPublicKeysPEM)); pemVal != "" {
+		if fi, err := os.Stat(pemVal); err == nil && !fi.IsDir() {
+			data, err := os.ReadFile(pemVal)
+			if err != nil {
+				return nil, fmt.Errorf("failed to read key bundle file from %s (%s): %w", EnvPublicKeysPEM, pemVal, err)
+			}
+			ring, err := NewKeyRingFromPEM(data)
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse key bundle file from %s (%s): %w", EnvPublicKeysPEM, pemVal, err)
+			}
+			return &ResolvedKeyRing{
+				KeyRing:  ring,
+				Source:   "env:" + EnvPublicKeysPEM,
+				FilePath: pemVal,
+			}, nil
+		}
+		ring, err := NewKeyRingFromPEM([]byte(pemVal))
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse PEM bundle from %s: %w", EnvPublicKeysPEM, err)
+		}
+		return &ResolvedKeyRing{
+			KeyRing: ring,
+			Source:  "env:" + EnvPublicKeysPEM,
+		}, nil
+	}
+
+	// 3. DIVMORA_PUBLIC_KEY (base64 single key, PEM block, or file path)
+	if keyVal := strings.TrimSpace(os.Getenv(EnvPublicKey)); keyVal != "" {
+		if fi, err := os.Stat(keyVal); err == nil && !fi.IsDir() {
+			ring, err := ParseKeyRingFromString(keyVal)
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse key file from %s (%s): %w", EnvPublicKey, keyVal, err)
+			}
+			return &ResolvedKeyRing{
+				KeyRing:  ring,
+				Source:   "env:" + EnvPublicKey,
+				FilePath: keyVal,
+			}, nil
+		}
+		ring, err := ParseKeyRingFromString(keyVal)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse public key from %s: %w", EnvPublicKey, err)
+		}
+		return &ResolvedKeyRing{
+			KeyRing: ring,
+			Source:  "env:" + EnvPublicKey,
+		}, nil
+	}
+
+	// 4. DIVMORA_PUBLIC_KEY_FILE (path to public key or PEM bundle on disk)
+	if fileVal := strings.TrimSpace(os.Getenv(EnvPublicKeyFile)); fileVal != "" {
+		data, err := os.ReadFile(fileVal)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read public key file from %s (%s): %w", EnvPublicKeyFile, fileVal, err)
+		}
+		ring, err := ParseKeyRingFromString(string(data))
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse public key file from %s (%s): %w", EnvPublicKeyFile, fileVal, err)
+		}
+		return &ResolvedKeyRing{
+			KeyRing:  ring,
+			Source:   "env:" + EnvPublicKeyFile,
+			FilePath: fileVal,
+		}, nil
+	}
+
+	// 5. Default Linux/container system path (/etc/divmora/public.pem)
+	if fi, err := os.Stat(DefaultPublicKeyPath); err == nil && !fi.IsDir() {
+		data, err := os.ReadFile(DefaultPublicKeyPath)
+		if err == nil {
+			if ring, err := NewKeyRingFromPEM(data); err == nil {
+				return &ResolvedKeyRing{
+					KeyRing:  ring,
+					Source:   "default_file",
+					FilePath: DefaultPublicKeyPath,
+				}, nil
+			}
+		}
+	}
+
+	// 6. Embedded fallback keys (base64 string, PEM block, or file path)
+	var allFallbackKeys []ed25519.PublicKey
+	for _, fb := range fallbackKeys {
+		fbTrimmed := strings.TrimSpace(fb)
+		if fbTrimmed == "" {
+			continue
+		}
+		ring, err := ParseKeyRingFromString(fbTrimmed)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse fallback public key %q: %w", fb, err)
+		}
+		for _, entry := range ring.Keys() {
+			allFallbackKeys = append(allFallbackKeys, entry.PublicKey)
+		}
+	}
+
+	if len(allFallbackKeys) > 0 {
+		ring := NewKeyRing(allFallbackKeys[0], allFallbackKeys[1:]...)
+		return &ResolvedKeyRing{
+			KeyRing: ring,
+			Source:  "fallback",
+		}, nil
+	}
+
+	return nil, fmt.Errorf("%w: %w (pass public key or set %s / %s)", ErrPublicKeyNotFound, ErrMissingPublicKey, EnvPublicKey, EnvPublicKeysPEM)
+}
+
+// ResolveKeyRing resolves the KeyRing containing trusted public verification keys using the standard resolution hierarchy.
+func ResolveKeyRing(fallbackKeys ...string) (*KeyRing, error) {
+	resolved, err := ResolveKeyRingWithSource(fallbackKeys...)
+	if err != nil {
+		return nil, err
+	}
+	return resolved.KeyRing, nil
+}
+
+// ResolvePublicKey resolves the primary Ed25519 public verification key using the standard resolution hierarchy.
+func ResolvePublicKey(fallbackKeys ...string) (ed25519.PublicKey, error) {
+	ring, err := ResolveKeyRing(fallbackKeys...)
+	if err != nil {
+		return nil, err
+	}
+	if ring.Primary() == nil {
+		return nil, ErrMissingPublicKey
+	}
+	return ring.Primary().PublicKey, nil
 }

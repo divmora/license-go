@@ -30,6 +30,9 @@ var (
 	// ErrMissingPublicKey is returned when public key is nil or invalid for verification.
 	ErrMissingPublicKey = errors.New("license: missing public key")
 
+	// ErrPublicKeyNotFound is returned when no public verification key could be resolved from environment or fallbacks.
+	ErrPublicKeyNotFound = errors.New("license: public verification key not found")
+
 	// ErrMissingPrivateKey is returned when private key is nil or invalid for signing.
 	ErrMissingPrivateKey = errors.New("license: missing private key")
 

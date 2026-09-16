@@ -279,7 +279,7 @@ func runIssue(args []string) error {
 
 func runVerify(args []string) error {
 	fs := flag.NewFlagSet("verify", flag.ExitOnError)
-	pubKeyPath := fs.String("public-key", "", "Path to Ed25519 public key PEM file (required)")
+	pubKeyPath := fs.String("public-key", "", "Path to Ed25519 public key PEM file or base64 key string (optional; falls back to DIVMORA_PUBLIC_KEY/DIVMORA_PUBLIC_KEYS_PEM)")
 	licenseSource := fs.String("license", "", "Path to license file or raw token string (optional; falls back to DIVMORA_LICENSE_KEY/DIVMORA_LICENSE_FILE)")
 	product := fs.String("product", "", "Expected product name to assert")
 	fingerprint := fs.String("fingerprint", "", "Expected node or cluster fingerprint to assert")
@@ -301,8 +301,25 @@ func runVerify(args []string) error {
 		return err
 	}
 
-	if *pubKeyPath == "" {
-		return fmt.Errorf("-public-key is required")
+	var ring *license.KeyRing
+	var keySource string
+	if *pubKeyPath != "" {
+		r, err := license.ParseKeyRingFromString(*pubKeyPath)
+		if err != nil {
+			return fmt.Errorf("failed to load public key from %s: %w", *pubKeyPath, err)
+		}
+		ring = r
+		keySource = *pubKeyPath
+	} else {
+		resolvedKey, err := license.ResolveKeyRingWithSource()
+		if err != nil {
+			return fmt.Errorf("public verification key required: %w (pass -public-key or set %s / %s)", err, license.EnvPublicKey, license.EnvPublicKeysPEM)
+		}
+		ring = resolvedKey.KeyRing
+		keySource = resolvedKey.Source
+		if resolvedKey.FilePath != "" {
+			keySource = fmt.Sprintf("%s (%s)", resolvedKey.Source, resolvedKey.FilePath)
+		}
 	}
 
 	resolved, err := license.ResolveLicense(*licenseSource)
@@ -387,9 +404,9 @@ func runVerify(args []string) error {
 		opts = append(opts, license.WithAllowExpired(true))
 	}
 
-	validator, err := license.NewValidatorFromPEMFile(*pubKeyPath, opts...)
+	validator, err := license.NewValidatorWithKeyRing(ring, opts...)
 	if err != nil {
-		return fmt.Errorf("failed to load public key: %w", err)
+		return fmt.Errorf("failed to initialize validator: %w", err)
 	}
 
 	var content string
@@ -411,6 +428,9 @@ func runVerify(args []string) error {
 	}
 	if result.VerifiedByKeyID != "" {
 		fmt.Printf("🔑 Verified by Key: %s (Status: %s)\n", result.VerifiedByKeyID, result.VerifiedByKeyStatus)
+	}
+	if *pubKeyPath == "" && keySource != "" {
+		fmt.Printf("🗝️  Loaded public key from: %s\n", keySource)
 	}
 	if resolved != nil && resolved.Source != "explicit_file" && resolved.Source != "explicit_token" {
 		fmt.Printf("ℹ️  Loaded license from: %s\n", resolved.Source)
@@ -474,17 +494,30 @@ func runInspect(args []string) error {
 }
 
 func runKeyring(args []string) error {
-	if len(args) < 1 {
-		return fmt.Errorf("usage: license-cli keyring <public-keys-bundle.pem>")
-	}
-	bundlePath := args[0]
-	ring, err := license.NewKeyRingFromPEMFile(bundlePath)
-	if err != nil {
-		return fmt.Errorf("failed to load keyring bundle: %w", err)
+	var bundleName string
+	var ring *license.KeyRing
+	var err error
+
+	if len(args) >= 1 {
+		bundleName = args[0]
+		ring, err = license.ParseKeyRingFromString(bundleName)
+		if err != nil {
+			return fmt.Errorf("failed to load keyring bundle: %w", err)
+		}
+	} else {
+		resolved, rErr := license.ResolveKeyRingWithSource()
+		if rErr != nil {
+			return fmt.Errorf("usage: license-cli keyring <public-keys-bundle.pem> (or set %s / %s)", license.EnvPublicKey, license.EnvPublicKeysPEM)
+		}
+		ring = resolved.KeyRing
+		bundleName = resolved.Source
+		if resolved.FilePath != "" {
+			bundleName = fmt.Sprintf("%s (%s)", resolved.Source, resolved.FilePath)
+		}
 	}
 
 	keys := ring.Keys()
-	fmt.Printf("KeyRing Bundle: %s (%d public key(s))\n", bundlePath, len(keys))
+	fmt.Printf("KeyRing Bundle: %s (%d public key(s))\n", bundleName, len(keys))
 	fmt.Println("--------------------------------------------------------------------------------")
 	fmt.Printf("%-6s %-12s %-24s %-20s\n", "INDEX", "STATUS", "ID / FINGERPRINT", "ROLE")
 	fmt.Println("--------------------------------------------------------------------------------")

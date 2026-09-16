@@ -133,10 +133,9 @@ license-cli verify \
   -fingerprint "<host-fingerprint>" \
   -license ./license.key
 
-# Or verify automatically from $DIVMORA_LICENSE_KEY or $DIVMORA_LICENSE_FILE:
-license-cli verify \
-  -public-key /path/to/public.pem \
-  -product "<product-name>"
+# Or verify automatically with zero configuration (resolves license from DIVMORA_LICENSE_KEY/FILE
+# and public key from DIVMORA_PUBLIC_KEY / DIVMORA_PUBLIC_KEYS_PEM / /etc/divmora/public.pem):
+license-cli verify -product "<product-name>"
 
 # Inspect claims without signature verification (direct or env fallback)
 license-cli inspect -license ./license.key
@@ -160,20 +159,21 @@ import (
 )
 
 // Divmora Public Key (embed or read from secret/env)
-const publicKeyPEM = `-----BEGIN PUBLIC KEY-----
-...
------END PUBLIC KEY-----`
+const defaultPublicKeyBase64 = "o5nIs/8K/bCGz6jRB33Ig1h0ONr37yvVHpddzNnL46U="
 
 func checkLicense() {
-	validator, err := license.NewValidatorFromPEM(
-		[]byte(publicKeyPEM),
+	// Auto-resolves public verification key from DIVMORA_PUBLIC_KEYS_PEM,
+	// DIVMORA_PUBLIC_KEY, DIVMORA_PUBLIC_KEY_FILE, /etc/divmora/public.pem,
+	// or falls back to defaultPublicKeyBase64:
+	validator, err := license.NewValidatorWithFallbackKey(
+		defaultPublicKeyBase64,
 		license.WithProduct("gitlab-fleet-governor"),
 	)
 	if err != nil {
 		log.Fatalf("failed to initialize validator: %v", err)
 	}
 
-	// Automatically resolves from DIVMORA_LICENSE_KEY, DIVMORA_LICENSE_FILE,
+	// Automatically resolves license from DIVMORA_LICENSE_KEY, DIVMORA_LICENSE_FILE,
 	// or /etc/divmora/license.key:
 	claims, err := validator.VerifyEnv()
 	if err != nil {
@@ -285,8 +285,9 @@ license-cli issue -private-key ./2026-private.pem -kid "divmora-2026-root" ...
 In Go applications, load a multi-key PEM bundle or configure fallback keys:
 
 ```go
-// Automatically loads all PUBLIC KEY blocks; first key is Primary, subsequent keys are Fallback:
-validator, err := license.NewValidatorFromPEMFile("/etc/divmora/trusted_keys.pem")
+// Auto-resolve KeyRing across env (DIVMORA_PUBLIC_KEYS_PEM, DIVMORA_PUBLIC_KEY)
+// and optional fallback keys:
+ring, err := license.ResolveKeyRing(primary2026KeyBase64, retiring2025KeyBase64)
 
 // Or programmatic registration with revocation support:
 ring := license.NewKeyRing(primary2026Key)
@@ -296,6 +297,10 @@ ring.AddKeyWithID("divmora-2025-root", legacy2025Key, license.KeyStatusRetiring)
 ring.Revoke("compromised-key-id") // Any license signed by this key returns ErrKeyRevoked
 
 validator, err := license.NewValidatorWithKeyRing(ring)
+
+// In automated tests, override the active verification key globally:
+license.SetVerificationPublicKey(testEphemeralPublicKey)
+defer license.ResetVerificationPublicKey()
 ```
 
 ---

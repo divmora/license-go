@@ -12,7 +12,17 @@ This document tracks upcoming capabilities, planned optimizations, and ecosystem
 ### 🔑 Cryptographic & Key Lifecycle
 - [ ] **AWS KMS Asymmetric Signing**: Support AWS KMS asymmetric Ed25519 signing in `license-cli` (enabling license generation in CI/CD without exposing private key files).
 - [ ] **HashiCorp Vault Transit Engine**: Support Vault Transit engine for enterprise automated license issuance workflows.
-- [ ] **Embedded Public Key Helpers**: Provide standard helper functions (`license.NewValidatorFromEmbeddedPEM(...)`) and documentation patterns for compile-time `//go:embed` without distributing separate `.pem` files on disk.
+
+### 🏢 Organizational Scoping & Multi-Tenancy
+- [ ] **Hierarchical Namespace & Group Tree Scope Matching (`Scope.Namespaces`)**: Extend `Scope.IsNamespaceAllowed` to support hierarchical path matching (e.g., `"devops"` or `"devops/*"` authorizes all descendant sub-groups and repositories like `"devops/backend/service"`). Supports multi-tenant trees in GitLab groups, GitHub organizations, and Kubernetes namespace hierarchies.
+- [ ] **Host / URL Normalization & Apex Domain Matching (`Scope.Hosts`)**: Add `NormalizeHost(rawURL string)` to automatically strip schemes (`http://`, `https://`), ports, and trailing paths. Support apex domain authorization for wildcard domain scopes (e.g., `"*.acme.corp"` authorizes both `"gitlab.acme.corp"` and apex `"acme.corp"`).
+
+### 🛡️ Validation & Diagnostic Reporting
+- [ ] **Diagnostic Human Status Message (`VerificationResult.StatusMessage()`)**: Add `StatusMessage()` on `VerificationResult` generating standard human-readable descriptions (active status with remaining days, in-grace-period notices with remaining grace days, perpetual active status, and expired notices) to unify CLI banners and log messaging across products.
+- [ ] **Authoritative Server Time Attestation & Clock Skew Defense (`WithServerTimeAttestation`)**: Add a `ValidatorOption` to validate licenses against an authoritative external server timestamp (e.g., parsed from HTTP response `Date` headers) with a configurable maximum allowed skew threshold to prevent local client clock tampering.
+
+### 🖥️ Developer Experience & CLI Tooling
+- [ ] **Reusable Terminal Claims Inspection Formatter (`Claims.FormatInspect()`)**: Provide a reusable multi-line or tabular formatter for claims metadata (Customer, Tier, Product, Features, Limits, Scope, Version Bounds, Maintenance, Expiration) to standardize `license inspect` CLI subcommands across downstream binaries.
 
 ### 📊 Concurrency-Safe Usage Metering & Watermarking
 - [ ] **In-Memory `UsageMeter`**: Provide a thread-safe consumption tracker against `Claims.Limits` (e.g. `meter.CanConsume("runners", n)`).
@@ -48,6 +58,12 @@ This document tracks upcoming capabilities, planned optimizations, and ecosystem
 
 ## ✅ Delivered Capabilities
 
+- **Standard Verification KeyRing & Environment Resolver (`ResolveKeyRing`)**:
+  - Auto-resolution across programmatic in-memory overrides (`SetVerificationKeyRing`, `SetVerificationPublicKey`), `DIVMORA_PUBLIC_KEYS_PEM` (multi-key PKIX PEM bundle string or file path), `DIVMORA_PUBLIC_KEY` (base64 raw 32-byte key, base64 PKIX DER, inline PEM, or file path), `DIVMORA_PUBLIC_KEY_FILE`, default `/etc/divmora/public.pem`, and embedded fallback keys.
+  - Zero-configuration CLI verification (`license-cli verify` and `license-cli keyring` without requiring `-public-key`).
+- **Embedded Public Key Helpers & Constructors**:
+  - `NewValidatorFromEmbeddedPEM` for compile-time `//go:embed` directives without distributing separate `.pem` files on disk.
+  - `NewValidatorFromBase64`, `NewValidatorFromEnv`, and `NewValidatorWithFallbackKey`.
 - **Divmora Token Protocol Specification (`SPEC.md`)**:
   - Full RFC specification covering `DIV1` envelope encoding, Ed25519 digital signatures, canonical signed data (`DIV1.<payloadB64>`), JSON claims schema, BSL 1.1 state machine, operational policies, and strict 10-step verification algorithm.
 - **Operational Enforcement Policies & Graceful Degradation (`Manager`)**:
