@@ -12,15 +12,17 @@ This document tracks upcoming capabilities, planned optimizations, and ecosystem
 ### 🔑 Cryptographic & Key Lifecycle
 - [ ] **AWS KMS Asymmetric Signing**: Support AWS KMS asymmetric Ed25519 signing in `license-cli` (enabling license generation in CI/CD without exposing private key files).
 - [ ] **HashiCorp Vault Transit Engine**: Support Vault Transit engine for enterprise automated license issuance workflows.
+- [ ] **Cryptographic Release Attestation & Provenance Engine (`EvaluateProvenance`)**: Implement Ed25519 cryptographic release metadata signing and verification (`ReleaseClaims`, `SignRelease`, `VerifyRelease`, `EvaluateProvenance`) to certify authentic compiled binary releases against official build metadata (`Version`, `GitCommit`, `BuildDate`, `Authority`). Prevents local compilation tampering (e.g. forging build timestamps) from claiming premature BSL 1.1 Apache 2.0 open-source conversion.
 
 ### 🏢 Organizational Scoping & Multi-Tenancy
 - [ ] *(Additional multi-tenancy capabilities will be tracked here)*
 
 ### 🛡️ Validation & Diagnostic Reporting
-- [ ] *(Additional validation capabilities will be tracked here)*
+- [ ] **BSL 1.1 Additional Use Grant Evaluator (`BSLPolicy.EvaluateEntitlement`)**: Provide standard BSL 1.1 dual-licensing entitlement evaluation modeling vendor-specific Additional Use Grants (e.g. Grant A: non-production / simulation / test exemption; Grant B: free community production quota up to $N$ units like `max_projects` or `max_nodes`). Automatically enforces commercial token requirements only when usage exceeds free tier bounds while granting full open-source access upon Change Date arrival.
 
 ### 🖥️ Developer Experience & CLI Tooling
-- [ ] *(Additional CLI tooling capabilities will be tracked here)*
+- [ ] **Release Provenance CLI Subcommands (`sign-release` & `verify-release`)**: Add `license-cli sign-release` and `license-cli verify-release` subcommands to allow CI/CD pipelines to mint and verify Ed25519 release attestation tokens and sidecar files (`release.sig`), consolidating downstream license generators (such as `fleet-license-gen`) into a single canonical Divmora administrative CLI tool.
+- [ ] **Standardized CLI License Status Formatter**: Provide reusable status banner and tabular formatters for downstream CLI applications implementing `app license status` or `app license check` commands, presenting active tiers, quota limits, days remaining, grace period countdowns, and BSL 1.1 Apache 2.0 conversion status consistently across all Divmora tools.
 
 ### 📊 Concurrency-Safe Usage Metering & Watermarking
 - [ ] **In-Memory `UsageMeter`**: Provide a thread-safe consumption tracker against `Claims.Limits` (e.g. `meter.CanConsume("runners", n)`).
