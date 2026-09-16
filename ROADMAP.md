@@ -31,15 +31,8 @@ This document tracks upcoming capabilities, planned optimizations, and ecosystem
 - [ ] **gRPC Interceptors**: Provide `UnaryServerInterceptor` and `StreamServerInterceptor` for Go microservices.
 
 ### 📦 Air-Gapped & Enterprise Workflows
-- [ ] **Customer Machine Fingerprint Tool**: Add `license-cli fingerprint` (or `request`) command allowing air-gapped customers to generate a clean machine/node identity bundle for license requests.
 - [ ] **Offline Revocation Lists (CRL)**: Support local cryptographically signed revocation lists to invalidate compromised or leaked license IDs in air-gapped environments without network access.
 - [ ] **Signed Audit & Compliance Receipts**: Offline usage snapshot generator that outputs cryptographically signed receipts to verify historical compliance during vendor audits.
-
-### 🖥️ Built-in Fingerprint Resolvers
-- [ ] Provide out-of-the-box fingerprint resolvers for:
-  - AWS EC2 Instance ID & Account ID (via IMDSv2)
-  - Kubernetes Cluster UID & Node Names
-  - Host hardware UUID / DMI system serial
 
 ### 🌐 Online Activation & Centralized Revocation
 - [ ] Optional HTTP client middleware for periodic online heartbeat / activation checks against a centralized Divmora licensing server.
@@ -55,6 +48,23 @@ This document tracks upcoming capabilities, planned optimizations, and ecosystem
 ---
 
 ## ✅ Delivered Capabilities
+
+- **Air-Gapped Machine Fingerprint Engine & Automated Resolvers (`MachineFingerprint`, `license-cli fingerprint`, `license-cli request`)**:
+  - `MachineFingerprint`, `PlatformHost`, `PlatformAWSEC2`, `PlatformKubernetes`, `PlatformGeneric`: Deterministic machine identity schema with canonical SHA-256 digest computation, short 16-character digests, and flexible prefix/component-tolerant matching.
+  - Out-of-the-box zero-dependency fingerprint resolvers:
+    - `HostResolver`: Linux (`/etc/machine-id`, `/sys/class/dmi/id/product_uuid`), macOS (`ioreg` `IOPlatformExpertDevice` `IOPlatformUUID`), and non-loopback network MAC address fallback.
+    - `AWSEC2Resolver`: Pure Go standard library IMDSv2 session token acquisition and dynamic instance identity document parsing (`instance_id`, `account_id`, `region`, `availability_zone`, `instance_type`) with strict 500ms safety timeout.
+    - `KubernetesResolver`: In-cluster detection via serviceaccount secrets and Kubernetes API querying `kube-system` namespace UID, with downward API and cluster ID environment fallbacks.
+    - `CompositeResolver`: Priority fallback resolver hierarchy (`Kubernetes` -> `AWSEC2` -> `Host`).
+  - Air-gapped license request workflow:
+    - `LicenseRequest`: Data structure and armored PEM block encoding `-----BEGIN DIVMORA LICENSE REQUEST-----` (`.divreq`).
+    - Subcommand `license-cli fingerprint`: Inspects local host/cloud machine identity with visual inspection card, `-json`, and `-quiet` primary ID export.
+    - Subcommand `license-cli request`: Generates air-gapped request files capturing target hardware identity, requested plan, limits, features, and operator notes.
+    - Subcommand `license-cli issue -request <file>`: Automated fulfillment binding customer, product, plan, requested limits/features, and node-lock fingerprint from `.divreq` files.
+  - Automated Validator node-lock enforcement:
+    - `WithAutoFingerprint(true)`: Automatic detection and verification of node-locked licenses against host/cloud environment with zero manual configuration.
+    - `WithFingerprintResolver(resolver)`: Custom resolver injection.
+    - `VerificationResult.ResolvedFingerprint` and `VerificationResult.FingerprintMatched`: Enriched verification results and visual CLI status badges.
 
 - **BSL 1.1 Additional Use Grant Evaluator (`BSLPolicy.EvaluateEntitlement` & `license-cli bsl-eval`)**:
   - `BSLAdditionalUseGrant`, `BSLUsageRequest`, `BSLGrantEvaluation`, `BSLEntitlementResult`, and `BSLGrantType`: Standardized BSL 1.1 dual-licensing entitlement evaluation engine modeling vendor-specific Additional Use Grants prior to Change Date.
