@@ -18,12 +18,6 @@ This document tracks upcoming capabilities, planned optimizations, and ecosystem
 - [ ] **In-Memory `UsageMeter`**: Provide a thread-safe consumption tracker against `Claims.Limits` (e.g. `meter.CanConsume("runners", n)`).
 - [ ] **Watermark Tracking & Threshold Alerts**: High-watermark usage recording and configurable threshold alert callbacks (e.g., notify downstream application when usage reaches 80% or 95% of licensed capacity).
 
-### 🛡️ Operational Policies & Graceful Degradation
-- [ ] **Enforcement Policy Modes**: Configurable operational modes in `Manager`:
-  - `PolicyStrict`: Fail closed / halt operations immediately upon expiration, scope mismatch, or limit overrun.
-  - `PolicyDegraded`: Warn loudly in logs and fallback to community/free tier limits or read-only mode to prevent mission-critical pipeline crashes.
-- [ ] **BSL Transition Runtime Callback**: Add `OnBSLConverted` lifecycle callback in `Manager` to alert application logs or telemetry when a long-running service crosses its BSL Change Date into open-source Apache 2.0.
-
 ### 🔌 Framework Adapters & Middleware
 - [ ] **HTTP Server Middleware**: Standard Go `func(next http.Handler) http.Handler` to extract and verify tokens, inject `Claims` into `r.Context()`, and append telemetry headers (`X-License-Status`, `X-License-Expires`).
 - [ ] **gRPC Interceptors**: Provide `UnaryServerInterceptor` and `StreamServerInterceptor` for Go microservices.
@@ -55,6 +49,11 @@ This document tracks upcoming capabilities, planned optimizations, and ecosystem
 
 ## ✅ Delivered Capabilities
 
+- **Operational Enforcement Policies & Graceful Degradation (`Manager`)**:
+  - `PolicyStrict`: Fail-closed enforcement on expiration, scope mismatch, or verification failure.
+  - `PolicyDegraded`: Continuous operation with fallback community claims, read-only mutation restrictions (`DegradedReadOnly`), and non-disruptive `OnDegraded` and `OnRecovered` lifecycle hooks.
+  - `PolicyWarnOnly`: Non-blocking audit/dry-run mode that records policy violations without rejecting features or limits.
+  - Runtime BSL 1.1 open-source recovery with `OnBSLConverted` notification hook.
 - **Business Source License (BSL 1.1) Dual-Lifecycle & Clock Defense**:
   - Autonomous 3-year conversion to open-source (`Apache-2.0`) with synthetic entitlement bypass.
   - Authoritative reference clock defense (`WithAuthoritativeTime`) to detect forward host clock tampering.

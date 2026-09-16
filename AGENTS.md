@@ -24,6 +24,7 @@ license-go/
 │       ├── bsl_test.go         # BSL 1.1 conversion & clock tampering defense tests
 │       ├── license_test.go     # Signing, verification, tampering, expiration tests
 │       ├── manager_test.go     # Background daemon lifecycle & hot-reloading tests
+│       ├── policy_test.go      # Operational policy modes (Strict, Degraded, WarnOnly) tests
 │       └── version_test.go     # Perpetual license version lock & maintenance cutoff tests
 ├── cmd/
 │   └── license-cli/            # Standalone CLI binary (keygen, issue, verify, inspect)

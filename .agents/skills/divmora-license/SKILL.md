@@ -209,6 +209,16 @@ func startLicenseManager(ctx context.Context, pubKeyPath string) (*license.Manag
 		Validator:         validator,
 		CheckInterval:     1 * time.Hour,
 		ExpiryWarningDays: 14,
+		// Enforcement policy mode: PolicyStrict (default), PolicyDegraded, or PolicyWarnOnly:
+		Policy:            license.PolicyDegraded,
+		DegradedReadOnly:  true, // Enforces read-only mode (CanMutate() returns ErrDegradedReadOnly)
+		FallbackClaims: &license.Claims{
+			Product:  "otel-aws-log-processor",
+			Plan:     "community",
+			Customer: license.Customer{Name: "Community User"},
+			Features: []string{"basic-ingest"},
+			Limits:   map[string]int64{"max_streams": 10},
+		},
 		OnExpiringSoon: func(claims *license.Claims, daysRemaining int) {
 			log.Printf("[LICENSE] Warning: License expires in %d days", daysRemaining)
 		},
@@ -217,6 +227,15 @@ func startLicenseManager(ctx context.Context, pubKeyPath string) (*license.Manag
 		},
 		OnExpired: func(claims *license.Claims) {
 			log.Printf("[LICENSE] CRITICAL: License has expired!")
+		},
+		OnDegraded: func(reason error, claims *license.Claims) {
+			log.Printf("[LICENSE] NOTICE: Operating in DEGRADED mode (%v); falling back to %s tier", reason, claims.Plan)
+		},
+		OnRecovered: func(newClaims *license.Claims) {
+			log.Printf("[LICENSE] SUCCESS: Recovered from degraded mode to active license tier: %s", newClaims.Plan)
+		},
+		OnBSLConverted: func(claims *license.Claims) {
+			log.Printf("[LICENSE] CELEBRATION: BSL 1.1 Change Date reached! Converted to Apache 2.0 open-source.")
 		},
 		OnReloaded: func(newClaims, oldClaims *license.Claims) {
 			log.Printf("[LICENSE] Info: License reloaded! New tier: %s", newClaims.Plan)
@@ -363,4 +382,6 @@ license-cli verify \
 | `ErrVersionNotEntitled` | Running software version exceeds `claims.MaxVersion` or is not in `claims.AllowedVersions` | Upgrade perpetual license to entitle the newer major version. |
 | `ErrMaintenanceExpired` | Software build date exceeds `claims.MaintenanceExpiresAt` | Customer's annual maintenance contract has expired. Renew maintenance to unlock newer binary releases. |
 | `ErrClockTamperingDetected` | Local system clock was advanced forward to bypass BSL or license checks | Ensure the system clock is synchronized via NTP. Authoritative server time is used to enforce genuine validity. |
+| `ErrDegradedMode` | License is expired or missing while operating in `PolicyDegraded` | Re-issue or restore valid commercial license key to unlock enterprise tier entitlements. |
+| `ErrDegradedReadOnly` | Mutation attempted while manager is in degraded read-only mode (`DegradedReadOnly: true`) | Renew commercial license to re-enable write operations and full operational capacity. |
 

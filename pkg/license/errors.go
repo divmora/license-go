@@ -56,6 +56,12 @@ var (
 
 	// ErrClockTamperingDetected is returned when local system clock contradicts authoritative server time.
 	ErrClockTamperingDetected = errors.New("license: clock tampering detected; local clock contradicts authoritative server time")
+
+	// ErrDegradedMode is returned when an operation is restricted because the license manager is operating in degraded mode.
+	ErrDegradedMode = errors.New("license: operating in degraded mode")
+
+	// ErrDegradedReadOnly is returned when a mutation or write operation is attempted while in degraded read-only mode.
+	ErrDegradedReadOnly = errors.New("license: operating in degraded read-only mode; mutations not permitted")
 )
 
 // LimitExceededError provides structured detail when a quota is exceeded.

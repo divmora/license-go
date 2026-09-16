@@ -804,3 +804,13 @@ func InspectFromFile(filePath string) (*Claims, error) {
 	}
 	return Inspect(string(data))
 }
+
+// ExpectedProduct returns the expected product name configured for this validator.
+func (v *Validator) ExpectedProduct() string {
+	return v.expectedProduct
+}
+
+// BSLPolicy returns the BSL 1.1 policy configured for this validator, or nil if none is configured.
+func (v *Validator) BSLPolicy() *BSLPolicy {
+	return v.bslPolicy
+}
