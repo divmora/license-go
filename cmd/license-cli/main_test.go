@@ -138,7 +138,24 @@ func TestCLI_IssueVerifyInspect_StandardAndCustomScopeAndMeta(t *testing.T) {
 		t.Fatalf("runVerify failed with matching scopes: %v", err)
 	}
 
-	// 5. Verify - custom scope mismatch should fail
+	// 5. Verify - apex domain with URL, port, and trailing path against *.acme.corp
+	err = runVerify([]string{
+		"-public-key", pubKeyPath,
+		"-license", licensePath,
+		"-product", "gitlab-fleet-governor",
+		"-env", "production",
+		"-account", "123456789012",
+		"-region", "us-east-1",
+		"-cluster", "prod-eks-01",
+		"-namespace", "gitlab.com/acme/project-1",
+		"-host", "https://acme.corp:8443/runners",
+		"-custom-scope", "tier=platinum,datacenter=dc-east",
+	})
+	if err != nil {
+		t.Fatalf("runVerify failed for apex domain URL: %v", err)
+	}
+
+	// 6. Verify - custom scope mismatch should fail
 	err = runVerify([]string{
 		"-public-key", pubKeyPath,
 		"-license", licensePath,

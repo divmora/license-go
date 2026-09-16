@@ -199,3 +199,170 @@ func TestScope_ValidatorEnforcement(t *testing.T) {
 		t.Fatalf("expected ErrScopeMismatch on account, got %v", err)
 	}
 }
+
+func TestNormalizeHost(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{name: "empty", input: "", expected: ""},
+		{name: "whitespace only", input: "   ", expected: ""},
+		{name: "simple domain", input: "acme.corp", expected: "acme.corp"},
+		{name: "uppercase domain", input: "GITLAB.ACME.CORP", expected: "gitlab.acme.corp"},
+		{name: "trailing dot FQDN", input: "gitlab.acme.corp.", expected: "gitlab.acme.corp"},
+		{name: "http scheme", input: "http://gitlab.acme.corp", expected: "gitlab.acme.corp"},
+		{name: "https scheme", input: "https://gitlab.acme.corp", expected: "gitlab.acme.corp"},
+		{name: "custom scheme", input: "grpc://my-service.internal", expected: "my-service.internal"},
+		{name: "protocol relative", input: "//gitlab.acme.corp", expected: "gitlab.acme.corp"},
+		{name: "port stripped", input: "gitlab.acme.corp:8080", expected: "gitlab.acme.corp"},
+		{name: "https with port", input: "https://gitlab.acme.corp:8443", expected: "gitlab.acme.corp"},
+		{name: "trailing slash stripped", input: "https://gitlab.acme.corp/", expected: "gitlab.acme.corp"},
+		{name: "path stripped", input: "https://gitlab.acme.corp/api/v4/projects", expected: "gitlab.acme.corp"},
+		{name: "query and fragment stripped", input: "gitlab.acme.corp:8080/dashboard?tab=1#status", expected: "gitlab.acme.corp"},
+		{name: "userinfo stripped", input: "https://admin:secret@gitlab.acme.corp:443/api", expected: "gitlab.acme.corp"},
+		{name: "localhost with port", input: "localhost:3000", expected: "localhost"},
+		{name: "ipv4 with port", input: "http://192.168.1.100:9090/metrics", expected: "192.168.1.100"},
+		{name: "ipv4 without port", input: "10.0.0.1", expected: "10.0.0.1"},
+		{name: "ipv6 bracketed with port", input: "http://[2001:db8::1]:8080/path", expected: "2001:db8::1"},
+		{name: "ipv6 bracketed without port", input: "[::1]", expected: "::1"},
+		{name: "ipv6 literal unbracketed", input: "2001:db8::1", expected: "2001:db8::1"},
+		{name: "wildcard domain", input: "*.acme.corp", expected: "*.acme.corp"},
+		{name: "wildcard domain with scheme and port", input: "https://*.acme.corp:443/", expected: "*.acme.corp"},
+		{name: "universal wildcard", input: "*", expected: "*"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			actual := NormalizeHost(tt.input)
+			if actual != tt.expected {
+				t.Errorf("NormalizeHost(%q) = %q, want %q", tt.input, actual, tt.expected)
+			}
+		})
+	}
+}
+
+func TestScope_ApexDomainMatching(t *testing.T) {
+	scope := &Scope{
+		Hosts: []string{"*.acme.corp"},
+	}
+
+	// 1. Apex domain must be authorized
+	if !scope.IsHostAllowed("acme.corp") {
+		t.Error("expected apex domain 'acme.corp' to be authorized by '*.acme.corp'")
+	}
+	if !scope.IsHostAllowed("https://acme.corp") {
+		t.Error("expected URL 'https://acme.corp' to be authorized by '*.acme.corp'")
+	}
+	if !scope.IsHostAllowed("https://acme.corp:443/dashboard") {
+		t.Error("expected URL with port and path 'https://acme.corp:443/dashboard' to be authorized by '*.acme.corp'")
+	}
+
+	// 2. Direct subdomains must be authorized
+	if !scope.IsHostAllowed("gitlab.acme.corp") {
+		t.Error("expected 'gitlab.acme.corp' to be authorized by '*.acme.corp'")
+	}
+	if !scope.IsHostAllowed("https://gitlab.acme.corp:8443/api/v4") {
+		t.Error("expected URL 'https://gitlab.acme.corp:8443/api/v4' to be authorized by '*.acme.corp'")
+	}
+
+	// 3. Multi-level subdomains must be authorized
+	if !scope.IsHostAllowed("runners.us-east.gitlab.acme.corp") {
+		t.Error("expected multi-level subdomain 'runners.us-east.gitlab.acme.corp' to be authorized by '*.acme.corp'")
+	}
+
+	// 4. Suffix collisions and unrelated domains must be disallowed
+	disallowed := []string{
+		"notacme.corp",
+		"fake-acme.corp",
+		"http://evil-acme.corp",
+		"acme.com",
+		"other.org",
+		"corp",
+	}
+	for _, target := range disallowed {
+		if scope.IsHostAllowed(target) {
+			t.Errorf("expected target %q to be disallowed by '*.acme.corp'", target)
+		}
+	}
+}
+
+func TestScope_LeadingDotDomainMatching(t *testing.T) {
+	scope := &Scope{
+		Hosts: []string{".acme.corp"},
+	}
+
+	if !scope.IsHostAllowed("acme.corp") {
+		t.Error("expected apex 'acme.corp' to be authorized by '.acme.corp'")
+	}
+	if !scope.IsHostAllowed("gitlab.acme.corp") {
+		t.Error("expected subdomain 'gitlab.acme.corp' to be authorized by '.acme.corp'")
+	}
+	if scope.IsHostAllowed("evil.com") {
+		t.Error("expected 'evil.com' to be disallowed by '.acme.corp'")
+	}
+}
+
+func TestValidator_HostNormalizationAndApexMatching(t *testing.T) {
+	pub, priv, err := GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("GenerateKeyPair failed: %v", err)
+	}
+
+	signer, err := NewSigner(priv)
+	if err != nil {
+		t.Fatalf("NewSigner failed: %v", err)
+	}
+
+	claims := Claims{
+		Customer: Customer{Name: "Acme Corp"},
+		Product:  "gitlab-fleet-governor",
+		Scope: &Scope{
+			Hosts: []string{"*.acme.corp", "runner-*.internal"},
+		},
+	}
+	token, err := signer.Sign(claims)
+	if err != nil {
+		t.Fatalf("Sign failed: %v", err)
+	}
+
+	// 1. Target is full URL with apex domain -> SUCCESS
+	vApex, err := NewValidator(pub,
+		WithProduct("gitlab-fleet-governor"),
+		WithCurrentHost("https://acme.corp:443/runners"),
+	)
+	if err != nil {
+		t.Fatalf("NewValidator failed: %v", err)
+	}
+	if _, err := vApex.Verify(token); err != nil {
+		t.Errorf("expected apex URL to verify successfully, got: %v", err)
+	}
+
+	// 2. Target is full URL with subdomain and custom port -> SUCCESS
+	vSub, _ := NewValidator(pub,
+		WithProduct("gitlab-fleet-governor"),
+		WithCurrentHost("https://gitlab.acme.corp:8443/api/v4"),
+	)
+	if _, err := vSub.Verify(token); err != nil {
+		t.Errorf("expected subdomain URL to verify successfully, got: %v", err)
+	}
+
+	// 3. Target is runner with internal port -> SUCCESS
+	vInternal, _ := NewValidator(pub,
+		WithProduct("gitlab-fleet-governor"),
+		WithCurrentHost("http://runner-01.internal:9090/"),
+	)
+	if _, err := vInternal.Verify(token); err != nil {
+		t.Errorf("expected internal host to verify successfully, got: %v", err)
+	}
+
+	// 4. Target is unauthorized host URL -> FAIL with ErrScopeMismatch
+	vDisallowed, _ := NewValidator(pub,
+		WithProduct("gitlab-fleet-governor"),
+		WithCurrentHost("https://evil.corp:443/"),
+	)
+	_, err = vDisallowed.Verify(token)
+	if err == nil || !errors.Is(err, ErrScopeMismatch) {
+		t.Errorf("expected ErrScopeMismatch for unauthorized host, got: %v", err)
+	}
+}

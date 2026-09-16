@@ -15,7 +15,6 @@ This document tracks upcoming capabilities, planned optimizations, and ecosystem
 
 ### 🏢 Organizational Scoping & Multi-Tenancy
 - [ ] **Hierarchical Namespace & Group Tree Scope Matching (`Scope.Namespaces`)**: Extend `Scope.IsNamespaceAllowed` to support hierarchical path matching (e.g., `"devops"` or `"devops/*"` authorizes all descendant sub-groups and repositories like `"devops/backend/service"`). Supports multi-tenant trees in GitLab groups, GitHub organizations, and Kubernetes namespace hierarchies.
-- [ ] **Host / URL Normalization & Apex Domain Matching (`Scope.Hosts`)**: Add `NormalizeHost(rawURL string)` to automatically strip schemes (`http://`, `https://`), ports, and trailing paths. Support apex domain authorization for wildcard domain scopes (e.g., `"*.acme.corp"` authorizes both `"gitlab.acme.corp"` and apex `"acme.corp"`).
 
 ### 🛡️ Validation & Diagnostic Reporting
 - [ ] **Diagnostic Human Status Message (`VerificationResult.StatusMessage()`)**: Add `StatusMessage()` on `VerificationResult` generating standard human-readable descriptions (active status with remaining days, in-grace-period notices with remaining grace days, perpetual active status, and expired notices) to unify CLI banners and log messaging across products.
@@ -61,6 +60,10 @@ This document tracks upcoming capabilities, planned optimizations, and ecosystem
 - **Standard Verification KeyRing & Environment Resolver (`ResolveKeyRing`)**:
   - Auto-resolution across programmatic in-memory overrides (`SetVerificationKeyRing`, `SetVerificationPublicKey`), `DIVMORA_PUBLIC_KEYS_PEM` (multi-key PKIX PEM bundle string or file path), `DIVMORA_PUBLIC_KEY` (base64 raw 32-byte key, base64 PKIX DER, inline PEM, or file path), `DIVMORA_PUBLIC_KEY_FILE`, default `/etc/divmora/public.pem`, and embedded fallback keys.
   - Zero-configuration CLI verification (`license-cli verify` and `license-cli keyring` without requiring `-public-key`).
+- **Host / URL Normalization & Apex Domain Matching (`Scope.Hosts`)**:
+  - `NormalizeHost` utility to automatically strip schemes (`http://`, `https://`, `grpc://`, `//`), user credentials, ports (`:8080`), paths, query strings, and fragments with full IPv4 and IPv6 support.
+  - Automatic apex domain authorization for wildcard domain scopes (`*.acme.corp` authorizes both subdomains like `gitlab.acme.corp` and apex `acme.corp`).
+  - First-class evaluator helper methods on `Scope` (`Scope.IsHostAllowed`, `Scope.IsEnvironmentAllowed`, `Scope.IsAccountAllowed`, `Scope.IsRegionAllowed`, `Scope.IsClusterAllowed`, `Scope.IsNamespaceAllowed`).
 - **Embedded Public Key Helpers & Constructors**:
   - `NewValidatorFromEmbeddedPEM` for compile-time `//go:embed` directives without distributing separate `.pem` files on disk.
   - `NewValidatorFromBase64`, `NewValidatorFromEnv`, and `NewValidatorWithFallbackKey`.

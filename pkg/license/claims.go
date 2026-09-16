@@ -45,6 +45,58 @@ type Scope struct {
 	Custom map[string][]string `json:"custom,omitempty"`
 }
 
+// IsEnvironmentAllowed reports whether the target deployment environment is authorized by Scope.Environments.
+func (s *Scope) IsEnvironmentAllowed(env string) bool {
+	if s == nil || len(s.Environments) == 0 {
+		return true
+	}
+	return matchesScopeSlice(s.Environments, env)
+}
+
+// IsAccountAllowed reports whether the target cloud tenant or account ID is authorized by Scope.Accounts.
+func (s *Scope) IsAccountAllowed(account string) bool {
+	if s == nil || len(s.Accounts) == 0 {
+		return true
+	}
+	return matchesScopeSlice(s.Accounts, account)
+}
+
+// IsRegionAllowed reports whether the target geographic/cloud region is authorized by Scope.Regions.
+func (s *Scope) IsRegionAllowed(region string) bool {
+	if s == nil || len(s.Regions) == 0 {
+		return true
+	}
+	return matchesScopeSlice(s.Regions, region)
+}
+
+// IsClusterAllowed reports whether the target cluster ID/ARN is authorized by Scope.Clusters.
+func (s *Scope) IsClusterAllowed(cluster string) bool {
+	if s == nil || len(s.Clusters) == 0 {
+		return true
+	}
+	return matchesScopeSlice(s.Clusters, cluster)
+}
+
+// IsNamespaceAllowed reports whether the target project/group hierarchy is authorized by Scope.Namespaces.
+func (s *Scope) IsNamespaceAllowed(namespace string) bool {
+	if s == nil || len(s.Namespaces) == 0 {
+		return true
+	}
+	return matchesScopeSlice(s.Namespaces, namespace)
+}
+
+// IsHostAllowed reports whether the target hostname, FQDN, domain, or URL is authorized by Scope.Hosts.
+// Both the target and scope patterns are normalized via NormalizeHost.
+// Wildcard domain patterns (e.g. "*.acme.corp") authorize both subdomains ("gitlab.acme.corp")
+// and the apex domain ("acme.corp").
+// If Scope.Hosts is not defined or empty, all hosts are authorized.
+func (s *Scope) IsHostAllowed(host string) bool {
+	if s == nil || len(s.Hosts) == 0 {
+		return true
+	}
+	return matchesHostScope(s.Hosts, host)
+}
+
 // Claims represents the license payload containing identity, validity periods,
 // plan tiers, entitlements, and resource limits.
 type Claims struct {
@@ -466,13 +518,16 @@ func (c *Claims) IsNamespaceAllowed(namespace string) bool {
 	return matchesScopeSlice(c.Scope.Namespaces, namespace)
 }
 
-// IsHostAllowed reports whether the target hostname, FQDN, or domain pattern is authorized.
+// IsHostAllowed reports whether the target hostname, FQDN, domain, or URL is authorized.
+// Both the target and scope patterns are normalized via NormalizeHost.
+// Wildcard domain patterns (e.g. "*.acme.corp") authorize both subdomains ("gitlab.acme.corp")
+// and the apex domain ("acme.corp").
 // If Scope.Hosts is not defined or empty, all hosts are authorized.
 func (c *Claims) IsHostAllowed(host string) bool {
 	if c.Scope == nil || len(c.Scope.Hosts) == 0 {
 		return true
 	}
-	return matchesScopeSlice(c.Scope.Hosts, host)
+	return c.Scope.IsHostAllowed(host)
 }
 
 // IsInScope checks whether target is permitted under the given dimension name.
@@ -572,6 +627,128 @@ func matchesScopeSlice(allowed []string, target string) bool {
 			if matchFeaturePattern(entryLower, targetLower) {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+// NormalizeHost extracts and normalizes a clean hostname, FQDN, or IP address from a URL,
+// host:port string, or raw hostname.
+// It trims whitespace, strips schemes (e.g. "http://", "https://", "grpc://", "//"), user credentials ("user:pass@"),
+// ports (e.g. ":8080"), trailing paths (e.g. "/api/v1"), query parameters, and fragments,
+// and lowercases the result.
+func NormalizeHost(rawURL string) string {
+	s := strings.TrimSpace(rawURL)
+	if s == "" {
+		return ""
+	}
+
+	// 1. Strip scheme (e.g. "http://", "https://", "grpc://", or protocol-relative "//")
+	if idx := strings.Index(s, "://"); idx != -1 {
+		s = s[idx+3:]
+	} else if strings.HasPrefix(s, "//") {
+		s = s[2:]
+	}
+
+	// 2. Strip path, query params, and fragment (everything from the first '/', '?', or '#')
+	if idx := strings.IndexAny(s, "/?#"); idx != -1 {
+		s = s[:idx]
+	}
+
+	// 3. Strip user credentials (everything before the last '@')
+	if idx := strings.LastIndex(s, "@"); idx != -1 {
+		s = s[idx+1:]
+	}
+
+	// 4. Handle host and port
+	if strings.HasPrefix(s, "[") {
+		// IPv6 bracketed address: "[::1]:8080" or "[2001:db8::1]"
+		if closeBracket := strings.Index(s, "]"); closeBracket != -1 {
+			s = s[1:closeBracket]
+		}
+	} else if colonIdx := strings.LastIndex(s, ":"); colonIdx != -1 {
+		// If there is exactly one colon, it separates host and port (e.g. "gitlab.acme.corp:8080", "127.0.0.1:9090")
+		// (Multiple colons without brackets indicate an unbracketed IPv6 literal like "::1" or "2001:db8::1")
+		if strings.Count(s, ":") == 1 {
+			s = s[:colonIdx]
+		}
+	}
+
+	// 5. Lowercase, trim whitespace and trailing dot
+	s = strings.ToLower(strings.TrimSpace(s))
+	s = strings.TrimSuffix(s, ".")
+	return s
+}
+
+// matchesHostPattern checks whether a target host matches an allowed host pattern.
+// It supports:
+//   - Wildcards: "*" or "all" matches any host.
+//   - Exact match: "gitlab.acme.corp" matches "gitlab.acme.corp".
+//   - Wildcard domain & Apex matching: "*.acme.corp" matches both subdomains ("gitlab.acme.corp",
+//     "runner.dev.acme.corp") and the apex domain ("acme.corp").
+//   - Leading dot domain matching: ".acme.corp" matches both "acme.corp" and subdomains.
+//   - Standard glob patterns: "runner-*.acme.corp" or "srv[0-9].acme.corp".
+func matchesHostPattern(pattern, target string) bool {
+	p := NormalizeHost(pattern)
+	t := NormalizeHost(target)
+	if p == "" || t == "" {
+		return false
+	}
+
+	if p == "*" || p == "all" {
+		return true
+	}
+
+	if p == t {
+		return true
+	}
+
+	// Wildcard domain matching: "*.domain.tld"
+	if strings.HasPrefix(p, "*.") {
+		apex := strings.TrimPrefix(p, "*.")
+		// 1. Apex domain match: target is "acme.corp"
+		if t == apex {
+			return true
+		}
+		// 2. Subdomain match: target is "sub.acme.corp" or "a.b.acme.corp"
+		if strings.HasSuffix(t, "."+apex) {
+			return true
+		}
+	}
+
+	// Leading dot domain matching: ".domain.tld"
+	if strings.HasPrefix(p, ".") {
+		apex := strings.TrimPrefix(p, ".")
+		if t == apex || strings.HasSuffix(t, "."+apex) {
+			return true
+		}
+	}
+
+	// General glob matching (e.g. "runner-*.acme.corp", "srv[1-9].internal")
+	if strings.ContainsAny(p, "*?[") {
+		if matched, _ := path.Match(p, t); matched {
+			return true
+		}
+	}
+
+	return false
+}
+
+// matchesHostScope evaluates whether target matches any host pattern in allowed.
+// If allowed is empty, returns true (unrestricted).
+// If target is empty, returns false.
+func matchesHostScope(allowed []string, target string) bool {
+	if len(allowed) == 0 {
+		return true
+	}
+	normTarget := NormalizeHost(target)
+	if normTarget == "" {
+		return false
+	}
+
+	for _, entry := range allowed {
+		if matchesHostPattern(entry, normTarget) {
+			return true
 		}
 	}
 	return false
