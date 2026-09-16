@@ -24,6 +24,9 @@ const (
 	// PlatformAWSEC2 represents an Amazon Web Services EC2 virtual machine instance.
 	PlatformAWSEC2 Platform = "aws-ec2"
 
+	// PlatformAWSLambda represents an Amazon Web Services Lambda serverless execution environment.
+	PlatformAWSLambda Platform = "aws-lambda"
+
 	// PlatformKubernetes represents a container running within a Kubernetes cluster.
 	PlatformKubernetes Platform = "kubernetes"
 
@@ -83,9 +86,9 @@ func (f *MachineFingerprint) Matches(claimed string) bool {
 		return true
 	}
 
-	// 2. Prefix-stripped match (strip "fp:host:", "fp:aws:", "fp:k8s:", "fp:", "sha256:")
+	// 2. Prefix-stripped match (strip "fp:host:", "fp:aws:", "fp:lambda:", "fp:k8s:", "fp:generic:", "fp:", "sha256:")
 	clean := claimed
-	for _, prefix := range []string{"fp:host:", "fp:aws:", "fp:k8s:", "fp:generic:", "fp:", "sha256:"} {
+	for _, prefix := range []string{"fp:host:", "fp:aws:", "fp:lambda:", "fp:k8s:", "fp:generic:", "fp:", "sha256:"} {
 		if strings.HasPrefix(strings.ToLower(clean), prefix) {
 			clean = clean[len(prefix):]
 			break
@@ -95,14 +98,14 @@ func (f *MachineFingerprint) Matches(claimed string) bool {
 		return true
 	}
 
-	// 3. Component-level match against stable hardware identifiers
+	// 3. Component-level match against stable hardware/workload identifiers
 	for k, val := range f.Components {
 		val = strings.TrimSpace(val)
 		if val == "" {
 			continue
 		}
-		// Match against system_uuid, machine_id, cluster_uid, instance_id
-		if k == "system_uuid" || k == "machine_id" || k == "cluster_uid" || k == "instance_id" {
+		// Match against system_uuid, machine_id, cluster_uid, instance_id, function_name, function_arn
+		if k == "system_uuid" || k == "machine_id" || k == "cluster_uid" || k == "instance_id" || k == "function_name" || k == "function_arn" {
 			if strings.EqualFold(claimed, val) || strings.EqualFold(clean, val) {
 				return true
 			}
@@ -208,6 +211,19 @@ func computeCanonicalDigest(platform Platform, components map[string]string) (st
 		}
 		if reg := components["region"]; reg != "" {
 			parts = append(parts, "region:"+reg)
+		}
+	case PlatformAWSLambda:
+		if fn := components["function_name"]; fn != "" {
+			parts = append(parts, "function:"+fn)
+		}
+		if acc := components["account_id"]; acc != "" {
+			parts = append(parts, "account_id:"+acc)
+		}
+		if reg := components["region"]; reg != "" {
+			parts = append(parts, "region:"+reg)
+		}
+		if arn := components["function_arn"]; arn != "" {
+			parts = append(parts, "arn:"+arn)
 		}
 	case PlatformKubernetes:
 		if uid := components["cluster_uid"]; uid != "" {

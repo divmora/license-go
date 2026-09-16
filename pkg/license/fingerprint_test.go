@@ -2,6 +2,7 @@ package license
 
 import (
 	"context"
+	"errors"
 	"runtime"
 	"strings"
 	"testing"
@@ -157,6 +158,90 @@ func TestComputeCanonicalDigest(t *testing.T) {
 	digestFB, shortFB := computeCanonicalDigest(PlatformHost, compFallback)
 	if len(digestFB) != 64 || len(shortFB) != 16 {
 		t.Fatalf("invalid fallback digest lengths: %d, %d", len(digestFB), len(shortFB))
+	}
+}
+
+func TestComputeCanonicalDigest_AWSLambda(t *testing.T) {
+	comp1 := map[string]string{
+		"os":            "linux",
+		"arch":          "arm64",
+		"function_name": "otel-log-forwarder",
+		"region":        "us-east-1",
+		"account_id":    "123456789012",
+		"function_arn":  "arn:aws:lambda:us-east-1:123456789012:function:otel-log-forwarder",
+	}
+	digest1, short1 := computeCanonicalDigest(PlatformAWSLambda, comp1)
+	if len(digest1) != 64 || len(short1) != 16 {
+		t.Fatalf("invalid digest lengths: %d, %d", len(digest1), len(short1))
+	}
+	if !strings.HasPrefix(digest1, short1) {
+		t.Errorf("expected short digest %q to be prefix of %q", short1, digest1)
+	}
+
+	// Determinism
+	digest2, short2 := computeCanonicalDigest(PlatformAWSLambda, comp1)
+	if digest1 != digest2 || short1 != short2 {
+		t.Errorf("computeCanonicalDigest non-deterministic: %q vs %q", digest1, digest2)
+	}
+
+	// Distinct functions produce different digests
+	comp2 := map[string]string{
+		"os":            "linux",
+		"arch":          "arm64",
+		"function_name": "billing-processor",
+		"region":        "us-east-1",
+		"account_id":    "123456789012",
+	}
+	digest3, _ := computeCanonicalDigest(PlatformAWSLambda, comp2)
+	if digest1 == digest3 {
+		t.Errorf("different function names produced colliding digest: %s", digest1)
+	}
+}
+
+func TestMachineFingerprint_Matches_AWSLambda(t *testing.T) {
+	comp := map[string]string{
+		"os":            "linux",
+		"arch":          "arm64",
+		"function_name": "otel-log-forwarder",
+		"region":        "us-east-1",
+		"account_id":    "123456789012",
+		"function_arn":  "arn:aws:lambda:us-east-1:123456789012:function:otel-log-forwarder",
+	}
+	digest, short := computeCanonicalDigest(PlatformAWSLambda, comp)
+	fp := &MachineFingerprint{
+		Primary:         "fp:lambda:" + short,
+		Platform:        PlatformAWSLambda,
+		CanonicalDigest: digest,
+		ShortDigest:     short,
+		Components:      comp,
+		ResolvedAt:      time.Now().UTC(),
+	}
+
+	tests := []struct {
+		name    string
+		claimed string
+		want    bool
+	}{
+		{"exact primary", "fp:lambda:" + short, true},
+		{"case-insensitive primary", "FP:LAMBDA:" + strings.ToUpper(short), true},
+		{"canonical digest", digest, true},
+		{"short digest", short, true},
+		{"prefix fp:lambda: with short", "fp:lambda:" + short, true},
+		{"function_name match", "otel-log-forwarder", true},
+		{"function_name case-insensitive", "OTEL-LOG-FORWARDER", true},
+		{"function_arn match", "arn:aws:lambda:us-east-1:123456789012:function:otel-log-forwarder", true},
+		{"whitespace tolerance", "  otel-log-forwarder  ", true},
+		{"mismatched function", "other-function", false},
+		{"mismatched digest", "0000000000000000", false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := fp.Matches(tc.claimed)
+			if got != tc.want {
+				t.Errorf("fp.Matches(%q) = %v, want %v", tc.claimed, got, tc.want)
+			}
+		})
 	}
 }
 
@@ -356,5 +441,62 @@ func TestValidator_RequireFingerprint(t *testing.T) {
 	_, err = val.VerifyWithResult(token)
 	if err == nil {
 		t.Fatal("expected ErrFingerprintMismatch on missing fingerprint, got nil")
+	}
+}
+
+func TestValidator_AutoFingerprint_AWSLambda(t *testing.T) {
+	pub, priv, err := GenerateKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	signer, err := NewSigner(priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Issue license locked to specific Lambda function name
+	claims := Claims{
+		Customer:    Customer{Name: "Acme Cloud"},
+		Product:     "otel-aws-log-processor",
+		Fingerprint: "otel-aws-log-processor-prod",
+		ExpiresAt:   time.Now().Add(30 * 24 * time.Hour),
+	}
+	token, err := signer.Sign(claims)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Set environment for Lambda
+	t.Setenv("AWS_LAMBDA_FUNCTION_NAME", "otel-aws-log-processor-prod")
+	t.Setenv("AWS_REGION", "us-east-1")
+
+	val, err := NewValidator(pub,
+		WithProduct("otel-aws-log-processor"),
+		WithAutoFingerprint(true),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := val.VerifyWithResult(token)
+	if err != nil {
+		t.Fatalf("expected successful validation in Lambda, got error: %v", err)
+	}
+	if !res.FingerprintMatched {
+		t.Error("expected FingerprintMatched == true")
+	}
+	if res.ResolvedFingerprint == nil || res.ResolvedFingerprint.Platform != PlatformAWSLambda {
+		t.Fatalf("expected ResolvedFingerprint platform aws-lambda, got: %v", res.ResolvedFingerprint)
+	}
+
+	// Mismatched Lambda function name
+	t.Setenv("AWS_LAMBDA_FUNCTION_NAME", "different-unauthorized-lambda")
+	_, err = val.VerifyWithResult(token)
+	if err == nil {
+		t.Fatal("expected ErrFingerprintMismatch for different lambda function name, got nil")
+	}
+	if !errors.Is(err, ErrFingerprintMismatch) {
+		t.Errorf("expected ErrFingerprintMismatch, got %v", err)
 	}
 }

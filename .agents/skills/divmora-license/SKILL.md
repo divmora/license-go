@@ -544,6 +544,41 @@ license-cli bsl-eval \
 
 ---
 
+### Workflow L: Serverless & Machine Identity Fingerprinting (Lambda, EC2, K8s, Bare Metal)
+
+For node-locked licenses or serverless environments:
+
+```bash
+# Resolve current machine identity across platforms (auto, lambda, aws, k8s, host):
+license-cli fingerprint -platform auto
+
+# Explicitly evaluate AWS Lambda function identity:
+license-cli fingerprint -platform lambda
+
+# Generate an armored license request (.divreq) locked to the local environment:
+license-cli request -customer "Acme Corp" -product "otel-aws-log-processor" -platform lambda -out request.divreq
+```
+
+In Go services (such as `otel-aws-log-processor` running as a Lambda function):
+
+```go
+validator, err := license.NewValidatorWithFallbackKey(
+	defaultPublicKeyBase64,
+	license.WithProduct("otel-aws-log-processor"),
+	license.WithAutoFingerprint(true), // Automatically resolves AWS Lambda, K8s, EC2, or Host
+)
+if err != nil {
+	log.Fatalf("failed to initialize validator: %v", err)
+}
+
+claims, err := validator.VerifyEnv()
+if err != nil {
+	log.Fatalf("License verification failed: %v", err)
+}
+```
+
+---
+
 ## 4. Troubleshooting & Sentinel Errors
 
 | Error | Cause | Resolution |

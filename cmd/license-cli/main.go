@@ -1274,7 +1274,7 @@ func runBSLEval(args []string) error {
 
 func runFingerprint(args []string) error {
 	fs := flag.NewFlagSet("fingerprint", flag.ExitOnError)
-	platform := fs.String("platform", "auto", "Target platform resolver: auto, host, aws, k8s")
+	platform := fs.String("platform", "auto", "Target platform resolver: auto, host, aws, lambda, k8s")
 	asJSON := fs.Bool("json", false, "Output machine fingerprint in JSON format")
 	quiet := fs.Bool("quiet", false, "Output only the primary fingerprint string (for scripts)")
 
@@ -1290,10 +1290,12 @@ func runFingerprint(args []string) error {
 		resolver = license.NewHostResolver()
 	case "aws", "aws-ec2", "ec2":
 		resolver = license.NewAWSEC2Resolver()
+	case "lambda", "aws-lambda":
+		resolver = license.NewAWSLambdaResolver()
 	case "k8s", "kubernetes":
 		resolver = license.NewKubernetesResolver()
 	default:
-		return fmt.Errorf("unknown platform %q; valid values are: auto, host, aws, k8s", *platform)
+		return fmt.Errorf("unknown platform %q; valid values are: auto, host, aws, lambda, k8s", *platform)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -1344,7 +1346,7 @@ func runRequest(args []string) error {
 	customer := fs.String("customer", "", "Licensee / Customer name (required)")
 	product := fs.String("product", "", "Product name e.g. gitlab-fleet-governor (required)")
 	plan := fs.String("plan", "enterprise", "Requested license tier: starter, pro, enterprise")
-	platform := fs.String("platform", "auto", "Hardware resolver platform: auto, host, aws, k8s")
+	platform := fs.String("platform", "auto", "Hardware resolver platform: auto, host, aws, lambda, k8s")
 	limitsFlag := fs.String("limits", "", "Comma-separated requested limits in key=val format (e.g. 'runners=50,users=100')")
 	featuresFlag := fs.String("features", "", "Comma-separated requested features (e.g. 'sso,audit-logs')")
 	notes := fs.String("notes", "", "Optional deployment notes or request context")
@@ -1370,10 +1372,12 @@ func runRequest(args []string) error {
 		resolver = license.NewHostResolver()
 	case "aws", "aws-ec2", "ec2":
 		resolver = license.NewAWSEC2Resolver()
+	case "lambda", "aws-lambda":
+		resolver = license.NewAWSLambdaResolver()
 	case "k8s", "kubernetes":
 		resolver = license.NewKubernetesResolver()
 	default:
-		return fmt.Errorf("unknown platform %q; valid values are: auto, host, aws, k8s", *platform)
+		return fmt.Errorf("unknown platform %q; valid values are: auto, host, aws, lambda, k8s", *platform)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
