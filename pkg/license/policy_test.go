@@ -403,3 +403,360 @@ func TestManager_StopIdempotent(t *testing.T) {
 	// Calling Stop again should not panic or hang
 	mgr.Stop()
 }
+
+func TestManager_PolicyStrict_ExpirationEnforcement(t *testing.T) {
+	t.Parallel()
+
+	pub, priv, err := license.GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("GenerateKeyPair failed: %v", err)
+	}
+
+	signer, err := license.NewSigner(priv)
+	if err != nil {
+		t.Fatalf("NewSigner failed: %v", err)
+	}
+
+	validator, err := license.NewValidator(pub, license.WithProduct("gitlab-fleet-governor"))
+	if err != nil {
+		t.Fatalf("NewValidator failed: %v", err)
+	}
+
+	// 1. Initial creation with expired license must fail in PolicyStrict
+	now := time.Now().UTC()
+	expiredClaims := license.Claims{
+		ID:        "lic-expired",
+		Product:   "gitlab-fleet-governor",
+		Customer:  license.Customer{Name: "Acme Corp"},
+		IssuedAt:  now.Add(-10 * time.Hour),
+		ExpiresAt: now.Add(-1 * time.Hour),
+		Features:  []string{"enterprise-ha"},
+		Limits:    map[string]int64{"runners": 100},
+	}
+	expiredToken, err := signer.SignArmored(expiredClaims)
+	if err != nil {
+		t.Fatalf("SignArmored failed: %v", err)
+	}
+
+	_, err = license.NewManager(license.ManagerConfig{
+		Validator:     validator,
+		LicenseString: expiredToken,
+		Policy:        license.PolicyStrict,
+	})
+	if err == nil || !errors.Is(err, license.ErrExpired) {
+		t.Fatalf("expected NewManager to fail with ErrExpired, got: %v", err)
+	}
+
+	// 2. Runtime expiration: starts valid for 150ms
+	shortLivedClaims := license.Claims{
+		ID:        "lic-short",
+		Product:   "gitlab-fleet-governor",
+		Customer:  license.Customer{Name: "Acme Corp"},
+		IssuedAt:  now.Add(-1 * time.Minute),
+		ExpiresAt: now.Add(150 * time.Millisecond),
+		Features:  []string{"enterprise-ha", "metrics"},
+		Limits:    map[string]int64{"runners": 100},
+	}
+	shortToken, err := signer.SignArmored(shortLivedClaims)
+	if err != nil {
+		t.Fatalf("SignArmored failed: %v", err)
+	}
+
+	var expiredCalled int32
+	mgr, err := license.NewManager(license.ManagerConfig{
+		Validator:     validator,
+		LicenseString: shortToken,
+		Policy:        license.PolicyStrict,
+		OnExpired: func(claims *license.Claims) {
+			atomic.AddInt32(&expiredCalled, 1)
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewManager failed: %v", err)
+	}
+
+	// Initially active
+	if !mgr.IsActive() {
+		t.Fatal("expected manager.IsActive() == true before expiration")
+	}
+	if !mgr.IsCommercialActive() {
+		t.Fatal("expected manager.IsCommercialActive() == true before expiration")
+	}
+	if !mgr.HasFeature("enterprise-ha") {
+		t.Fatal("expected HasFeature('enterprise-ha') == true before expiration")
+	}
+	if err := mgr.AssertFeature("enterprise-ha"); err != nil {
+		t.Fatalf("expected AssertFeature('enterprise-ha') to succeed: %v", err)
+	}
+	if err := mgr.CheckLimit("runners", 50); err != nil {
+		t.Fatalf("expected CheckLimit to succeed: %v", err)
+	}
+	if err := mgr.CanMutate(); err != nil {
+		t.Fatalf("expected CanMutate to succeed: %v", err)
+	}
+
+	// Wait for expiration
+	time.Sleep(250 * time.Millisecond)
+
+	// Immediately after expiration (even before mgr.Check() is invoked):
+	if mgr.IsActive() {
+		t.Fatal("expected manager.IsActive() == false after expiration")
+	}
+	if mgr.IsCommercialActive() {
+		t.Fatal("expected manager.IsCommercialActive() == false after expiration")
+	}
+	if mgr.HasFeature("enterprise-ha") {
+		t.Fatal("expected HasFeature('enterprise-ha') == false after license expired!")
+	}
+	if err := mgr.AssertFeature("enterprise-ha"); !errors.Is(err, license.ErrExpired) {
+		t.Fatalf("expected AssertFeature to return ErrExpired after expiration, got: %v", err)
+	}
+	if err := mgr.CheckLimit("runners", 10); !errors.Is(err, license.ErrExpired) {
+		t.Fatalf("expected CheckLimit to return ErrExpired after expiration, got: %v", err)
+	}
+	if err := mgr.CanMutate(); !errors.Is(err, license.ErrExpired) {
+		t.Fatalf("expected CanMutate to return ErrExpired after expiration, got: %v", err)
+	}
+
+	// Run check to trigger OnExpired callback
+	mgr.Check()
+	if atomic.LoadInt32(&expiredCalled) != 1 {
+		t.Fatalf("expected OnExpired callback to be called once, got %d", expiredCalled)
+	}
+
+	// Post-check state remains strictly expired
+	if mgr.HasFeature("enterprise-ha") {
+		t.Fatal("expected HasFeature to remain false after check")
+	}
+	if err := mgr.CheckLimit("runners", 10); !errors.Is(err, license.ErrExpired) {
+		t.Fatalf("expected CheckLimit to remain ErrExpired after check, got: %v", err)
+	}
+}
+
+func TestManager_PolicyStrict_GracePeriodEnforcement(t *testing.T) {
+	t.Parallel()
+
+	pub, priv, err := license.GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("GenerateKeyPair failed: %v", err)
+	}
+
+	signer, err := license.NewSigner(priv)
+	if err != nil {
+		t.Fatalf("NewSigner failed: %v", err)
+	}
+
+	validator, err := license.NewValidator(pub, license.WithProduct("gitlab-fleet-governor"))
+	if err != nil {
+		t.Fatalf("NewValidator failed: %v", err)
+	}
+
+	now := time.Now().UTC()
+	// License expired 1 hour ago, but has 5 days of grace period!
+	graceClaims := license.Claims{
+		ID:              "lic-grace",
+		Product:         "gitlab-fleet-governor",
+		Customer:        license.Customer{Name: "Grace Corp"},
+		IssuedAt:        now.Add(-30 * 24 * time.Hour),
+		ExpiresAt:       now.Add(-1 * time.Hour),
+		GracePeriodDays: 5,
+		Features:        []string{"enterprise-ha"},
+		Limits:          map[string]int64{"runners": 100},
+	}
+	graceToken, err := signer.SignArmored(graceClaims)
+	if err != nil {
+		t.Fatalf("SignArmored failed: %v", err)
+	}
+
+	mgr, err := license.NewManager(license.ManagerConfig{
+		Validator:     validator,
+		LicenseString: graceToken,
+		Policy:        license.PolicyStrict,
+	})
+	if err != nil {
+		t.Fatalf("expected NewManager to succeed during grace period, got: %v", err)
+	}
+
+	if !mgr.IsActive() {
+		t.Fatal("expected manager.IsActive() == true during grace period")
+	}
+	if !mgr.IsCommercialActive() {
+		t.Fatal("expected manager.IsCommercialActive() == true during grace period")
+	}
+	if !mgr.HasFeature("enterprise-ha") {
+		t.Fatal("expected HasFeature('enterprise-ha') == true during grace period")
+	}
+	if err := mgr.AssertFeature("enterprise-ha"); err != nil {
+		t.Fatalf("expected AssertFeature to succeed during grace period: %v", err)
+	}
+	if err := mgr.CheckLimit("runners", 50); err != nil {
+		t.Fatalf("expected CheckLimit to succeed during grace period: %v", err)
+	}
+	if err := mgr.CheckLimit("runners", 150); !errors.Is(err, license.ErrLimitExceeded) {
+		t.Fatalf("expected ErrLimitExceeded for exceeding quota during grace period, got: %v", err)
+	}
+	if err := mgr.CanMutate(); err != nil {
+		t.Fatalf("expected CanMutate to succeed during grace period: %v", err)
+	}
+}
+
+func TestManager_PolicyDegraded_ImmediateExpirationFallback(t *testing.T) {
+	t.Parallel()
+
+	pub, priv, err := license.GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("GenerateKeyPair failed: %v", err)
+	}
+
+	signer, err := license.NewSigner(priv)
+	if err != nil {
+		t.Fatalf("NewSigner failed: %v", err)
+	}
+
+	validator, err := license.NewValidator(pub, license.WithProduct("gitlab-fleet-governor"))
+	if err != nil {
+		t.Fatalf("NewValidator failed: %v", err)
+	}
+
+	now := time.Now().UTC()
+	commercialClaims := license.Claims{
+		ID:        "lic-comm-short",
+		Product:   "gitlab-fleet-governor",
+		Customer:  license.Customer{Name: "Degraded Corp"},
+		IssuedAt:  now.Add(-1 * time.Minute),
+		ExpiresAt: now.Add(150 * time.Millisecond),
+		Features:  []string{"enterprise-ha", "premium-support"},
+		Limits:    map[string]int64{"runners": 500},
+	}
+	token, err := signer.SignArmored(commercialClaims)
+	if err != nil {
+		t.Fatalf("SignArmored failed: %v", err)
+	}
+
+	fallbackClaims := &license.Claims{
+		Product:  "gitlab-fleet-governor",
+		Plan:     "community",
+		Customer: license.Customer{Name: "Degraded Corp"},
+		Features: []string{"basic-runner"},
+		Limits:   map[string]int64{"runners": 5},
+	}
+
+	mgr, err := license.NewManager(license.ManagerConfig{
+		Validator:        validator,
+		LicenseString:    token,
+		Policy:           license.PolicyDegraded,
+		FallbackClaims:   fallbackClaims,
+		DegradedReadOnly: true,
+	})
+	if err != nil {
+		t.Fatalf("NewManager failed: %v", err)
+	}
+
+	// Prior to expiration
+	if mgr.IsDegraded() {
+		t.Fatal("expected IsDegraded() == false prior to expiration")
+	}
+	if !mgr.IsCommercialActive() {
+		t.Fatal("expected IsCommercialActive() == true prior to expiration")
+	}
+	if !mgr.HasFeature("enterprise-ha") {
+		t.Fatal("expected enterprise-ha to be present")
+	}
+
+	// Wait for commercial license to expire
+	time.Sleep(250 * time.Millisecond)
+
+	// Immediately upon expiration (even before mgr.Check() runs):
+	if !mgr.IsDegraded() {
+		t.Fatal("expected IsDegraded() == true immediately after expiration")
+	}
+	if !errors.Is(mgr.DegradedReason(), license.ErrExpired) {
+		t.Fatalf("expected DegradedReason() == ErrExpired, got: %v", mgr.DegradedReason())
+	}
+	if mgr.IsCommercialActive() {
+		t.Fatal("expected IsCommercialActive() == false after expiration")
+	}
+	if !mgr.IsActive() {
+		t.Fatal("expected IsActive() == true under PolicyDegraded fallback")
+	}
+	if !mgr.IsReadOnly() {
+		t.Fatal("expected IsReadOnly() == true under DegradedReadOnly")
+	}
+	if err := mgr.CanMutate(); !errors.Is(err, license.ErrDegradedReadOnly) {
+		t.Fatalf("expected CanMutate to return ErrDegradedReadOnly, got: %v", err)
+	}
+
+	// Enterprise features should be deactivated, fallback features active
+	if mgr.HasFeature("enterprise-ha") {
+		t.Fatal("expected enterprise-ha to be deactivated after expiration")
+	}
+	if !mgr.HasFeature("basic-runner") {
+		t.Fatal("expected fallback feature basic-runner to be active")
+	}
+
+	// Limits should be evaluated against fallback (max 5)
+	if err := mgr.CheckLimit("runners", 3); err != nil {
+		t.Fatalf("expected limit 3 to pass under fallback limit 5: %v", err)
+	}
+	if err := mgr.CheckLimit("runners", 10); !errors.Is(err, license.ErrLimitExceeded) {
+		t.Fatalf("expected ErrLimitExceeded against fallback limit 5, got: %v", err)
+	}
+
+	// AssertFeature tests
+	if err := mgr.AssertFeature("basic-runner"); err != nil {
+		t.Fatalf("expected AssertFeature('basic-runner') to succeed: %v", err)
+	}
+	if err := mgr.AssertFeature("enterprise-ha"); !errors.Is(err, license.ErrFeatureNotEntitled) {
+		t.Fatalf("expected AssertFeature('enterprise-ha') to return ErrFeatureNotEntitled, got: %v", err)
+	}
+}
+
+func TestManager_AssertFeature_Lifecycle(t *testing.T) {
+	t.Parallel()
+
+	pub, priv, err := license.GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("GenerateKeyPair failed: %v", err)
+	}
+
+	signer, err := license.NewSigner(priv)
+	if err != nil {
+		t.Fatalf("NewSigner failed: %v", err)
+	}
+
+	validator, err := license.NewValidator(pub, license.WithProduct("gitlab-fleet-governor"))
+	if err != nil {
+		t.Fatalf("NewValidator failed: %v", err)
+	}
+
+	now := time.Now().UTC()
+	claims := license.Claims{
+		ID:        "lic-assert-test",
+		Product:   "gitlab-fleet-governor",
+		Customer:  license.Customer{Name: "Assert Corp"},
+		IssuedAt:  now,
+		ExpiresAt: now.Add(1 * time.Hour),
+		Features:  []string{"audit-logs", "sso"},
+	}
+	token, _ := signer.SignArmored(claims)
+
+	mgr, err := license.NewManager(license.ManagerConfig{
+		Validator:     validator,
+		LicenseString: token,
+		Policy:        license.PolicyStrict,
+	})
+	if err != nil {
+		t.Fatalf("NewManager failed: %v", err)
+	}
+
+	// 1. Entitled feature
+	if err := mgr.AssertFeature("audit-logs"); err != nil {
+		t.Fatalf("expected audit-logs to be entitled: %v", err)
+	}
+
+	// 2. Unentitled feature
+	err = mgr.AssertFeature("advanced-billing")
+	if err == nil || !errors.Is(err, license.ErrFeatureNotEntitled) {
+		t.Fatalf("expected ErrFeatureNotEntitled for advanced-billing, got: %v", err)
+	}
+}

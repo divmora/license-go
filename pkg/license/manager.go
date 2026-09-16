@@ -195,6 +195,9 @@ func (m *Manager) Policy() EnforcementPolicy {
 func (m *Manager) Claims() *Claims {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+	if m.cfg.Policy == PolicyDegraded && m.currentClaims != nil && !m.currentClaims.IsActive() && m.cfg.FallbackClaims != nil {
+		return m.cfg.FallbackClaims
+	}
 	return m.currentClaims
 }
 
@@ -202,25 +205,37 @@ func (m *Manager) Claims() *Claims {
 func (m *Manager) IsDegraded() bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return m.isDegraded
+	if m.isDegraded {
+		return true
+	}
+	if m.cfg.Policy == PolicyDegraded && m.currentClaims != nil && !m.currentClaims.IsActive() {
+		return true
+	}
+	return false
 }
 
 // DegradedReason returns the error that triggered degraded mode, or nil if operating normally.
 func (m *Manager) DegradedReason() error {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return m.degradedReason
+	if m.degradedReason != nil {
+		return m.degradedReason
+	}
+	if m.cfg.Policy == PolicyDegraded && m.currentClaims != nil && !m.currentClaims.IsActive() {
+		return ErrExpired
+	}
+	return nil
 }
 
 // IsReadOnly reports whether write operations are restricted due to degraded mode.
 func (m *Manager) IsReadOnly() bool {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.isDegraded && m.cfg.DegradedReadOnly
+	return m.IsDegraded() && m.cfg.DegradedReadOnly
 }
 
 // CanMutate checks whether mutations/write operations are allowed.
-// Returns ErrDegradedReadOnly if operating in degraded read-only mode, or ErrExpired if inactive in strict mode.
+// Returns ErrDegradedReadOnly if operating in degraded read-only mode,
+// ErrLicenseNotFound if no license claims exist, ErrNotYetValid if the license is not yet active,
+// or ErrExpired if inactive in strict mode.
 func (m *Manager) CanMutate() error {
 	if m.IsReadOnly() {
 		return ErrDegradedReadOnly
@@ -229,16 +244,27 @@ func (m *Manager) CanMutate() error {
 		return nil
 	}
 	if !m.IsActive() {
+		claims := m.Claims()
+		if claims == nil {
+			return ErrLicenseNotFound
+		}
+		if claims.Status() == StatusNotYetValid {
+			return ErrNotYetValid
+		}
 		return ErrExpired
 	}
 	return nil
 }
 
 // HasFeature returns whether the specified feature is entitled in the active license (or fallback claims).
+// If the license is expired, inactive, or not found under PolicyStrict, this returns false.
 // Under PolicyWarnOnly, this unconditionally returns true.
 func (m *Manager) HasFeature(feature string) bool {
 	if m.cfg.Policy == PolicyWarnOnly {
 		return true
+	}
+	if !m.IsActive() {
+		return false
 	}
 	claims := m.Claims()
 	if claims == nil {
@@ -247,7 +273,29 @@ func (m *Manager) HasFeature(feature string) bool {
 	return claims.HasFeature(feature)
 }
 
+// AssertFeature asserts that the specified feature is active and entitled in the current license (or fallback claims).
+// Returns nil if entitled, ErrExpired if the license has expired, ErrNotYetValid if the license is not yet active,
+// ErrLicenseNotFound if no claims exist, or ErrFeatureNotEntitled if the feature is not granted.
+// Under PolicyWarnOnly, this unconditionally returns nil.
+func (m *Manager) AssertFeature(feature string) error {
+	if m.cfg.Policy == PolicyWarnOnly {
+		return nil
+	}
+	claims := m.Claims()
+	if claims == nil {
+		return ErrLicenseNotFound
+	}
+	if !m.IsActive() {
+		if claims.Status() == StatusNotYetValid {
+			return ErrNotYetValid
+		}
+		return ErrExpired
+	}
+	return claims.AssertFeature(feature)
+}
+
 // CheckLimit checks if current usage is within the active license limits (or fallback limits if degraded).
+// If the license is inactive (expired, not yet valid, or not found) under PolicyStrict, this returns an error.
 // Under PolicyWarnOnly, this unconditionally returns nil.
 func (m *Manager) CheckLimit(limitName string, currentUsage int64) error {
 	if m.cfg.Policy == PolicyWarnOnly {
@@ -257,13 +305,23 @@ func (m *Manager) CheckLimit(limitName string, currentUsage int64) error {
 	if claims == nil {
 		return ErrLicenseNotFound
 	}
+	if !m.IsActive() {
+		if claims.Status() == StatusNotYetValid {
+			return ErrNotYetValid
+		}
+		return ErrExpired
+	}
 	return claims.CheckLimit(limitName, currentUsage)
 }
 
 // IsActive returns whether the service is currently operational.
 // Under PolicyStrict, this returns true only if a valid, unexpired license is active.
 // Under PolicyDegraded, this returns true even when degraded, because fallback claims permit execution.
+// Under PolicyWarnOnly, this unconditionally returns true.
 func (m *Manager) IsActive() bool {
+	if m.cfg.Policy == PolicyWarnOnly {
+		return true
+	}
 	claims := m.Claims()
 	if claims == nil {
 		return false
@@ -279,6 +337,9 @@ func (m *Manager) IsActive() bool {
 
 // IsCommercialActive returns whether a genuine commercial license is currently active (not degraded).
 func (m *Manager) IsCommercialActive() bool {
+	if m.IsDegraded() {
+		return false
+	}
 	claims := m.Claims()
 	if claims == nil {
 		return false
