@@ -110,11 +110,15 @@ func main() {
 | Priority | Source | Description |
 | :--- | :--- | :--- |
 | **0** | Programmatic Override | In-memory override via `SetVerificationPublicKey(key)` or `SetVerificationKeyRing(ring)` (ideal for automated unit/integration tests). |
-| **1** | `DIVMORA_PUBLIC_KEYS_PEM` | Multi-key or single-key PKIX PEM bundle text string or filesystem path. |
-| **2** | `DIVMORA_PUBLIC_KEY` | Single Ed25519 public key (base64 raw 32-byte, base64 PKIX DER, inline PEM, or filesystem path). |
-| **3** | `DIVMORA_PUBLIC_KEY_FILE` | Filesystem path to public key file on disk. |
-| **4** | `/etc/divmora/public.pem` | Default Linux/container filesystem location if file exists. |
-| **5** | `fallbackKeys...` | Embedded fallback public keys passed to `ResolveKeyRing()` or `NewValidatorWithFallbackKey()`. |
+| **1** | Explicit Embedded Keys (Default) | Embedded fallback public keys passed to `NewValidatorWithFallbackKey()` or `ResolveKeyRing()` act as an immutable root of trust to prevent environment-based trust root spoofing. |
+| **2** | `DIVMORA_PUBLIC_KEYS_PEM` | Multi-key or single-key PKIX PEM bundle text string or filesystem path (active when no explicit keys are passed, or when `WithAllowEnvKeyOverride(true)` is configured). |
+| **3** | `DIVMORA_PUBLIC_KEY` | Single Ed25519 public key (base64 raw 32-byte, base64 PKIX DER, inline PEM, or filesystem path). |
+| **4** | `DIVMORA_PUBLIC_KEY_FILE` | Filesystem path to public key file on disk. |
+| **5** | `/etc/divmora/public.pem` | Default Linux/container filesystem location if file exists. |
+| **6** | Fallback Keys (Opt-In Override) | Used when `WithAllowEnvKeyOverride(true)` or `SetAllowEnvKeyOverride(true)` is enabled and no environment variables are set. |
+
+> [!IMPORTANT]
+> **Trust Root Spoofing Defense**: To prevent attackers in untrusted container/Kubernetes environments from replacing the vendor's public key with a forged key via `DIVMORA_PUBLIC_KEY`, `NewValidatorWithFallbackKey(vendorKey)` and `ResolveKeyRing(vendorKey)` treat explicit embedded keys as authoritative by default. Use `WithAllowEnvKeyOverride(true)` only if you intentionally wish to allow environment variables to override embedded keys (e.g. in staging/dev environments).
 
 ```go
 // Direct resolution helpers:

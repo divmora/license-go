@@ -2,6 +2,7 @@ package license
 
 import (
 	"crypto/ed25519"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -67,6 +68,33 @@ func ResetVerificationKeyRing() {
 // ResetVerificationPublicKey clears any in-memory programmatic public key override.
 func ResetVerificationPublicKey() {
 	ResetVerificationKeyRing()
+}
+
+var (
+	allowEnvKeyOverrideLock sync.RWMutex
+	globalAllowEnvOverride  bool
+)
+
+// SetAllowEnvKeyOverride configures whether environment variables (e.g., DIVMORA_PUBLIC_KEY)
+// or default system paths are permitted to override explicit fallback public keys globally.
+// By default (false), explicit fallback keys are treated as an immutable root of trust
+// to prevent public key trust root spoofing in untrusted deployment environments.
+func SetAllowEnvKeyOverride(allow bool) {
+	allowEnvKeyOverrideLock.Lock()
+	defer allowEnvKeyOverrideLock.Unlock()
+	globalAllowEnvOverride = allow
+}
+
+// IsAllowEnvKeyOverride returns whether environment variables are permitted to override explicit fallback keys.
+func IsAllowEnvKeyOverride() bool {
+	allowEnvKeyOverrideLock.RLock()
+	defer allowEnvKeyOverrideLock.RUnlock()
+	return globalAllowEnvOverride
+}
+
+// ResetAllowEnvKeyOverride resets the global environment key override setting to the secure default (false).
+func ResetAllowEnvKeyOverride() {
+	SetAllowEnvKeyOverride(false)
 }
 
 // ResolvedKeyRing contains the resolved KeyRing alongside origin metadata.
@@ -243,15 +271,28 @@ func ParsePublicKeyFromString(s string) (ed25519.PublicKey, error) {
 }
 
 // ResolveKeyRingWithSource locates and resolves trusted public verification keys following a standardized hierarchy:
-//  1. In-memory programmatic override (via SetVerificationKeyRing or SetVerificationPublicKey).
+//  0. In-memory programmatic override (via SetVerificationKeyRing or SetVerificationPublicKey).
+//  1. Explicit fallback keys (when provided and !IsAllowEnvKeyOverride()), treating explicit keys as the authoritative
+//     root of trust to prevent environment-based trust root spoofing.
 //  2. DIVMORA_PUBLIC_KEYS_PEM environment variable (multi-key PKIX PEM bundle string or file path).
 //  3. DIVMORA_PUBLIC_KEY environment variable (base64-encoded raw/DER key, inline PEM string, or file path).
 //  4. DIVMORA_PUBLIC_KEY_FILE environment variable (path to public key file on disk).
 //  5. Default system public key path (/etc/divmora/public.pem) if it exists.
-//  6. Fallback keys provided via arguments (base64 strings, PEM blocks, or file paths).
+//  6. Fallback keys (if IsAllowEnvKeyOverride() is true and no environment key was configured).
 //  7. If none succeed, returns ErrPublicKeyNotFound wrapping ErrMissingPublicKey.
 func ResolveKeyRingWithSource(fallbackKeys ...string) (*ResolvedKeyRing, error) {
-	// 1. Programmatic in-memory override
+	return resolveKeyRingInternal(IsAllowEnvKeyOverride(), fallbackKeys...)
+}
+
+// ResolveKeyRingWithEnvPrecedence resolves trusted keys giving precedence to environment variables
+// (DIVMORA_PUBLIC_KEYS_PEM, DIVMORA_PUBLIC_KEY, DIVMORA_PUBLIC_KEY_FILE, /etc/divmora/public.pem)
+// before falling back to any provided fallbackKeys.
+func ResolveKeyRingWithEnvPrecedence(fallbackKeys ...string) (*ResolvedKeyRing, error) {
+	return resolveKeyRingInternal(true, fallbackKeys...)
+}
+
+func resolveKeyRingInternal(allowEnvOverride bool, fallbackKeys ...string) (*ResolvedKeyRing, error) {
+	// 0. Programmatic in-memory override (for automated tests and runtime mocks)
 	overrideKeyRingLock.RLock()
 	if overrideKeyRing != nil {
 		ring := overrideKeyRing
@@ -263,7 +304,61 @@ func ResolveKeyRingWithSource(fallbackKeys ...string) (*ResolvedKeyRing, error) 
 	}
 	overrideKeyRingLock.RUnlock()
 
-	// 2. DIVMORA_PUBLIC_KEYS_PEM (multi-key PKIX PEM bundle or file path)
+	var nonBlankFallbacks []string
+	for _, fb := range fallbackKeys {
+		if trimmed := strings.TrimSpace(fb); trimmed != "" {
+			nonBlankFallbacks = append(nonBlankFallbacks, trimmed)
+		}
+	}
+
+	// 1. If explicit fallback keys are provided and env override is disabled (default):
+	// Embedded keys take immediate precedence as the authoritative root of trust.
+	if len(nonBlankFallbacks) > 0 && !allowEnvOverride {
+		return parseFallbackKeys(nonBlankFallbacks)
+	}
+
+	// 2. Check environment variables and default system path
+	resolvedEnv, err := resolveKeyRingFromEnv()
+	if err == nil {
+		return resolvedEnv, nil
+	}
+	if !errors.Is(err, ErrPublicKeyNotFound) {
+		return nil, err
+	}
+
+	// 3. Fallback keys when env override is enabled but no environment key was configured
+	if len(nonBlankFallbacks) > 0 {
+		return parseFallbackKeys(nonBlankFallbacks)
+	}
+
+	return nil, fmt.Errorf("%w: %w (pass public key or set %s / %s)", ErrPublicKeyNotFound, ErrMissingPublicKey, EnvPublicKey, EnvPublicKeysPEM)
+}
+
+func parseFallbackKeys(fallbacks []string) (*ResolvedKeyRing, error) {
+	var allFallbackKeys []ed25519.PublicKey
+	for _, fb := range fallbacks {
+		ring, err := ParseKeyRingFromString(fb)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse fallback public key %q: %w", fb, err)
+		}
+		for _, entry := range ring.Keys() {
+			allFallbackKeys = append(allFallbackKeys, entry.PublicKey)
+		}
+	}
+
+	if len(allFallbackKeys) > 0 {
+		ring := NewKeyRing(allFallbackKeys[0], allFallbackKeys[1:]...)
+		return &ResolvedKeyRing{
+			KeyRing: ring,
+			Source:  "fallback",
+		}, nil
+	}
+
+	return nil, fmt.Errorf("%w: %w (no valid fallback keys provided)", ErrPublicKeyNotFound, ErrMissingPublicKey)
+}
+
+func resolveKeyRingFromEnv() (*ResolvedKeyRing, error) {
+	// 1. DIVMORA_PUBLIC_KEYS_PEM (multi-key PKIX PEM bundle or file path)
 	if pemVal := strings.TrimSpace(os.Getenv(EnvPublicKeysPEM)); pemVal != "" {
 		if fi, err := os.Stat(pemVal); err == nil && !fi.IsDir() {
 			data, err := os.ReadFile(pemVal)
@@ -290,7 +385,7 @@ func ResolveKeyRingWithSource(fallbackKeys ...string) (*ResolvedKeyRing, error) 
 		}, nil
 	}
 
-	// 3. DIVMORA_PUBLIC_KEY (base64 single key, PEM block, or file path)
+	// 2. DIVMORA_PUBLIC_KEY (base64 single key, PEM block, or file path)
 	if keyVal := strings.TrimSpace(os.Getenv(EnvPublicKey)); keyVal != "" {
 		if fi, err := os.Stat(keyVal); err == nil && !fi.IsDir() {
 			ring, err := ParseKeyRingFromString(keyVal)
@@ -313,7 +408,7 @@ func ResolveKeyRingWithSource(fallbackKeys ...string) (*ResolvedKeyRing, error) 
 		}, nil
 	}
 
-	// 4. DIVMORA_PUBLIC_KEY_FILE (path to public key or PEM bundle on disk)
+	// 3. DIVMORA_PUBLIC_KEY_FILE (path to public key or PEM bundle on disk)
 	if fileVal := strings.TrimSpace(os.Getenv(EnvPublicKeyFile)); fileVal != "" {
 		data, err := os.ReadFile(fileVal)
 		if err != nil {
@@ -330,7 +425,7 @@ func ResolveKeyRingWithSource(fallbackKeys ...string) (*ResolvedKeyRing, error) 
 		}, nil
 	}
 
-	// 5. Default Linux/container system path (/etc/divmora/public.pem)
+	// 4. Default Linux/container system path (/etc/divmora/public.pem)
 	if fi, err := os.Stat(DefaultPublicKeyPath); err == nil && !fi.IsDir() {
 		data, err := os.ReadFile(DefaultPublicKeyPath)
 		if err == nil {
@@ -344,31 +439,7 @@ func ResolveKeyRingWithSource(fallbackKeys ...string) (*ResolvedKeyRing, error) 
 		}
 	}
 
-	// 6. Embedded fallback keys (base64 string, PEM block, or file path)
-	var allFallbackKeys []ed25519.PublicKey
-	for _, fb := range fallbackKeys {
-		fbTrimmed := strings.TrimSpace(fb)
-		if fbTrimmed == "" {
-			continue
-		}
-		ring, err := ParseKeyRingFromString(fbTrimmed)
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse fallback public key %q: %w", fb, err)
-		}
-		for _, entry := range ring.Keys() {
-			allFallbackKeys = append(allFallbackKeys, entry.PublicKey)
-		}
-	}
-
-	if len(allFallbackKeys) > 0 {
-		ring := NewKeyRing(allFallbackKeys[0], allFallbackKeys[1:]...)
-		return &ResolvedKeyRing{
-			KeyRing: ring,
-			Source:  "fallback",
-		}, nil
-	}
-
-	return nil, fmt.Errorf("%w: %w (pass public key or set %s / %s)", ErrPublicKeyNotFound, ErrMissingPublicKey, EnvPublicKey, EnvPublicKeysPEM)
+	return nil, ErrPublicKeyNotFound
 }
 
 // ResolveKeyRing resolves the KeyRing containing trusted public verification keys using the standard resolution hierarchy.

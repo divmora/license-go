@@ -47,6 +47,7 @@ type Validator struct {
 	binaryBytes               []byte
 	currentUsage              map[string]int64
 	currentFeatures           []string
+	allowEnvKeyOverride       bool
 	initErr                   error
 }
 
@@ -357,6 +358,18 @@ func WithRevokedKeyIDs(ids ...string) ValidatorOption {
 	}
 }
 
+// WithAllowEnvKeyOverride configures whether environment variables (DIVMORA_PUBLIC_KEYS_PEM,
+// DIVMORA_PUBLIC_KEY, DIVMORA_PUBLIC_KEY_FILE) or default system key files (/etc/divmora/public.pem)
+// are permitted to override explicit fallback public keys.
+//
+// By default (false), explicit fallback keys are treated as an immutable root of trust to prevent
+// public key trust root spoofing in untrusted deployment environments.
+func WithAllowEnvKeyOverride(allow bool) ValidatorOption {
+	return func(v *Validator) {
+		v.allowEnvKeyOverride = allow
+	}
+}
+
 // WithReleaseAttestation provides an Ed25519 cryptographic release attestation token or armored PEM block.
 func WithReleaseAttestation(tokenOrPEM string) ValidatorOption {
 	return func(v *Validator) {
@@ -449,6 +462,11 @@ func (v *Validator) KeyRing() *KeyRing {
 	return v.keyRing
 }
 
+// AllowEnvKeyOverride reports whether environment variables are permitted to override explicit fallback keys.
+func (v *Validator) AllowEnvKeyOverride() bool {
+	return v.allowEnvKeyOverride
+}
+
 // NewValidator creates a new Validator with the given primary Ed25519 public key and options.
 func NewValidator(publicKey ed25519.PublicKey, opts ...ValidatorOption) (*Validator, error) {
 	if len(publicKey) != ed25519.PublicKeySize {
@@ -532,18 +550,42 @@ func NewValidatorFromEnv(opts ...ValidatorOption) (*Validator, error) {
 	return NewValidatorWithKeyRing(ring, opts...)
 }
 
-// NewValidatorWithFallbackKey creates a Validator by automatically resolving public verification keys
-// from the environment, falling back to the specified key string (base64, PEM, or file path) if no environment variable is set.
+// NewValidatorWithFallbackKey creates a Validator using the specified fallback key (base64, PEM, or file path).
+// By default, explicit fallback keys are treated as an immutable root of trust and cannot be overridden
+// by environment variables (DIVMORA_PUBLIC_KEY, etc.) or default file paths, preventing trust root spoofing.
+//
+// To allow environment variables or system key files to override the fallback key, configure WithAllowEnvKeyOverride(true).
 func NewValidatorWithFallbackKey(fallbackKey string, opts ...ValidatorOption) (*Validator, error) {
+	// Programmatic override check (for test mocks)
+	overrideKeyRingLock.RLock()
+	override := overrideKeyRing
+	overrideKeyRingLock.RUnlock()
+	if override != nil {
+		return NewValidatorWithKeyRing(override, opts...)
+	}
+
+	// Create temporary validator to inspect options (such as WithAllowEnvKeyOverride)
+	tempV := &Validator{
+		clockSkew: DefaultClockSkew,
+	}
+	for _, opt := range opts {
+		opt(tempV)
+	}
+	if tempV.initErr != nil {
+		return nil, tempV.initErr
+	}
+
+	allowOverride := tempV.allowEnvKeyOverride || IsAllowEnvKeyOverride()
 	var fallbacks []string
 	if strings.TrimSpace(fallbackKey) != "" {
 		fallbacks = append(fallbacks, strings.TrimSpace(fallbackKey))
 	}
-	ring, err := ResolveKeyRing(fallbacks...)
+
+	resolved, err := resolveKeyRingInternal(allowOverride, fallbacks...)
 	if err != nil {
 		return nil, err
 	}
-	return NewValidatorWithKeyRing(ring, opts...)
+	return NewValidatorWithKeyRing(resolved.KeyRing, opts...)
 }
 
 // Verify decodes, verifies the cryptographic signature, and checks all claims against current time.

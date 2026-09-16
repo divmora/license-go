@@ -527,3 +527,200 @@ func TestValidator_NewValidatorConstructors(t *testing.T) {
 		t.Errorf("vEnv.Verify failed: %v", err)
 	}
 }
+
+func TestResolveKeyRing_AntiSpoofing_ExplicitKeyPrecedence(t *testing.T) {
+	ResetVerificationKeyRing()
+	ResetAllowEnvKeyOverride()
+
+	vendorPub, _, err := GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("GenerateKeyPair vendor failed: %v", err)
+	}
+	attackerPub, _, err := GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("GenerateKeyPair attacker failed: %v", err)
+	}
+
+	vendorB64 := EncodePublicKeyToBase64(vendorPub)
+	attackerB64 := EncodePublicKeyToBase64(attackerPub)
+
+	// Attacker sets environment variable to spoof vendor's trust root
+	t.Setenv(EnvPublicKey, attackerB64)
+	t.Setenv(EnvPublicKeysPEM, "")
+	t.Setenv(EnvPublicKeyFile, "")
+
+	// 1. By default, ResolveKeyRingWithSource(vendorB64) must prioritize the embedded vendor key
+	resolved, err := ResolveKeyRingWithSource(vendorB64)
+	if err != nil {
+		t.Fatalf("ResolveKeyRingWithSource failed: %v", err)
+	}
+	if resolved.Source != "fallback" {
+		t.Errorf("expected source fallback, got %q", resolved.Source)
+	}
+	if string(resolved.Primary()) != string(vendorPub) {
+		t.Errorf("expected primary key to match vendor public key, got attacker key")
+	}
+
+	// 2. ResolvePublicKey helper also preserves vendor key
+	pubKey, err := ResolvePublicKey(vendorB64)
+	if err != nil {
+		t.Fatalf("ResolvePublicKey failed: %v", err)
+	}
+	if string(pubKey) != string(vendorPub) {
+		t.Errorf("expected ResolvePublicKey to return vendor key")
+	}
+
+	// 3. Global opt-in: SetAllowEnvKeyOverride(true) allows env var to override
+	SetAllowEnvKeyOverride(true)
+	defer ResetAllowEnvKeyOverride()
+
+	resolvedOverride, err := ResolveKeyRingWithSource(vendorB64)
+	if err != nil {
+		t.Fatalf("ResolveKeyRingWithSource with override failed: %v", err)
+	}
+	if resolvedOverride.Source != "env:"+EnvPublicKey {
+		t.Errorf("expected source env:%s with override, got %q", EnvPublicKey, resolvedOverride.Source)
+	}
+	if string(resolvedOverride.Primary()) != string(attackerPub) {
+		t.Errorf("expected primary key to match attacker key under override")
+	}
+
+	// 4. Reset setting
+	ResetAllowEnvKeyOverride()
+	resolvedReset, err := ResolveKeyRingWithSource(vendorB64)
+	if err != nil {
+		t.Fatalf("ResolveKeyRingWithSource after reset failed: %v", err)
+	}
+	if string(resolvedReset.Primary()) != string(vendorPub) {
+		t.Errorf("expected primary key to be vendor key after reset")
+	}
+}
+
+func TestResolveKeyRingWithEnvPrecedence(t *testing.T) {
+	ResetVerificationKeyRing()
+	ResetAllowEnvKeyOverride()
+
+	vendorPub, _, _ := GenerateKeyPair()
+	attackerPub, _, _ := GenerateKeyPair()
+
+	vendorB64 := EncodePublicKeyToBase64(vendorPub)
+	attackerB64 := EncodePublicKeyToBase64(attackerPub)
+
+	t.Setenv(EnvPublicKey, attackerB64)
+	t.Setenv(EnvPublicKeysPEM, "")
+	t.Setenv(EnvPublicKeyFile, "")
+
+	// ResolveKeyRingWithEnvPrecedence explicitly allows env override even when IsAllowEnvKeyOverride() is false
+	resolved, err := ResolveKeyRingWithEnvPrecedence(vendorB64)
+	if err != nil {
+		t.Fatalf("ResolveKeyRingWithEnvPrecedence failed: %v", err)
+	}
+	if resolved.Source != "env:"+EnvPublicKey {
+		t.Errorf("expected source env:%s, got %q", EnvPublicKey, resolved.Source)
+	}
+	if string(resolved.Primary()) != string(attackerPub) {
+		t.Errorf("expected primary key to be attacker key")
+	}
+
+	// When env var is unset, falls back to vendor key
+	t.Setenv(EnvPublicKey, "")
+	resolvedFallback, err := ResolveKeyRingWithEnvPrecedence(vendorB64)
+	if err != nil {
+		t.Fatalf("ResolveKeyRingWithEnvPrecedence fallback failed: %v", err)
+	}
+	if string(resolvedFallback.Primary()) != string(vendorPub) {
+		t.Errorf("expected primary key to be vendor key")
+	}
+}
+
+func TestNewValidatorWithFallbackKey_AntiSpoofing(t *testing.T) {
+	ResetVerificationKeyRing()
+	ResetAllowEnvKeyOverride()
+
+	vendorPub, vendorPriv, err := GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("vendor keygen failed: %v", err)
+	}
+	attackerPub, attackerPriv, err := GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("attacker keygen failed: %v", err)
+	}
+
+	vendorB64 := EncodePublicKeyToBase64(vendorPub)
+	attackerB64 := EncodePublicKeyToBase64(attackerPub)
+
+	// Vendor signs authentic license
+	vendorSigner, _ := NewSigner(vendorPriv)
+	vendorSigner = vendorSigner.WithKeyID("vendor-key")
+	authClaims := Claims{
+		Customer: Customer{Name: "Authentic Enterprise Customer"},
+		Product:  "test-product",
+	}
+	vendorToken, err := vendorSigner.SignArmored(authClaims)
+	if err != nil {
+		t.Fatalf("vendor SignArmored failed: %v", err)
+	}
+
+	// Attacker signs forged license with attacker private key
+	attackerSigner, _ := NewSigner(attackerPriv)
+	attackerSigner = attackerSigner.WithKeyID("attacker-key")
+	forgedClaims := Claims{
+		Customer: Customer{Name: "Rogue Imposter"},
+		Product:  "test-product",
+	}
+	forgedToken, err := attackerSigner.SignArmored(forgedClaims)
+	if err != nil {
+		t.Fatalf("attacker SignArmored failed: %v", err)
+	}
+
+	// Attacker injects their public key into container environment
+	t.Setenv(EnvPublicKey, attackerB64)
+	t.Setenv(EnvPublicKeysPEM, "")
+	t.Setenv(EnvPublicKeyFile, "")
+
+	// 1. Safe default: NewValidatorWithFallbackKey must treat vendorB64 as authoritative root of trust
+	vSecure, err := NewValidatorWithFallbackKey(vendorB64, WithProduct("test-product"))
+	if err != nil {
+		t.Fatalf("NewValidatorWithFallbackKey failed: %v", err)
+	}
+	if vSecure.AllowEnvKeyOverride() {
+		t.Errorf("expected AllowEnvKeyOverride to be false by default")
+	}
+
+	// Authentic vendor license must verify successfully
+	if _, err := vSecure.Verify(vendorToken); err != nil {
+		t.Errorf("expected vendorToken to verify with embedded vendor key, got: %v", err)
+	}
+
+	// Forged attacker license must be rejected (invalid signature)
+	if _, err := vSecure.Verify(forgedToken); err == nil {
+		t.Errorf("expected forgedToken to fail signature verification against embedded vendor key, got nil error")
+	}
+
+	// 2. Opt-in: WithAllowEnvKeyOverride(true) explicitly allows env override
+	vOptIn, err := NewValidatorWithFallbackKey(vendorB64, WithProduct("test-product"), WithAllowEnvKeyOverride(true))
+	if err != nil {
+		t.Fatalf("NewValidatorWithFallbackKey with opt-in failed: %v", err)
+	}
+	if !vOptIn.AllowEnvKeyOverride() {
+		t.Errorf("expected AllowEnvKeyOverride to be true")
+	}
+
+	// Under opt-in, attacker key in env was loaded, so forgedToken verifies and vendorToken fails
+	if _, err := vOptIn.Verify(forgedToken); err != nil {
+		t.Errorf("expected forgedToken to verify when env override is enabled, got: %v", err)
+	}
+	if _, err := vOptIn.Verify(vendorToken); err == nil {
+		t.Errorf("expected vendorToken to fail when env key overrides vendor key, got nil error")
+	}
+
+	// 3. Unset env var with opt-in still falls back to embedded vendor key
+	t.Setenv(EnvPublicKey, "")
+	vOptInNoEnv, err := NewValidatorWithFallbackKey(vendorB64, WithProduct("test-product"), WithAllowEnvKeyOverride(true))
+	if err != nil {
+		t.Fatalf("NewValidatorWithFallbackKey opt-in no env failed: %v", err)
+	}
+	if _, err := vOptInNoEnv.Verify(vendorToken); err != nil {
+		t.Errorf("expected vendorToken to verify when no env var is present, got: %v", err)
+	}
+}

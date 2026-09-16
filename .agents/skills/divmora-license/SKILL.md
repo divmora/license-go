@@ -170,9 +170,8 @@ import (
 const defaultPublicKeyBase64 = "o5nIs/8K/bCGz6jRB33Ig1h0ONr37yvVHpddzNnL46U="
 
 func checkLicense() {
-	// Auto-resolves public verification key from DIVMORA_PUBLIC_KEYS_PEM,
-	// DIVMORA_PUBLIC_KEY, DIVMORA_PUBLIC_KEY_FILE, /etc/divmora/public.pem,
-	// or falls back to defaultPublicKeyBase64:
+	// Initializes validator with defaultPublicKeyBase64 as authoritative root of trust
+	// (preventing trust root spoofing via DIVMORA_PUBLIC_KEY in untrusted container environments):
 	validator, err := license.NewValidatorWithFallbackKey(
 		defaultPublicKeyBase64,
 		license.WithProduct("gitlab-fleet-governor"),
