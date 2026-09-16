@@ -714,8 +714,8 @@ func NormalizeHost(rawURL string) string {
 	// 1. Strip scheme (e.g. "http://", "https://", "grpc://", or protocol-relative "//")
 	if idx := strings.Index(s, "://"); idx != -1 {
 		s = s[idx+3:]
-	} else if strings.HasPrefix(s, "//") {
-		s = s[2:]
+	} else {
+		s = strings.TrimPrefix(s, "//")
 	}
 
 	// 2. Strip path, query params, and fragment (everything from the first '/', '?', or '#')
@@ -851,8 +851,8 @@ func NormalizeNamespace(raw string) string {
 	// 3. Strip scheme (e.g. "https://", "http://", "ssh://", "git://", or protocol-relative "//")
 	if idx := strings.Index(s, "://"); idx != -1 {
 		s = s[idx+3:]
-	} else if strings.HasPrefix(s, "//") {
-		s = s[2:]
+	} else {
+		s = strings.TrimPrefix(s, "//")
 	}
 
 	// 4. Strip user credentials if still present (e.g. "user:pass@gitlab.com/...")
@@ -950,10 +950,7 @@ func matchesNamespaceTree(p, t string) bool {
 
 	// 4. Non-wildcard hierarchical root (e.g. "devops" authorizes "devops/backend", "devops/backend/service")
 	if !strings.ContainsAny(p, "*?[") {
-		if strings.HasPrefix(t, p+"/") {
-			return true
-		}
-		return false
+		return strings.HasPrefix(t, p+"/")
 	}
 
 	// 5. Glob matching for patterns with wildcards (e.g. "team-*", "acme-*/backend")
