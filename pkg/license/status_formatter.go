@@ -212,6 +212,11 @@ func formatResultStatus(r *VerificationResult, opts ...StatusFormatterOption) st
 		} else {
 			fmt.Fprintf(&b, "%-24s %s (BSL 1.1 Converted)\n", "Governing License:", eff)
 		}
+	} else if r.BSLGrantAuthorized {
+		fmt.Fprintf(&b, "%-24s %s\n", "BSL 1.1 Grant:", r.BSLGrantName)
+		if r.BSLEntitlement != nil && r.BSLEntitlement.Reason != "" {
+			fmt.Fprintf(&b, "%-24s %s\n", "Entitlement Status:", r.BSLEntitlement.Reason)
+		}
 	} else if r.Claims != nil {
 		fmt.Fprintf(&b, "%-24s %s\n", "Validity Window:", r.Claims.StatusMessageAt(cfg.evalTime))
 		if r.InGracePeriod || r.Status == StatusGracePeriod {
@@ -361,6 +366,12 @@ func formatResultStatusBadge(r *VerificationResult, now time.Time) string {
 			eff = DefaultBSLChangeLicense
 		}
 		return fmt.Sprintf("OPEN SOURCE [✓ Converted to %s]", eff)
+	}
+	if r.BSLGrantAuthorized {
+		if r.BSLGrantName != "" {
+			return fmt.Sprintf("BSL ADDITIONAL USE GRANT [✓ Entitled: %s]", r.BSLGrantName)
+		}
+		return "BSL ADDITIONAL USE GRANT [✓ Free Tier Entitlement]"
 	}
 	if r.InGracePeriod || r.Status == StatusGracePeriod {
 		remaining := r.GraceDaysRemaining

@@ -200,6 +200,39 @@ func main() {
 
 ---
 
+### 4. BSL 1.1 Dual-Licensing & Additional Use Grants (AUG)
+
+For products governed under Business Source License 1.1 (BSL 1.1), `license-go` provides first-class modeling of Additional Use Grants (e.g. unlimited non-production/staging exemptions and free community tiers). Prior to the Change Date, the software dynamically evaluates operational context against configured grants. Once the Change Date arrives, the software converts autonomously to open source (`Apache-2.0`), granting unrestricted access:
+
+```go
+policy := license.BSLPolicy{
+	ReleaseDate:       officialReleaseDate, // Anchored by attestation
+	ChangePeriodYears: 3,                   // Converts to Apache-2.0 in 3 years
+	AdditionalUseGrants: []license.BSLAdditionalUseGrant{
+		// 1. Unlimited non-production exemption (staging, test, dev, demo):
+		license.NewNonProductionGrant("Non-Production Exemption"),
+		// 2. Free community tier in production up to 10 nodes (SSO requires commercial license):
+		license.NewFreeTierGrant("Community Free Tier", map[string]int64{"max_nodes": 10}, "sso"),
+	},
+}
+
+validator, err := license.NewValidator(pubKey,
+	license.WithProduct("gitlab-fleet-governor"),
+	license.WithBSLPolicy(policy),
+	license.WithCurrentEnvironment(os.Getenv("ENV")),
+	license.WithCurrentUsage(map[string]int64{"max_nodes": currentNodes}),
+)
+
+// Zero-license resolution: succeeds if usage satisfies Additional Use Grants or if Change Date reached!
+claims, err := validator.VerifyEnv()
+if err != nil {
+	// Fails with *CommercialLicenseRequiredError if usage exceeds free bounds
+	log.Fatalf("Commercial license required: %v", err)
+}
+```
+
+---
+
 ## Claims Structure Reference
 
 ```go
@@ -353,7 +386,32 @@ license-cli inspect -license ./acme.license.key
 license-cli inspect
 ```
 
-### 6. Mint a Release Attestation (CI/CD Pipeline)
+### 6. Evaluate BSL 1.1 Dual-Licensing Entitlement (`license-cli bsl-eval`)
+
+Evaluate deployment operational context against BSL 1.1 terms and Additional Use Grants to determine whether commercial licensing is required:
+
+```bash
+# Evaluate entitlement for staging environment:
+license-cli bsl-eval \
+  -release-date 2025-01-01 \
+  -years 3 \
+  -env staging \
+  -product "gitlab-fleet-governor" \
+  -usage "max_nodes=100,max_runners=500"
+
+# Evaluate production free tier quota with custom limits and feature exclusions:
+license-cli bsl-eval \
+  -release-date 2025-01-01 \
+  -env production \
+  -free-limits "max_nodes=10,max_runners=50" \
+  -usage "max_nodes=6,max_runners=20" \
+  -excluded-features "sso,audit-logs"
+
+# Or output machine-readable JSON for automated CI/CD gating:
+license-cli bsl-eval -release-date 2025-01-01 -env staging -json
+```
+
+### 7. Mint a Release Attestation (CI/CD Pipeline)
 
 Mint an Ed25519 cryptographic release attestation token or armored PEM sidecar (`release.sig`) in your CI/CD release build step to certify binary build authenticity, official Git commit, SemVer version, authoritative BSL 1.1 release date, and binary SHA-256 digest:
 
@@ -369,7 +427,7 @@ license-cli sign-release \
   -armored
 ```
 
-### 7. Verify Release Provenance & Binary Integrity
+### 8. Verify Release Provenance & Binary Integrity
 
 Verify an official release binary against a cryptographic release attestation:
 
@@ -383,7 +441,7 @@ license-cli verify-release \
   -binary "./bin/gitlab-fleet-governor"
 ```
 
-### 8. Inspect Release Attestation Claims (No Key Required)
+### 9. Inspect Release Attestation Claims (No Key Required)
 
 Inspect the unverified release claims embedded within an armored `.sig` file or compact token:
 

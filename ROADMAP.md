@@ -17,7 +17,7 @@ This document tracks upcoming capabilities, planned optimizations, and ecosystem
 - [ ] *(Additional multi-tenancy capabilities will be tracked here)*
 
 ### 🛡️ Validation & Diagnostic Reporting
-- [ ] **BSL 1.1 Additional Use Grant Evaluator (`BSLPolicy.EvaluateEntitlement`)**: Provide standard BSL 1.1 dual-licensing entitlement evaluation modeling vendor-specific Additional Use Grants (e.g. Grant A: non-production / simulation / test exemption; Grant B: free community production quota up to $N$ units like `max_projects` or `max_nodes`). Automatically enforces commercial token requirements only when usage exceeds free tier bounds while granting full open-source access upon Change Date arrival.
+- [ ] *(Additional validation capabilities will be tracked here)*
 
 ### 🖥️ Developer Experience & CLI Tooling
 - [ ] *(Additional CLI capabilities will be tracked here)*
@@ -56,6 +56,14 @@ This document tracks upcoming capabilities, planned optimizations, and ecosystem
 
 ## ✅ Delivered Capabilities
 
+- **BSL 1.1 Additional Use Grant Evaluator (`BSLPolicy.EvaluateEntitlement` & `license-cli bsl-eval`)**:
+  - `BSLAdditionalUseGrant`, `BSLUsageRequest`, `BSLGrantEvaluation`, `BSLEntitlementResult`, and `BSLGrantType`: Standardized BSL 1.1 dual-licensing entitlement evaluation engine modeling vendor-specific Additional Use Grants prior to Change Date.
+  - Standard grant constructors: `NewNonProductionGrant` (unlimited non-production/staging/testing/dev exemption) and `NewFreeTierGrant` (free community production quota up to specified capacity bounds with commercial feature exclusions like SSO).
+  - Autonomous open-source transition: When Change Date arrives, automatically converts to Apache 2.0 open-source, superseding all commercial requirements and grant restrictions.
+  - Fail-closed commercial enforcement: Structured error `CommercialLicenseRequiredError` and sentinel `ErrCommercialLicenseRequired` (implementing `Is(ErrLicenseNotFound)` for backwards compatibility) when usage exceeds free tier limits or deployment occurs in non-exempt environments.
+  - Seamless Validator integration: `validator.EvaluateBSLEntitlement(req)` and zero-license evaluation in `VerifyWithResultAt("", time.Now())` with `WithBSLGrants(...)`, `WithCurrentUsage(...)`, and `WithCurrentFeatures(...)`.
+  - Terminal status badges & cards: Integrated into `FormatStatus()` rendering `BSL ADDITIONAL USE GRANT [✓ Entitled: ...]`.
+  - Subcommand `license-cli bsl-eval`: First-class administrative tool evaluating operational context against BSL 1.1 terms with visual terminal cards and machine-readable `-json` output.
 - **Standardized CLI License Status Formatter (`FormatStatus` & `license-cli status`)**:
   - `VerificationResult.FormatStatus(opts...)`, `VerificationResult.FormatStatusBanner(opts...)`, `Claims.FormatStatus(opts...)`, and `FormatStatus(...)`: Formats high-impact terminal status cards and quota utilization tables for downstream CLI applications (`app license status` or `license-cli status`).
   - Visual status badges: Clear badges for `ACTIVE [✓ Valid]`, `GRACE PERIOD [⚠️ Operating under grace buffer]`, `OPEN SOURCE [✓ Converted to Apache-2.0]`, `EXPIRED [❌ Commercial License Expired]`, and `PENDING [⏳ Not active yet]`.

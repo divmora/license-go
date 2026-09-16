@@ -84,6 +84,9 @@ var (
 
 	// ErrReleaseDigestMismatch is returned when the compiled binary digest does not match the attested release digest.
 	ErrReleaseDigestMismatch = errors.New("license: binary digest does not match release attestation")
+
+	// ErrCommercialLicenseRequired is returned when usage exceeds BSL 1.1 Additional Use Grants and requires a commercial license.
+	ErrCommercialLicenseRequired = errors.New("license: usage exceeds BSL 1.1 Additional Use Grant; commercial license required")
 )
 
 // LimitExceededError provides structured detail when a quota is exceeded.
@@ -206,4 +209,28 @@ func (e *ReleaseTamperingError) Error() string {
 
 func (e *ReleaseTamperingError) Is(target error) bool {
 	return target == ErrReleaseTampered
+}
+
+// CommercialLicenseRequiredError provides structured details when operational usage or deployment environment
+// is not permitted under BSL 1.1 Additional Use Grants, requiring an authorized commercial license.
+type CommercialLicenseRequiredError struct {
+	Product      string
+	Environment  string
+	EffectiveBSL string
+	ChangeDate   time.Time
+	Reason       string
+}
+
+func (e *CommercialLicenseRequiredError) Error() string {
+	if e.Reason != "" {
+		return fmt.Sprintf("license: commercial license required: %s", e.Reason)
+	}
+	if e.Environment != "" {
+		return fmt.Sprintf("license: commercial license required: deployment in %q is not authorized under BSL 1.1 Additional Use Grants", e.Environment)
+	}
+	return "license: commercial license required; usage exceeds BSL 1.1 Additional Use Grants"
+}
+
+func (e *CommercialLicenseRequiredError) Is(target error) bool {
+	return target == ErrCommercialLicenseRequired || target == ErrLicenseNotFound
 }

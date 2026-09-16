@@ -563,3 +563,66 @@ func TestCLI_StatusSubcommand(t *testing.T) {
 		t.Fatalf("runStatus with auto-resolved env vars failed: %v", err)
 	}
 }
+
+func TestCLI_BSLEvalSubcommand(t *testing.T) {
+	// 1. Non-production exemption (staging)
+	err := runBSLEval([]string{
+		"-release-date", "2025-01-01",
+		"-years", "3",
+		"-env", "staging",
+		"-product", "gitlab-fleet-governor",
+		"-usage", "max_runners=500,max_nodes=100",
+	})
+	if err != nil {
+		t.Fatalf("expected bsl-eval to succeed for staging environment, got: %v", err)
+	}
+
+	// 2. Production within free tier limits
+	err = runBSLEval([]string{
+		"-release-date", "2025-01-01",
+		"-years", "3",
+		"-env", "production",
+		"-product", "gitlab-fleet-governor",
+		"-free-limits", "max_nodes=10,max_runners=50",
+		"-usage", "max_nodes=6,max_runners=20",
+		"-features", "basic-ingest",
+	})
+	if err != nil {
+		t.Fatalf("expected bsl-eval to succeed within free limits in production, got: %v", err)
+	}
+
+	// 3. Production exceeding free tier limits
+	err = runBSLEval([]string{
+		"-release-date", "2025-01-01",
+		"-years", "3",
+		"-env", "production",
+		"-free-limits", "max_nodes=10,max_runners=50",
+		"-usage", "max_nodes=25,max_runners=20",
+	})
+	if err == nil {
+		t.Fatalf("expected bsl-eval to return error when exceeding free tier limits")
+	}
+
+	// 4. JSON output mode
+	err = runBSLEval([]string{
+		"-release-date", "2025-01-01",
+		"-years", "3",
+		"-env", "development",
+		"-json",
+	})
+	if err != nil {
+		t.Fatalf("expected bsl-eval with -json to succeed, got: %v", err)
+	}
+
+	// 5. Converted open source
+	err = runBSLEval([]string{
+		"-release-date", "2025-01-01",
+		"-years", "3",
+		"-time", "2029-01-01",
+		"-env", "production",
+		"-usage", "max_nodes=1000000",
+	})
+	if err != nil {
+		t.Fatalf("expected bsl-eval to succeed after Change Date, got: %v", err)
+	}
+}

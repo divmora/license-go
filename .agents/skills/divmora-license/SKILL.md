@@ -494,6 +494,56 @@ license-cli status -license ./license.key -compact
 
 ---
 
+### Workflow K: BSL 1.1 Dual-Licensing & Additional Use Grants (AUG)
+
+For products governed under Business Source License 1.1, configure vendor-specific Additional Use Grants (e.g. non-production exemptions and free community tiers) to automatically entitle non-commercial or small-scale deployments without requiring a commercial license token:
+
+```go
+policy := license.BSLPolicy{
+	ReleaseDate:       releaseDate,
+	ChangePeriodYears: 3,
+	AdditionalUseGrants: []license.BSLAdditionalUseGrant{
+		license.NewNonProductionGrant("Non-Production Exemption"),
+		license.NewFreeTierGrant("Community Free Tier", map[string]int64{"max_nodes": 10}, "sso"),
+	},
+}
+
+validator, err := license.NewValidator(
+	pubKey,
+	license.WithProduct("gitlab-fleet-governor"),
+	license.WithBSLPolicy(policy),
+	license.WithEnvironment(os.Getenv("ENV")),
+	license.WithCurrentUsage(map[string]int64{"max_nodes": 8}),
+)
+
+// Zero-license verification: succeeds under Additional Use Grant or if Change Date has passed
+result, err := validator.VerifyWithResultEnv()
+if err != nil {
+	// If usage exceeds grant bounds, fails with CommercialLicenseRequiredError
+	log.Fatalf("Commercial license required: %v", err)
+}
+
+if result.BSLGrantAuthorized {
+	log.Printf("Running under BSL Additional Use Grant: %s", result.BSLGrantName)
+}
+```
+
+Evaluate operational context via CLI:
+
+```bash
+# Evaluate entitlement for staging or test environments:
+license-cli bsl-eval -release-date 2025-01-01 -env staging
+
+# Evaluate production usage against free tier quotas:
+license-cli bsl-eval \
+  -release-date 2025-01-01 \
+  -env production \
+  -free-limits "max_nodes=10" \
+  -usage "max_nodes=15"
+```
+
+---
+
 ## 4. Troubleshooting & Sentinel Errors
 
 | Error | Cause | Resolution |
@@ -505,6 +555,7 @@ license-cli status -license ./license.key -compact
 | `ErrNotYetValid` | `NotBefore` is in the future | Check server system time / NTP sync. |
 | `ErrFeatureNotEntitled` | Feature is not in `claims.Features` | Upgrade license tier or add feature flag during issuance. |
 | `ErrLimitExceeded` | Current resource count exceeds `claims.Limits` | Increase quota limit during issuance. |
+| `ErrCommercialLicenseRequired` | Operational usage or environment is not authorized under BSL 1.1 Additional Use Grants | Acquire and configure a commercial license key, or reduce resource usage below free tier bounds. |
 | `ErrFingerprintMismatch` | License node/cluster fingerprint does not match host | Pass expected host fingerprint or check machine identity. |
 | `ErrScopeMismatch` | Deployment environment, cloud account, region, host, or cluster is not allowed | Verify the license `Scope` allowlist contains the target deployment infrastructure. |
 | `ErrVersionNotEntitled` | Running software version exceeds `claims.MaxVersion` or is not in `claims.AllowedVersions` | Upgrade perpetual license to entitle the newer major version. |

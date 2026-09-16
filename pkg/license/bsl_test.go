@@ -2,6 +2,7 @@ package license_test
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -258,5 +259,329 @@ func TestValidator_ClockTamperingDefense(t *testing.T) {
 	}
 	if res.EffectiveLicense != "BSL-1.1" {
 		t.Fatalf("expected BSL-1.1 license, got %s", res.EffectiveLicense)
+	}
+}
+
+func TestBSLAdditionalUseGrant_NonProduction(t *testing.T) {
+	t.Parallel()
+
+	grant := license.NewNonProductionGrant("Non-Production Exemption")
+
+	// 1. Permitted non-production environments
+	nonProdEnvs := []string{"staging", "development", "dev", "test", "demo", "sandbox", "qa", "ci"}
+	for _, env := range nonProdEnvs {
+		eval := grant.Evaluate(license.BSLUsageRequest{
+			Environment: env,
+			Usage:       map[string]int64{"max_nodes": 1000}, // Unlimited in non-prod
+		})
+		if !eval.Matched {
+			t.Errorf("expected environment %q to match non-production grant, got: %s", env, eval.Reason)
+		}
+	}
+
+	// 2. Production environment must be rejected
+	for _, prodEnv := range []string{"production", "prod", "Production", "PROD"} {
+		eval := grant.Evaluate(license.BSLUsageRequest{
+			Environment: prodEnv,
+		})
+		if eval.Matched {
+			t.Errorf("expected production environment %q to be rejected, but matched", prodEnv)
+		}
+	}
+
+	// 3. Unspecified environment must be rejected
+	evalEmpty := grant.Evaluate(license.BSLUsageRequest{Environment: ""})
+	if evalEmpty.Matched {
+		t.Errorf("expected empty environment to be rejected, but matched")
+	}
+}
+
+func TestBSLAdditionalUseGrant_FreeTier(t *testing.T) {
+	t.Parallel()
+
+	grant := license.NewFreeTierGrant(
+		"Community Free Tier",
+		map[string]int64{"max_nodes": 5, "max_runners": 20},
+		"sso", "audit-logs",
+	)
+
+	// 1. Within quota, non-excluded features
+	evalValid := grant.Evaluate(license.BSLUsageRequest{
+		Environment: "production",
+		Usage:       map[string]int64{"max_nodes": 4, "max_runners": 18},
+		Features:    []string{"basic-ingest", "metrics"},
+	})
+	if !evalValid.Matched {
+		t.Fatalf("expected usage within limits to match, got: %s", evalValid.Reason)
+	}
+
+	// 2. Exceeds quota (max_nodes = 6 > 5)
+	evalExceeded := grant.Evaluate(license.BSLUsageRequest{
+		Environment: "production",
+		Usage:       map[string]int64{"max_nodes": 6, "max_runners": 10},
+	})
+	if evalExceeded.Matched {
+		t.Fatalf("expected over-quota usage to be rejected")
+	}
+	if evalExceeded.ExceededLimits["max_nodes"] != 6 {
+		t.Errorf("expected exceeded metric max_nodes = 6, got %v", evalExceeded.ExceededLimits)
+	}
+
+	// 3. Excluded feature requested ("sso")
+	evalExcludedFeat := grant.Evaluate(license.BSLUsageRequest{
+		Environment: "production",
+		Usage:       map[string]int64{"max_nodes": 2, "max_runners": 5},
+		Features:    []string{"basic-ingest", "sso"},
+	})
+	if evalExcludedFeat.Matched {
+		t.Fatalf("expected excluded feature 'sso' to be rejected")
+	}
+	if len(evalExcludedFeat.DisallowedFeatures) == 0 || evalExcludedFeat.DisallowedFeatures[0] != "sso" {
+		t.Errorf("expected disallowed feature 'sso', got %v", evalExcludedFeat.DisallowedFeatures)
+	}
+
+	// 4. Feature whitelist (AllowedFeatures)
+	restrictedGrant := license.BSLAdditionalUseGrant{
+		Name:            "Restricted Tier",
+		AllowedFeatures: []string{"read-only", "export"},
+	}
+	evalDisallowedFeat := restrictedGrant.Evaluate(license.BSLUsageRequest{
+		Features: []string{"read-only", "mutation"},
+	})
+	if evalDisallowedFeat.Matched {
+		t.Fatalf("expected unentitled feature 'mutation' to be rejected")
+	}
+}
+
+func TestBSLPolicy_EvaluateEntitlement_CombinedAndSuperseded(t *testing.T) {
+	t.Parallel()
+
+	releaseDate := time.Date(2025, time.January, 1, 0, 0, 0, 0, time.UTC)
+	policy := license.BSLPolicy{
+		ReleaseDate:       releaseDate,
+		ChangePeriodYears: 3,
+		Product:           "gitlab-fleet-governor",
+		AdditionalUseGrants: []license.BSLAdditionalUseGrant{
+			license.NewNonProductionGrant("Non-Production Exemption"),
+			license.NewFreeTierGrant("Community Free Tier", map[string]int64{"max_nodes": 10, "max_runners": 50}, "sso"),
+		},
+	}
+
+	refTime := time.Date(2026, time.June, 1, 0, 0, 0, 0, time.UTC)
+
+	// 1. Staging with 100 nodes -> matches Non-Production Exemption
+	stagingReq := license.BSLUsageRequest{
+		Environment: "staging",
+		Usage:       map[string]int64{"max_nodes": 100, "max_runners": 500},
+		Time:        refTime,
+	}
+	resStaging := policy.EvaluateEntitlement(stagingReq)
+	if !resStaging.Authorized {
+		t.Fatalf("expected staging usage to be authorized, got: %s", resStaging.Reason)
+	}
+	if resStaging.GrantType != license.BSLGrantTypeAdditionalUseGrant {
+		t.Errorf("expected grant type ADDITIONAL_USE_GRANT, got %s", resStaging.GrantType)
+	}
+	if resStaging.MatchingGrant != "Non-Production Exemption" {
+		t.Errorf("expected matching grant 'Non-Production Exemption', got %s", resStaging.MatchingGrant)
+	}
+	if resStaging.Claims == nil || resStaging.Claims.Product != "gitlab-fleet-governor" {
+		t.Errorf("expected synthetic claims for product, got %v", resStaging.Claims)
+	}
+
+	// 2. Production with 8 nodes -> matches Community Free Tier
+	prodFreeReq := license.BSLUsageRequest{
+		Environment: "production",
+		Usage:       map[string]int64{"max_nodes": 8, "max_runners": 30},
+		Time:        refTime,
+	}
+	resProdFree := policy.EvaluateEntitlement(prodFreeReq)
+	if !resProdFree.Authorized {
+		t.Fatalf("expected production free tier to be authorized, got: %s", resProdFree.Reason)
+	}
+	if resProdFree.MatchingGrant != "Community Free Tier" {
+		t.Errorf("expected matching grant 'Community Free Tier', got %s", resProdFree.MatchingGrant)
+	}
+	if resProdFree.Claims.Limits["max_nodes"] != 10 {
+		t.Errorf("expected claim limits max_nodes = 10, got %d", resProdFree.Claims.Limits["max_nodes"])
+	}
+
+	// 3. Production with 25 nodes -> rejected across all grants, commercial license required
+	prodExceededReq := license.BSLUsageRequest{
+		Environment: "production",
+		Usage:       map[string]int64{"max_nodes": 25, "max_runners": 100},
+		Time:        refTime,
+	}
+	resProdExceeded := policy.EvaluateEntitlement(prodExceededReq)
+	if resProdExceeded.Authorized {
+		t.Fatalf("expected commercial license required, but was authorized")
+	}
+	if resProdExceeded.GrantType != license.BSLGrantTypeRequiresCommercial {
+		t.Errorf("expected grant type COMMERCIAL_LICENSE_REQUIRED, got %s", resProdExceeded.GrantType)
+	}
+	if len(resProdExceeded.Evaluations) != 2 {
+		t.Errorf("expected 2 grant evaluations, got %d", len(resProdExceeded.Evaluations))
+	}
+
+	// 4. Once converted to open source (2028-01-01) -> full open source access supersedes all grants!
+	convertedTime := time.Date(2028, time.January, 2, 0, 0, 0, 0, time.UTC)
+	convertedReq := license.BSLUsageRequest{
+		Environment: "production",
+		Usage:       map[string]int64{"max_nodes": 1000000},
+		Features:    []string{"sso", "audit-logs", "custom"},
+		Time:        convertedTime,
+	}
+	resConverted := policy.EvaluateEntitlement(convertedReq)
+	if !resConverted.Authorized {
+		t.Fatalf("expected open-source converted usage to be authorized, got: %s", resConverted.Reason)
+	}
+	if resConverted.GrantType != license.BSLGrantTypeConverted {
+		t.Errorf("expected grant type CONVERTED_OPEN_SOURCE, got %s", resConverted.GrantType)
+	}
+	if resConverted.EffectiveLicense != "Apache-2.0" {
+		t.Errorf("expected effective license Apache-2.0, got %s", resConverted.EffectiveLicense)
+	}
+	if resConverted.DaysUntilConversion != 0 {
+		t.Errorf("expected 0 days until conversion, got %d", resConverted.DaysUntilConversion)
+	}
+}
+
+func TestBSLPolicy_EvaluateEntitlement_CustomMatchFunc(t *testing.T) {
+	t.Parallel()
+
+	policy := license.BSLPolicy{
+		ReleaseDate:       time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC),
+		ChangePeriodYears: 3,
+		AdditionalUseGrants: []license.BSLAdditionalUseGrant{
+			{
+				Name: "Academic Research Grant",
+				MatchFunc: func(req license.BSLUsageRequest) (bool, string) {
+					if req.Metadata != nil && req.Metadata["institution_type"] == "academic" {
+						return true, "academic research exemption granted"
+					}
+					return false, "only certified academic institutions are entitled"
+				},
+			},
+		},
+	}
+
+	// Academic request
+	resAcademic := policy.EvaluateEntitlement(license.BSLUsageRequest{
+		Metadata: map[string]string{"institution_type": "academic"},
+		Time:     time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+	})
+	if !resAcademic.Authorized {
+		t.Fatalf("expected academic request to be authorized: %s", resAcademic.Reason)
+	}
+
+	// Commercial request
+	resCommercial := policy.EvaluateEntitlement(license.BSLUsageRequest{
+		Metadata: map[string]string{"institution_type": "commercial"},
+		Time:     time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+	})
+	if resCommercial.Authorized {
+		t.Fatalf("expected commercial request to be rejected under academic grant")
+	}
+}
+
+func TestValidator_BSLAdditionalUseGrant_Integration(t *testing.T) {
+	t.Parallel()
+
+	pub, _, err := license.GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("failed to generate key pair: %v", err)
+	}
+
+	releaseDate := time.Date(2025, time.January, 1, 0, 0, 0, 0, time.UTC)
+	bslPolicy := license.BSLPolicy{
+		ReleaseDate:       releaseDate,
+		ChangePeriodYears: 3,
+		Product:           "gitlab-fleet-governor",
+		AdditionalUseGrants: []license.BSLAdditionalUseGrant{
+			license.NewNonProductionGrant("Non-Production Exemption"),
+			license.NewFreeTierGrant("Community Free Tier", map[string]int64{"max_nodes": 10}, "sso"),
+		},
+	}
+
+	// 1. Validator in staging environment without commercial license -> Authorized under Non-Production Grant
+	stagingVal, err := license.NewValidator(pub,
+		license.WithProduct("gitlab-fleet-governor"),
+		license.WithBSLPolicy(bslPolicy),
+		license.WithEnvironment("staging"),
+		license.WithCurrentUsage(map[string]int64{"max_nodes": 50}),
+	)
+	if err != nil {
+		t.Fatalf("failed to create validator: %v", err)
+	}
+
+	resStaging, err := stagingVal.VerifyWithResultAt("", releaseDate.AddDate(1, 0, 0))
+	if err != nil {
+		t.Fatalf("expected staging verification to succeed under BSL grant: %v", err)
+	}
+	if !resStaging.BSLGrantAuthorized {
+		t.Fatalf("expected BSLGrantAuthorized to be true")
+	}
+	if resStaging.BSLGrantName != "Non-Production Exemption" {
+		t.Errorf("expected BSLGrantName 'Non-Production Exemption', got %s", resStaging.BSLGrantName)
+	}
+	if resStaging.Status != license.StatusActive {
+		t.Errorf("expected status StatusActive, got %s", resStaging.Status)
+	}
+	if statusMsg := resStaging.StatusMessage(); statusMsg != "Authorized under BSL 1.1 Additional Use Grant (Non-Production Exemption)" {
+		t.Errorf("unexpected status message: %s", statusMsg)
+	}
+
+	// Format status banner check
+	banner := resStaging.FormatStatus()
+	if !strings.Contains(banner, "BSL ADDITIONAL USE GRANT") || !strings.Contains(banner, "Non-Production Exemption") {
+		t.Errorf("expected status banner to contain BSL grant details, got:\n%s", banner)
+	}
+
+	// 2. Validator in production exceeding free tier -> Fails with CommercialLicenseRequiredError
+	prodVal, err := license.NewValidator(pub,
+		license.WithProduct("gitlab-fleet-governor"),
+		license.WithBSLPolicy(bslPolicy),
+		license.WithEnvironment("production"),
+		license.WithCurrentUsage(map[string]int64{"max_nodes": 20}), // Exceeds limit 10
+	)
+	if err != nil {
+		t.Fatalf("failed to create validator: %v", err)
+	}
+
+	_, err = prodVal.VerifyWithResultAt("", releaseDate.AddDate(1, 0, 0))
+	if err == nil {
+		t.Fatalf("expected verification to fail when exceeding free tier in production")
+	}
+
+	// Verify structured error and sentinel error unwrapping
+	if !errors.Is(err, license.ErrCommercialLicenseRequired) {
+		t.Errorf("expected error to match ErrCommercialLicenseRequired, got: %v", err)
+	}
+	if !errors.Is(err, license.ErrLicenseNotFound) {
+		t.Errorf("expected error to match ErrLicenseNotFound for backward compatibility, got: %v", err)
+	}
+
+	var commErr *license.CommercialLicenseRequiredError
+	if !errors.As(err, &commErr) {
+		t.Fatalf("expected error to be *CommercialLicenseRequiredError, got: %T", err)
+	}
+	if commErr.Product != "gitlab-fleet-governor" {
+		t.Errorf("expected error product 'gitlab-fleet-governor', got %s", commErr.Product)
+	}
+
+	// 3. Direct EvaluateBSLEntitlement check
+	entResult, err := prodVal.EvaluateBSLEntitlement(license.BSLUsageRequest{
+		Environment: "production",
+		Usage:       map[string]int64{"max_nodes": 5}, // 5 nodes is within free tier!
+		Time:        releaseDate.AddDate(1, 0, 0),
+	})
+	if err != nil {
+		t.Fatalf("EvaluateBSLEntitlement failed: %v", err)
+	}
+	if !entResult.Authorized {
+		t.Fatalf("expected 5 nodes in production to be authorized under free tier: %s", entResult.Reason)
+	}
+	if entResult.MatchingGrant != "Community Free Tier" {
+		t.Errorf("expected grant 'Community Free Tier', got %s", entResult.MatchingGrant)
 	}
 }

@@ -42,6 +42,8 @@ type Validator struct {
 	releaseGitCommit          string
 	binaryPath                string
 	binaryBytes               []byte
+	currentUsage              map[string]int64
+	currentFeatures           []string
 	initErr                   error
 }
 
@@ -88,6 +90,11 @@ func WithCurrentEnvironment(env string) ValidatorOption {
 	return func(v *Validator) {
 		v.currentEnvironment = env
 	}
+}
+
+// WithEnvironment is an alias for WithCurrentEnvironment.
+func WithEnvironment(env string) ValidatorOption {
+	return WithCurrentEnvironment(env)
 }
 
 // WithCurrentAccount asserts that the current cloud tenant or account ID matches Scope.Accounts.
@@ -153,6 +160,33 @@ func WithBuildDate(buildDate time.Time) ValidatorOption {
 func WithBSLPolicy(policy BSLPolicy) ValidatorOption {
 	return func(v *Validator) {
 		v.bslPolicy = &policy
+	}
+}
+
+// WithBSLGrants appends one or more Additional Use Grants to the validator's BSLPolicy.
+func WithBSLGrants(grants ...BSLAdditionalUseGrant) ValidatorOption {
+	return func(v *Validator) {
+		if v.bslPolicy == nil {
+			v.bslPolicy = &BSLPolicy{}
+		}
+		v.bslPolicy.AdditionalUseGrants = append(v.bslPolicy.AdditionalUseGrants, grants...)
+	}
+}
+
+// WithCurrentUsage configures active runtime resource usage to evaluate against BSL Additional Use Grants or license quotas.
+func WithCurrentUsage(usage map[string]int64) ValidatorOption {
+	return func(v *Validator) {
+		v.currentUsage = make(map[string]int64, len(usage))
+		for k, val := range usage {
+			v.currentUsage[k] = val
+		}
+	}
+}
+
+// WithCurrentFeatures configures the features currently requested or enabled by the application.
+func WithCurrentFeatures(features ...string) ValidatorOption {
+	return func(v *Validator) {
+		v.currentFeatures = append(v.currentFeatures, features...)
 	}
 }
 
@@ -576,29 +610,32 @@ func (v *Validator) resolveEvaluationTime(localNow time.Time) (evalTime time.Tim
 	return evalTime, false, skew, nil
 }
 
-// VerifyEnv resolves the license automatically from standard environment variables
-// (DIVMORA_LICENSE_KEY, DIVMORA_LICENSE_FILE, or /etc/divmora/license.key) and validates it.
-// If the BSL 1.1 Change Date has arrived, open-source entitlements are granted automatically.
-func (v *Validator) VerifyEnv() (*Claims, error) {
+// VerifyWithResultEnv resolves the license automatically from standard environment variables
+// (DIVMORA_LICENSE_KEY, DIVMORA_LICENSE_FILE, or /etc/divmora/license.key) and returns a detailed VerificationResult.
+// If the BSL 1.1 Change Date has arrived or operational usage is authorized under an Additional Use Grant,
+// entitlements are granted automatically.
+func (v *Validator) VerifyWithResultEnv() (*VerificationResult, error) {
 	evalTime, _, _, err := v.resolveEvaluationTime(time.Now())
 	if err != nil {
 		return nil, err
 	}
-	if v.bslPolicy != nil && v.bslPolicy.IsConverted(evalTime) {
-		return &Claims{
-			Product:  v.expectedProduct,
-			Plan:     "open-source",
-			Customer: Customer{Name: "Open Source Community"},
-			Features: []string{"*"},
-			Limits:   map[string]int64{},
-		}, nil
-	}
-
 	resolved, err := ResolveLicense()
+	if err != nil {
+		return v.VerifyWithResultAt("", evalTime)
+	}
+	return v.VerifyWithResultAt(resolved.Content, evalTime)
+}
+
+// VerifyEnv resolves the license automatically from standard environment variables
+// (DIVMORA_LICENSE_KEY, DIVMORA_LICENSE_FILE, or /etc/divmora/license.key) and validates it.
+// If the BSL 1.1 Change Date has arrived or operational usage is authorized under an Additional Use Grant,
+// entitlements are granted automatically.
+func (v *Validator) VerifyEnv() (*Claims, error) {
+	res, err := v.VerifyWithResultEnv()
 	if err != nil {
 		return nil, err
 	}
-	return v.VerifyAt(resolved.Content, time.Now())
+	return res.Claims, nil
 }
 
 // VerifyResolved resolves a license from an explicit input (file path or token string)
@@ -608,25 +645,11 @@ func (v *Validator) VerifyResolved(explicitSource ...string) (*Claims, error) {
 	if err != nil {
 		return nil, err
 	}
-	if v.bslPolicy != nil && v.bslPolicy.IsConverted(evalTime) {
-		resolved, err := ResolveLicense(explicitSource...)
-		if err == nil {
-			return v.VerifyAt(resolved.Content, time.Now())
-		}
-		return &Claims{
-			Product:  v.expectedProduct,
-			Plan:     "open-source",
-			Customer: Customer{Name: "Open Source Community"},
-			Features: []string{"*"},
-			Limits:   map[string]int64{},
-		}, nil
-	}
-
 	resolved, err := ResolveLicense(explicitSource...)
 	if err != nil {
-		return nil, err
+		return v.VerifyAt("", evalTime)
 	}
-	return v.VerifyAt(resolved.Content, time.Now())
+	return v.VerifyAt(resolved.Content, evalTime)
 }
 
 // VerifyAt validates the license against the specified reference time `now`.
@@ -864,6 +887,15 @@ type VerificationResult struct {
 	// BSLConverted indicates whether the software has automatically transitioned to open-source under BSL terms.
 	BSLConverted bool
 
+	// BSLGrantAuthorized reports whether the result was authorized under a BSL 1.1 Additional Use Grant.
+	BSLGrantAuthorized bool
+
+	// BSLGrantName identifies the specific Additional Use Grant that authorized usage.
+	BSLGrantName string
+
+	// BSLEntitlement contains the detailed BSL entitlement evaluation result, if evaluated.
+	BSLEntitlement *BSLEntitlementResult
+
 	// EffectiveLicense indicates the governing license identifier ("BSL-1.1" or "Apache-2.0").
 	EffectiveLicense string
 
@@ -907,6 +939,13 @@ func (r *VerificationResult) StatusMessage() string {
 				effectiveLic, r.ChangeDate.Format("2006-01-02"))
 		}
 		return fmt.Sprintf("Open source license (BSL 1.1 converted to %s)", effectiveLic)
+	}
+
+	if r.BSLGrantAuthorized {
+		if r.BSLGrantName != "" {
+			return fmt.Sprintf("Authorized under BSL 1.1 Additional Use Grant (%s)", r.BSLGrantName)
+		}
+		return "Authorized under BSL 1.1 Additional Use Grant"
 	}
 
 	if r.Claims == nil {
@@ -1040,6 +1079,47 @@ func (v *Validator) VerifyWithResultAt(rawLicense string, now time.Time) (*Verif
 	}
 
 	if strings.TrimSpace(rawLicense) == "" {
+		if effectiveBSL != nil && len(effectiveBSL.AdditionalUseGrants) > 0 {
+			req := BSLUsageRequest{
+				Environment: v.currentEnvironment,
+				Usage:       v.currentUsage,
+				Features:    v.currentFeatures,
+				Time:        evalTime,
+			}
+			if req.Environment == "" {
+				req.Environment = resolveEnvFromProcess()
+			}
+			policyCopy := *effectiveBSL
+			if policyCopy.Product == "" {
+				policyCopy.Product = v.expectedProduct
+			}
+			ent := policyCopy.EvaluateEntitlement(req)
+			if ent.Authorized {
+				return &VerificationResult{
+					Claims:             ent.Claims,
+					Status:             StatusActive,
+					BSLConverted:       false,
+					BSLGrantAuthorized: true,
+					BSLGrantName:       ent.MatchingGrant,
+					BSLEntitlement:     ent,
+					EffectiveLicense:   ent.EffectiveLicense,
+					ChangeDate:         changeDate,
+					ClockTampered:      tampered,
+					ServerTimeAttested: v.serverTimeAttested || !v.authoritativeTime.IsZero(),
+					ServerTime:         v.authoritativeTime.UTC(),
+					ClockSkew:          skew,
+					EvaluationTime:     evalTime,
+					Provenance:         prov,
+				}, nil
+			}
+			return nil, &CommercialLicenseRequiredError{
+				Product:      v.expectedProduct,
+				Environment:  req.Environment,
+				EffectiveBSL: ent.EffectiveLicense,
+				ChangeDate:   ent.ChangeDate,
+				Reason:       ent.Reason,
+			}
+		}
 		return nil, ErrLicenseNotFound
 	}
 
@@ -1127,4 +1207,59 @@ func (v *Validator) ExpectedProduct() string {
 // BSLPolicy returns the BSL 1.1 policy configured for this validator, or nil if none is configured.
 func (v *Validator) BSLPolicy() *BSLPolicy {
 	return v.bslPolicy
+}
+
+// EvaluateBSLEntitlement evaluates operational usage against the validator's BSL policy and Additional Use Grants.
+// It incorporates authoritative reference time, clock skew defense, and certified release provenance.
+func (v *Validator) EvaluateBSLEntitlement(req BSLUsageRequest) (*BSLEntitlementResult, error) {
+	if v.initErr != nil {
+		return nil, v.initErr
+	}
+	if v.bslPolicy == nil {
+		return nil, errors.New("license: validator has no BSL policy configured")
+	}
+
+	prov, err := v.EvaluateProvenance()
+	if err != nil {
+		return nil, err
+	}
+
+	evalTime := req.Time
+	if evalTime.IsZero() {
+		evalTime = time.Now()
+	}
+
+	evalTime, _, _, err = v.resolveEvaluationTime(evalTime)
+	if err != nil {
+		return nil, err
+	}
+
+	effectiveBSL := v.bslPolicy
+	if prov != nil && prov.Attested && prov.Claims != nil && !prov.Claims.ReleaseDate.IsZero() {
+		policyCopy := *effectiveBSL
+		policyCopy.ReleaseDate = prov.Claims.ReleaseDate
+		effectiveBSL = &policyCopy
+	}
+
+	reqCopy := req
+	reqCopy.Time = evalTime
+	if reqCopy.Environment == "" {
+		reqCopy.Environment = v.currentEnvironment
+		if reqCopy.Environment == "" {
+			reqCopy.Environment = resolveEnvFromProcess()
+		}
+	}
+	if len(reqCopy.Usage) == 0 && len(v.currentUsage) > 0 {
+		reqCopy.Usage = v.currentUsage
+	}
+	if len(reqCopy.Features) == 0 && len(v.currentFeatures) > 0 {
+		reqCopy.Features = v.currentFeatures
+	}
+
+	policyCopy := *effectiveBSL
+	if policyCopy.Product == "" {
+		policyCopy.Product = v.expectedProduct
+	}
+
+	return policyCopy.EvaluateEntitlement(reqCopy), nil
 }
