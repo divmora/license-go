@@ -198,18 +198,38 @@ func computeCanonicalDigest(platform Platform, components map[string]string) (st
 	parts = append(parts, "os:"+components["os"])
 	parts = append(parts, "arch:"+components["arch"])
 
-	// High-stability hardware identifiers take priority
-	if id := components["system_uuid"]; id != "" {
-		parts = append(parts, "uuid:"+id)
-	} else if id := components["machine_id"]; id != "" {
-		parts = append(parts, "machine_id:"+id)
-	} else {
-		// Fallback to MAC addresses + Hostname
-		if macs := components["mac_addresses"]; macs != "" {
-			parts = append(parts, "macs:"+macs)
+	switch platform {
+	case PlatformAWSEC2:
+		if id := components["instance_id"]; id != "" {
+			parts = append(parts, "instance_id:"+id)
 		}
-		if h := components["hostname"]; h != "" {
-			parts = append(parts, "host:"+h)
+		if acc := components["account_id"]; acc != "" {
+			parts = append(parts, "account_id:"+acc)
+		}
+		if reg := components["region"]; reg != "" {
+			parts = append(parts, "region:"+reg)
+		}
+	case PlatformKubernetes:
+		if uid := components["cluster_uid"]; uid != "" {
+			parts = append(parts, "cluster_uid:"+uid)
+		}
+		if ns := components["namespace"]; ns != "" {
+			parts = append(parts, "namespace:"+ns)
+		}
+	default:
+		// High-stability hardware identifiers take priority
+		if id := components["system_uuid"]; id != "" {
+			parts = append(parts, "uuid:"+id)
+		} else if id := components["machine_id"]; id != "" {
+			parts = append(parts, "machine_id:"+id)
+		} else {
+			// Fallback to MAC addresses + Hostname
+			if macs := components["mac_addresses"]; macs != "" {
+				parts = append(parts, "macs:"+macs)
+			}
+			if h := components["hostname"]; h != "" {
+				parts = append(parts, "host:"+h)
+			}
 		}
 	}
 
