@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.4.0](https://github.com/divmora/license-go/compare/v0.3.0...v0.4.0) (2026-09-16)
+
+
+### Features
+
+* add BSL 1.1 change date conversion and authoritative clock skew defense ([25f1bdd](https://github.com/divmora/license-go/commit/25f1bdd7def5abaf50f0a364a6d81e127093f3bf))
+* implement configurable enforcement policies and graceful degradation in manager ([4ce5a90](https://github.com/divmora/license-go/commit/4ce5a9025b572d883fea6775529f34b9d702a6a1))
+
 ## [0.3.0](https://github.com/divmora/license-go/compare/v0.2.0...v0.3.0) (2026-09-16)
 
 
