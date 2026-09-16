@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.7.0](https://github.com/divmora/license-go/compare/v0.6.0...v0.7.0) (2026-09-16)
+
+
+### Features
+
+* **cli:** air-gapped license request generator and fingerprint CLI subcommands (fixes [#8](https://github.com/divmora/license-go/issues/8)) ([885844b](https://github.com/divmora/license-go/commit/885844ba3454200c478fceea29ae96a947f67faa))
+* **fingerprint:** add AWS Lambda resolver and platform support ([dccd9b8](https://github.com/divmora/license-go/commit/dccd9b8f59b6ff6fdaffc08f372185af970abddc))
+* **fingerprint:** AWS EC2 IMDSv2 and Kubernetes cluster fingerprint resolvers (fixes [#7](https://github.com/divmora/license-go/issues/7)) ([f424a2f](https://github.com/divmora/license-go/commit/f424a2fb180c206f79e844a224cfacd3cfe1b4dc))
+* **fingerprint:** core machine identity & host hardware fingerprint engine (fixes [#6](https://github.com/divmora/license-go/issues/6)) ([cd5e539](https://github.com/divmora/license-go/commit/cd5e539a57facfade21031654a622009728010f4))
+* **validator:** auto-fingerprint resolution and node-lock verification in Validator (fixes [#9](https://github.com/divmora/license-go/issues/9)) ([ce4cacd](https://github.com/divmora/license-go/commit/ce4cacd6056e93e344293fcf55b92ae7982edde5))
+
+
+### Bug Fixes
+
+* **claims:** respect minor and patch version bounds in wildcard checkMaxVersion ([#15](https://github.com/divmora/license-go/issues/15)) ([e54ce3f](https://github.com/divmora/license-go/commit/e54ce3fe6c9ca8b696c86478cca369b61af3d61d))
+* **fingerprint:** prevent predictable Kubernetes cluster fingerprint collision under restricted RBAC ([#14](https://github.com/divmora/license-go/issues/14)) ([1637479](https://github.com/divmora/license-go/commit/16374796d6d12da439d46741125c68ac93f8ef01))
+* **manager:** enforce license expiration in HasFeature() and CheckLimit() ([#12](https://github.com/divmora/license-go/issues/12)) ([fe58bfc](https://github.com/divmora/license-go/commit/fe58bfc2e020e2a8fa569db3bd2039c2775126ac))
+* **provenance:** treat placeholder values like "none" or "dev" as Attested: false in EvaluateProvenance ([#21](https://github.com/divmora/license-go/issues/21)) ([d9dbbc6](https://github.com/divmora/license-go/commit/d9dbbc69ef567234c53be000a8319bd83e20d1ef))
+* **scope:** prevent slash-spanning wildcard match in matchFeaturePattern() ([#13](https://github.com/divmora/license-go/issues/13)) ([12d50c7](https://github.com/divmora/license-go/commit/12d50c79ddb2248d117551dd74b78c7221e5cc87))
+* **security:** prevent public key trust root spoofing via environment variables ([#11](https://github.com/divmora/license-go/issues/11)) ([6fb4d0d](https://github.com/divmora/license-go/commit/6fb4d0d550e7668af2d57cc88bd35615fe5281ac))
+
 ## [0.6.0](https://github.com/divmora/license-go/compare/v0.5.0...v0.6.0) (2026-09-16)
 
 
