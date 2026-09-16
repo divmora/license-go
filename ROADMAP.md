@@ -17,7 +17,7 @@ This document tracks upcoming capabilities, planned optimizations, and ecosystem
 - [ ] *(Additional multi-tenancy capabilities will be tracked here)*
 
 ### 🛡️ Validation & Diagnostic Reporting
-- [ ] **Diagnostic Human Status Message (`VerificationResult.StatusMessage()`)**: Add `StatusMessage()` on `VerificationResult` generating standard human-readable descriptions (active status with remaining days, in-grace-period notices with remaining grace days, perpetual active status, and expired notices) to unify CLI banners and log messaging across products.
+- [ ] *(Additional validation capabilities will be tracked here)*
 
 ### 🖥️ Developer Experience & CLI Tooling
 - [ ] **Reusable Terminal Claims Inspection Formatter (`Claims.FormatInspect()`)**: Provide a reusable multi-line or tabular formatter for claims metadata (Customer, Tier, Product, Features, Limits, Scope, Version Bounds, Maintenance, Expiration) to standardize `license inspect` CLI subcommands across downstream binaries.
@@ -56,6 +56,11 @@ This document tracks upcoming capabilities, planned optimizations, and ecosystem
 
 ## ✅ Delivered Capabilities
 
+- **Diagnostic Human Status Message (`VerificationResult.StatusMessage()`)**:
+  - `VerificationResult.StatusMessage()`: Standard human-readable descriptions of operational validity, covering active subscriptions with remaining days, in-grace-period notices with remaining grace days and cutoff countdown, perpetual active status, future `NotBefore` activation windows, BSL 1.1 open-source transition notices, and past-expiration notices with grace period summaries.
+  - `Claims.StatusMessage()` and `Claims.StatusMessageAt(t)`: Reusable claims status formatting for unverified inspection, daemon logs, and custom telemetry.
+  - `Claims.DaysRemainingAt(t)`: Time-anchored days remaining evaluator supporting arbitrary reference timestamps.
+  - Standardized CLI output across `license-cli verify` and `license-cli inspect`.
 - **Authoritative Server Time Attestation & Clock Skew Defense (`WithServerTimeAttestation`)**:
   - `WithServerTimeAttestation(serverTime, maxAllowedSkew)`: Validates licenses against authoritative external server timestamps (e.g. from HTTP response `Date` headers, cloud metadata, or central licensing API) with configurable maximum allowed clock drift/skew threshold.
   - `WithServerTimeHeader(headerValue, maxAllowedSkew)` and `ParseServerTimeHeader`: Multi-format parser supporting HTTP Date (RFC 1123, RFC 1123Z, RFC 850, ANSI C), ISO 8601/RFC 3339, and SQL timestamp formats.

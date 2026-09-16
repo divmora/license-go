@@ -1,6 +1,7 @@
 package license
 
 import (
+	"fmt"
 	"path"
 	"path/filepath"
 	"strconv"
@@ -287,14 +288,74 @@ func (c *Claims) StatusAt(t time.Time) Status {
 // If the license is perpetual, it returns -1.
 // If the license is already expired, it returns 0.
 func (c *Claims) DaysRemaining() int {
+	return c.DaysRemainingAt(time.Now())
+}
+
+// DaysRemainingAt returns the number of full days remaining before expiration at reference time t.
+// If the license is perpetual, it returns -1.
+// If the license is already expired at reference time t, it returns 0.
+func (c *Claims) DaysRemainingAt(t time.Time) int {
 	if c.IsPerpetual() {
 		return -1
 	}
-	diff := time.Until(c.ExpiresAt)
+	diff := c.ExpiresAt.Sub(t)
 	if diff <= 0 {
 		return 0
 	}
 	return int(diff.Hours() / 24)
+}
+
+// StatusMessage returns a standardized human-readable description of the license status at the current time.
+func (c *Claims) StatusMessage() string {
+	return c.StatusMessageAt(time.Now())
+}
+
+// StatusMessageAt returns a standardized human-readable description of the license status at reference time t.
+// Descriptions cover:
+//   - Perpetual licenses: "Perpetual license (does not expire)"
+//   - Future NotBefore: "License is not yet valid (valid starting <NotBefore>)"
+//   - Grace period: "Operating in grace period (<N> grace days remaining until <cutoff>, expired on <ExpiresAt>)"
+//   - Expired: "License expired on <ExpiresAt>" or "License expired on <ExpiresAt> (grace period ended <cutoff>)"
+//   - Active: "Active (<N> days remaining, expires <ExpiresAt>)" (or "Active (1 day remaining, ...)" or "Active (less than 1 day remaining, ...)")
+func (c *Claims) StatusMessageAt(t time.Time) string {
+	if c == nil {
+		return "No license claims"
+	}
+	if c.IsPerpetual() {
+		return "Perpetual license (does not expire)"
+	}
+	if !c.NotBefore.IsZero() && t.Before(c.NotBefore) {
+		return fmt.Sprintf("License is not yet valid (valid starting %s)", c.NotBefore.Format(time.RFC3339))
+	}
+	if c.IsInGracePeriodAt(t) {
+		graceDays := c.GraceDaysRemainingAt(t)
+		cutoffStr := c.EffectiveExpiration().Format(time.RFC3339)
+		expiresStr := c.ExpiresAt.Format(time.RFC3339)
+		if graceDays == 1 {
+			return fmt.Sprintf("Operating in grace period (1 grace day remaining until %s, expired on %s)", cutoffStr, expiresStr)
+		}
+		if graceDays == 0 {
+			return fmt.Sprintf("Operating in grace period (less than 1 grace day remaining until %s, expired on %s)", cutoffStr, expiresStr)
+		}
+		return fmt.Sprintf("Operating in grace period (%d grace days remaining until %s, expired on %s)", graceDays, cutoffStr, expiresStr)
+	}
+	if c.IsExpiredAt(t) {
+		expiresStr := c.ExpiresAt.Format(time.RFC3339)
+		if c.GracePeriodDays > 0 {
+			cutoffStr := c.EffectiveExpiration().Format(time.RFC3339)
+			return fmt.Sprintf("License expired on %s (grace period ended %s)", expiresStr, cutoffStr)
+		}
+		return fmt.Sprintf("License expired on %s", expiresStr)
+	}
+	days := c.DaysRemainingAt(t)
+	expiresStr := c.ExpiresAt.Format(time.RFC3339)
+	if days > 1 {
+		return fmt.Sprintf("Active (%d days remaining, expires %s)", days, expiresStr)
+	}
+	if days == 1 {
+		return fmt.Sprintf("Active (1 day remaining, expires %s)", expiresStr)
+	}
+	return fmt.Sprintf("Active (less than 1 day remaining, expires %s)", expiresStr)
 }
 
 // IsValidForProduct checks whether the license is valid for the given product name.

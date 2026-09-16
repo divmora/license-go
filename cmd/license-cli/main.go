@@ -424,6 +424,7 @@ func runVerify(args []string) error {
 	}
 
 	fmt.Println("✓ VERIFICATION SUCCESSFUL: Signature is valid and claims match!")
+	fmt.Printf("Status: %s\n", result.StatusMessage())
 	if result.BSLConverted {
 		fmt.Printf("ℹ️  GOVERNING LICENSE: %s (BSL 1.1 Change Date reached on %s; open source terms apply)\n",
 			result.EffectiveLicense, result.ChangeDate.Format("2006-01-02"))
@@ -480,16 +481,7 @@ func runInspect(args []string) error {
 	claimsJSON, _ := json.MarshalIndent(claims, "", "  ")
 	fmt.Println(string(claimsJSON))
 	fmt.Println("--------------------------------------------------")
-	if claims.IsPerpetual() {
-		fmt.Println("Validity: Perpetual (Does not expire)")
-	} else if claims.IsInGracePeriod() {
-		fmt.Printf("Validity: GRACE PERIOD (%d grace days remaining until %s, initial expiration was %s)\n",
-			claims.GraceDaysRemaining(), claims.EffectiveExpiration().Format(time.RFC3339), claims.ExpiresAt.Format(time.RFC3339))
-	} else if claims.IsExpired() {
-		fmt.Printf("Validity: EXPIRED on %s\n", claims.ExpiresAt.Format(time.RFC3339))
-	} else {
-		fmt.Printf("Validity: Active (%d days remaining, expires %s)\n", claims.DaysRemaining(), claims.ExpiresAt.Format(time.RFC3339))
-	}
+	fmt.Printf("Status: %s\n", claims.StatusMessage())
 	if claims.MaxVersion != "" {
 		fmt.Printf("Max Authorized Version: %s\n", claims.MaxVersion)
 	}

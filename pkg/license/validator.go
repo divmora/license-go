@@ -832,6 +832,59 @@ type VerificationResult struct {
 
 	// ClockSkew is the measured difference between local system clock and authoritative server time.
 	ClockSkew time.Duration
+
+	// EvaluationTime records the exact timestamp (local or authoritative) used for evaluation.
+	EvaluationTime time.Time
+}
+
+// StatusMessage returns a standardized human-readable description of the verification result.
+// It accounts for BSL 1.1 open-source conversion, perpetual status, active days remaining,
+// post-expiration grace period status, future validity windows, and expired states.
+func (r *VerificationResult) StatusMessage() string {
+	if r == nil {
+		return "No verification result"
+	}
+
+	if r.BSLConverted {
+		effectiveLic := r.EffectiveLicense
+		if effectiveLic == "" {
+			effectiveLic = "Apache-2.0"
+		}
+		if !r.ChangeDate.IsZero() {
+			return fmt.Sprintf("Open source license (BSL 1.1 converted to %s on %s)",
+				effectiveLic, r.ChangeDate.Format("2006-01-02"))
+		}
+		return fmt.Sprintf("Open source license (BSL 1.1 converted to %s)", effectiveLic)
+	}
+
+	if r.Claims == nil {
+		return string(r.Status)
+	}
+
+	evalTime := r.EvaluationTime
+	if evalTime.IsZero() {
+		evalTime = time.Now()
+	}
+
+	if r.InGracePeriod || r.Status == StatusGracePeriod {
+		graceDays := r.GraceDaysRemaining
+		cutoff := r.EffectiveExpiry
+		if cutoff.IsZero() {
+			cutoff = r.Claims.EffectiveExpiration()
+		}
+		expires := r.Claims.ExpiresAt
+		cutoffStr := cutoff.Format(time.RFC3339)
+		expiresStr := expires.Format(time.RFC3339)
+		if graceDays == 1 {
+			return fmt.Sprintf("Operating in grace period (1 grace day remaining until %s, expired on %s)", cutoffStr, expiresStr)
+		}
+		if graceDays == 0 {
+			return fmt.Sprintf("Operating in grace period (less than 1 grace day remaining until %s, expired on %s)", cutoffStr, expiresStr)
+		}
+		return fmt.Sprintf("Operating in grace period (%d grace days remaining until %s, expired on %s)", graceDays, cutoffStr, expiresStr)
+	}
+
+	return r.Claims.StatusMessageAt(evalTime)
 }
 
 // VerifyWithResult validates the license and returns a detailed VerificationResult exposing grace period dynamics.
@@ -877,6 +930,7 @@ func (v *Validator) VerifyWithResultAt(rawLicense string, now time.Time) (*Verif
 				ServerTimeAttested: v.serverTimeAttested || !v.authoritativeTime.IsZero(),
 				ServerTime:         v.authoritativeTime.UTC(),
 				ClockSkew:          skew,
+				EvaluationTime:     evalTime,
 			}, nil
 		}
 
@@ -894,6 +948,7 @@ func (v *Validator) VerifyWithResultAt(rawLicense string, now time.Time) (*Verif
 				ServerTimeAttested: v.serverTimeAttested || !v.authoritativeTime.IsZero(),
 				ServerTime:         v.authoritativeTime.UTC(),
 				ClockSkew:          skew,
+				EvaluationTime:     evalTime,
 			}, nil
 		}
 
@@ -914,6 +969,7 @@ func (v *Validator) VerifyWithResultAt(rawLicense string, now time.Time) (*Verif
 			ServerTimeAttested: v.serverTimeAttested || !v.authoritativeTime.IsZero(),
 			ServerTime:         v.authoritativeTime.UTC(),
 			ClockSkew:          skew,
+			EvaluationTime:     evalTime,
 		}, nil
 	}
 
@@ -963,6 +1019,7 @@ func (v *Validator) VerifyWithResultAt(rawLicense string, now time.Time) (*Verif
 		ServerTimeAttested:  v.serverTimeAttested || !v.authoritativeTime.IsZero(),
 		ServerTime:          v.authoritativeTime.UTC(),
 		ClockSkew:           skew,
+		EvaluationTime:      evalTime,
 	}, nil
 }
 
