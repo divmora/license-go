@@ -366,3 +366,212 @@ func TestValidator_HostNormalizationAndApexMatching(t *testing.T) {
 		t.Errorf("expected ErrScopeMismatch for unauthorized host, got: %v", err)
 	}
 }
+
+func TestNormalizeNamespace(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{name: "empty", input: "", expected: ""},
+		{name: "whitespace only", input: "   ", expected: ""},
+		{name: "slash only", input: "/", expected: ""},
+		{name: "multiple slashes only", input: "///", expected: ""},
+		{name: "single group", input: "devops", expected: "devops"},
+		{name: "uppercase group", input: "DEVOPS", expected: "devops"},
+		{name: "leading and trailing slashes", input: "/devops/backend/", expected: "devops/backend"},
+		{name: "redundant internal slashes", input: "devops///backend////service", expected: "devops/backend/service"},
+		{name: "dot segments resolved", input: "devops/./backend", expected: "devops/backend"},
+		{name: "parent dot segments resolved", input: "devops/sub/../backend", expected: "devops/backend"},
+		{name: "http url", input: "http://gitlab.com/devops/backend", expected: "gitlab.com/devops/backend"},
+		{name: "https url", input: "https://gitlab.com/devops/backend", expected: "gitlab.com/devops/backend"},
+		{name: "git scheme", input: "git://gitlab.com/devops/backend", expected: "gitlab.com/devops/backend"},
+		{name: "ssh scheme", input: "ssh://git@gitlab.com/devops/backend", expected: "gitlab.com/devops/backend"},
+		{name: "protocol relative", input: "//gitlab.com/devops/backend", expected: "gitlab.com/devops/backend"},
+		{name: "scp style git url", input: "git@gitlab.com:devops/backend.git", expected: "gitlab.com/devops/backend"},
+		{name: "trailing git stripped", input: "https://gitlab.com/devops/backend.git", expected: "gitlab.com/devops/backend"},
+		{name: "user credentials stripped", input: "https://user:token@gitlab.com/devops/backend", expected: "gitlab.com/devops/backend"},
+		{name: "port stripped from host", input: "https://gitlab.acme.corp:8443/devops/backend", expected: "gitlab.acme.corp/devops/backend"},
+		{name: "query params and fragment stripped", input: "https://gitlab.com/devops/backend.git?ref=main#readme", expected: "gitlab.com/devops/backend"},
+		{name: "wildcard preserved", input: "devops/*", expected: "devops/*"},
+		{name: "double wildcard preserved", input: "devops/**", expected: "devops/**"},
+		{name: "url with wildcard", input: "https://gitlab.com/acme/*", expected: "gitlab.com/acme/*"},
+		{name: "kubernetes namespace", input: "kube-system", expected: "kube-system"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			actual := NormalizeNamespace(tt.input)
+			if actual != tt.expected {
+				t.Errorf("NormalizeNamespace(%q) = %q, want %q", tt.input, actual, tt.expected)
+			}
+		})
+	}
+}
+
+func TestScope_HierarchicalNamespaceMatching(t *testing.T) {
+	// 1. Plain group "devops" authorizes root and all descendants, but rejects prefix collisions
+	scopeDevops := &Scope{
+		Namespaces: []string{"devops"},
+	}
+
+	// Root authorized
+	if !scopeDevops.IsNamespaceAllowed("devops") {
+		t.Error("expected 'devops' to authorize root group 'devops'")
+	}
+	// Descendants authorized
+	if !scopeDevops.IsNamespaceAllowed("devops/backend") {
+		t.Error("expected 'devops' to authorize descendant 'devops/backend'")
+	}
+	if !scopeDevops.IsNamespaceAllowed("devops/backend/service") {
+		t.Error("expected 'devops' to authorize deep descendant 'devops/backend/service'")
+	}
+	if !scopeDevops.IsNamespaceAllowed("https://gitlab.com/devops/backend/service.git") {
+		t.Error("expected 'devops' to authorize URL descendant 'https://gitlab.com/devops/backend/service.git'")
+	}
+	if !scopeDevops.IsNamespaceAllowed("git@gitlab.com:devops/backend.git") {
+		t.Error("expected 'devops' to authorize SCP descendant 'git@gitlab.com:devops/backend.git'")
+	}
+
+	// Prefix collision rejection (security boundary)
+	disallowedDevops := []string{
+		"devops-tools",
+		"devops_infra",
+		"devops-prod",
+		"other/devops",
+		"my-devops/service",
+		"https://gitlab.com/devops-tools/repo",
+	}
+	for _, target := range disallowedDevops {
+		if scopeDevops.IsNamespaceAllowed(target) {
+			t.Errorf("expected target %q to be disallowed by 'devops'", target)
+		}
+	}
+
+	// 2. Trailing wildcard "devops/*" authorizes root and all descendants
+	scopeWildcard := &Scope{
+		Namespaces: []string{"devops/*"},
+	}
+	if !scopeWildcard.IsNamespaceAllowed("devops") {
+		t.Error("expected 'devops/*' to authorize root group 'devops'")
+	}
+	if !scopeWildcard.IsNamespaceAllowed("devops/infra") {
+		t.Error("expected 'devops/*' to authorize 'devops/infra'")
+	}
+	if !scopeWildcard.IsNamespaceAllowed("devops/infra/terraform") {
+		t.Error("expected 'devops/*' to authorize deep descendant 'devops/infra/terraform'")
+	}
+	if scopeWildcard.IsNamespaceAllowed("devops-tools") {
+		t.Error("expected 'devops/*' to disallow prefix collision 'devops-tools'")
+	}
+	if scopeWildcard.IsNamespaceAllowed("devops_infra") {
+		t.Error("expected 'devops/*' to disallow prefix collision 'devops_infra'")
+	}
+
+	// 3. Domain qualified group "gitlab.com/acme/*"
+	scopeDomain := &Scope{
+		Namespaces: []string{"gitlab.com/acme/*"},
+	}
+	if !scopeDomain.IsNamespaceAllowed("gitlab.com/acme") {
+		t.Error("expected 'gitlab.com/acme/*' to authorize root 'gitlab.com/acme'")
+	}
+	if !scopeDomain.IsNamespaceAllowed("gitlab.com/acme/project-1") {
+		t.Error("expected 'gitlab.com/acme/*' to authorize 'gitlab.com/acme/project-1'")
+	}
+	if !scopeDomain.IsNamespaceAllowed("https://gitlab.com/acme/project-1.git") {
+		t.Error("expected 'gitlab.com/acme/*' to authorize URL 'https://gitlab.com/acme/project-1.git'")
+	}
+	if !scopeDomain.IsNamespaceAllowed("https://gitlab.com:8443/acme/subgroup/project-2") {
+		t.Error("expected 'gitlab.com/acme/*' to authorize URL with port")
+	}
+	// Different domain should fail
+	if scopeDomain.IsNamespaceAllowed("github.com/acme/project-1") {
+		t.Error("expected 'gitlab.com/acme/*' to disallow 'github.com/acme/project-1'")
+	}
+	// Prefix collision on domain group should fail
+	if scopeDomain.IsNamespaceAllowed("gitlab.com/acme-corp/project-1") {
+		t.Error("expected 'gitlab.com/acme/*' to disallow prefix collision 'gitlab.com/acme-corp/project-1'")
+	}
+
+	// 4. Wildcard domain namespace pattern "*.internal/devops/*"
+	scopeWildcardDomain := &Scope{
+		Namespaces: []string{"*.internal/devops/*"},
+	}
+	if !scopeWildcardDomain.IsNamespaceAllowed("https://gitlab.internal/devops/repo") {
+		t.Error("expected '*.internal/devops/*' to authorize 'gitlab.internal/devops/repo'")
+	}
+	if !scopeWildcardDomain.IsNamespaceAllowed("https://internal/devops/repo") {
+		t.Error("expected '*.internal/devops/*' to authorize apex 'internal/devops/repo'")
+	}
+	if scopeWildcardDomain.IsNamespaceAllowed("https://evil.corp/devops/repo") {
+		t.Error("expected '*.internal/devops/*' to disallow 'evil.corp/devops/repo'")
+	}
+
+	// 5. Universal wildcard "*" authorizes everything
+	scopeUniversal := &Scope{
+		Namespaces: []string{"*"},
+	}
+	if !scopeUniversal.IsNamespaceAllowed("any-group/any-repo") {
+		t.Error("expected '*' to authorize any namespace")
+	}
+}
+
+func TestValidator_HierarchicalNamespaceEnforcement(t *testing.T) {
+	pub, priv, err := GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("GenerateKeyPair failed: %v", err)
+	}
+	signer, err := NewSigner(priv)
+	if err != nil {
+		t.Fatalf("NewSigner failed: %v", err)
+	}
+
+	claims := Claims{
+		Customer: Customer{Name: "Acme Corp"},
+		Product:  "gitlab-fleet-governor",
+		Scope: &Scope{
+			Namespaces: []string{"devops/*"},
+		},
+	}
+	token, err := signer.Sign(claims)
+	if err != nil {
+		t.Fatalf("Sign failed: %v", err)
+	}
+
+	// 1. Root group namespace -> SUCCESS
+	vRoot, _ := NewValidator(pub,
+		WithProduct("gitlab-fleet-governor"),
+		WithCurrentNamespace("devops"),
+	)
+	if _, err := vRoot.Verify(token); err != nil {
+		t.Errorf("expected root group 'devops' to verify, got: %v", err)
+	}
+
+	// 2. Full URL with git clone syntax -> SUCCESS
+	vURL, _ := NewValidator(pub,
+		WithProduct("gitlab-fleet-governor"),
+		WithCurrentNamespace("https://gitlab.com/devops/backend/service.git"),
+	)
+	if _, err := vURL.Verify(token); err != nil {
+		t.Errorf("expected URL namespace to verify, got: %v", err)
+	}
+
+	// 3. Deeper subgroup -> SUCCESS
+	vSubgroup, _ := NewValidator(pub,
+		WithProduct("gitlab-fleet-governor"),
+		WithCurrentNamespace("devops/core/auth/tokens"),
+	)
+	if _, err := vSubgroup.Verify(token); err != nil {
+		t.Errorf("expected subgroup namespace to verify, got: %v", err)
+	}
+
+	// 4. Prefix collision ("devops-tools") -> FAIL with ErrScopeMismatch
+	vDisallowed, _ := NewValidator(pub,
+		WithProduct("gitlab-fleet-governor"),
+		WithCurrentNamespace("devops-tools/repo"),
+	)
+	_, err = vDisallowed.Verify(token)
+	if err == nil || !errors.Is(err, ErrScopeMismatch) {
+		t.Errorf("expected ErrScopeMismatch for 'devops-tools/repo', got: %v", err)
+	}
+}

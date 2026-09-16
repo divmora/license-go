@@ -155,7 +155,58 @@ func TestCLI_IssueVerifyInspect_StandardAndCustomScopeAndMeta(t *testing.T) {
 		t.Fatalf("runVerify failed for apex domain URL: %v", err)
 	}
 
-	// 6. Verify - custom scope mismatch should fail
+	// 6. Verify - hierarchical URL namespace descendant match against "gitlab.com/acme/*"
+	err = runVerify([]string{
+		"-public-key", pubKeyPath,
+		"-license", licensePath,
+		"-product", "gitlab-fleet-governor",
+		"-env", "production",
+		"-account", "123456789012",
+		"-region", "us-east-1",
+		"-cluster", "prod-eks-01",
+		"-namespace", "https://gitlab.com/acme/backend/service.git",
+		"-host", "runner-01.acme.corp",
+		"-custom-scope", "tier=platinum,datacenter=dc-east",
+	})
+	if err != nil {
+		t.Fatalf("runVerify failed for hierarchical URL namespace descendant: %v", err)
+	}
+
+	// 7. Verify - root group namespace match against "gitlab.com/acme/*"
+	err = runVerify([]string{
+		"-public-key", pubKeyPath,
+		"-license", licensePath,
+		"-product", "gitlab-fleet-governor",
+		"-env", "production",
+		"-account", "123456789012",
+		"-region", "us-east-1",
+		"-cluster", "prod-eks-01",
+		"-namespace", "gitlab.com/acme",
+		"-host", "runner-01.acme.corp",
+		"-custom-scope", "tier=platinum,datacenter=dc-east",
+	})
+	if err != nil {
+		t.Fatalf("runVerify failed for root group namespace: %v", err)
+	}
+
+	// 8. Verify - namespace prefix collision should fail
+	err = runVerify([]string{
+		"-public-key", pubKeyPath,
+		"-license", licensePath,
+		"-product", "gitlab-fleet-governor",
+		"-env", "production",
+		"-account", "123456789012",
+		"-region", "us-east-1",
+		"-cluster", "prod-eks-01",
+		"-namespace", "gitlab.com/acme-tools/repo",
+		"-host", "runner-01.acme.corp",
+		"-custom-scope", "tier=platinum,datacenter=dc-east",
+	})
+	if err == nil {
+		t.Fatal("expected runVerify to fail for namespace prefix collision gitlab.com/acme-tools/repo, but succeeded")
+	}
+
+	// 9. Verify - custom scope mismatch should fail
 	err = runVerify([]string{
 		"-public-key", pubKeyPath,
 		"-license", licensePath,

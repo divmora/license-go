@@ -78,11 +78,15 @@ func (s *Scope) IsClusterAllowed(cluster string) bool {
 }
 
 // IsNamespaceAllowed reports whether the target project/group hierarchy is authorized by Scope.Namespaces.
+// Both the target and scope patterns are normalized via NormalizeNamespace.
+// Hierarchical group tree matching is supported: patterns like "devops" or "devops/*"
+// authorize root group "devops" as well as all descendant sub-groups and repositories (e.g. "devops/backend/service").
+// If Scope.Namespaces is not defined or empty, all namespaces are authorized.
 func (s *Scope) IsNamespaceAllowed(namespace string) bool {
 	if s == nil || len(s.Namespaces) == 0 {
 		return true
 	}
-	return matchesScopeSlice(s.Namespaces, namespace)
+	return matchesNamespaceScope(s.Namespaces, namespace)
 }
 
 // IsHostAllowed reports whether the target hostname, FQDN, domain, or URL is authorized by Scope.Hosts.
@@ -509,13 +513,16 @@ func (c *Claims) IsClusterAllowed(cluster string) bool {
 	return matchesScopeSlice(c.Scope.Clusters, cluster)
 }
 
-// IsNamespaceAllowed reports whether the target project/group hierarchy (e.g. "gitlab.com/acme/*") is authorized.
+// IsNamespaceAllowed reports whether the target project/group hierarchy (e.g. "gitlab.com/acme/*", "devops") is authorized.
+// Both the target and scope patterns are normalized via NormalizeNamespace.
+// Hierarchical group tree matching is supported: patterns like "devops" or "devops/*"
+// authorize root group "devops" as well as all descendant sub-groups and repositories (e.g. "devops/backend/service").
 // If Scope.Namespaces is not defined or empty, all namespaces are authorized.
 func (c *Claims) IsNamespaceAllowed(namespace string) bool {
 	if c.Scope == nil || len(c.Scope.Namespaces) == 0 {
 		return true
 	}
-	return matchesScopeSlice(c.Scope.Namespaces, namespace)
+	return c.Scope.IsNamespaceAllowed(namespace)
 }
 
 // IsHostAllowed reports whether the target hostname, FQDN, domain, or URL is authorized.
@@ -748,6 +755,237 @@ func matchesHostScope(allowed []string, target string) bool {
 
 	for _, entry := range allowed {
 		if matchesHostPattern(entry, normTarget) {
+			return true
+		}
+	}
+	return false
+}
+
+// NormalizeNamespace extracts and normalizes a clean group, project, repository, or namespace path.
+// It trims whitespace, strips query parameters and URL fragments, removes URL schemes
+// (e.g. "https://", "http://", "git://", "ssh://", or protocol-relative "//"),
+// converts SCP-style git URLs ("git@gitlab.com:group/subgroup/repo.git" -> "gitlab.com/group/subgroup/repo"),
+// strips user credentials ("user:pass@"), strips port from host if present (e.g. ":8443"),
+// removes trailing ".git" extensions, cleans redundant slashes via path.Clean,
+// strips leading/trailing slashes, and lowercases the result.
+func NormalizeNamespace(raw string) string {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return ""
+	}
+
+	// 1. Strip fragment and query params (e.g. "?ref=main#readme")
+	if idx := strings.IndexAny(s, "?#"); idx != -1 {
+		s = s[:idx]
+	}
+
+	// 2. Handle SCP-style git URL: "git@gitlab.com:group/subgroup/repo.git"
+	if strings.HasPrefix(s, "git@") {
+		s = s[4:]
+		if colonIdx := strings.Index(s, ":"); colonIdx != -1 && !strings.Contains(s[:colonIdx], "/") {
+			s = s[:colonIdx] + "/" + s[colonIdx+1:]
+		}
+	}
+
+	// 3. Strip scheme (e.g. "https://", "http://", "ssh://", "git://", or protocol-relative "//")
+	if idx := strings.Index(s, "://"); idx != -1 {
+		s = s[idx+3:]
+	} else if strings.HasPrefix(s, "//") {
+		s = s[2:]
+	}
+
+	// 4. Strip user credentials if still present (e.g. "user:pass@gitlab.com/...")
+	if atIdx := strings.Index(s, "@"); atIdx != -1 {
+		firstSlash := strings.Index(s, "/")
+		if firstSlash == -1 || atIdx < firstSlash {
+			s = s[atIdx+1:]
+		}
+	}
+
+	// 5. Strip port from host component if present (e.g. "gitlab.acme.corp:8443/group/repo")
+	firstSlash := strings.Index(s, "/")
+	if firstSlash != -1 {
+		hostPart := s[:firstSlash]
+		pathPart := s[firstSlash:]
+		if colonIdx := strings.LastIndex(hostPart, ":"); colonIdx != -1 {
+			portStr := hostPart[colonIdx+1:]
+			if _, err := strconv.Atoi(portStr); err == nil {
+				s = hostPart[:colonIdx] + pathPart
+			}
+		}
+	} else {
+		if colonIdx := strings.LastIndex(s, ":"); colonIdx != -1 {
+			portStr := s[colonIdx+1:]
+			if _, err := strconv.Atoi(portStr); err == nil {
+				s = s[:colonIdx]
+			}
+		}
+	}
+
+	// 6. Strip trailing ".git" suffix
+	s = strings.TrimSuffix(s, ".git")
+
+	// 7. Clean path slashes
+	s = strings.Trim(s, "/")
+	if s == "" {
+		return ""
+	}
+	s = path.Clean("/" + s)
+	s = strings.Trim(s, "/")
+	if s == "." || s == "" {
+		return ""
+	}
+
+	// 8. Lowercase
+	return strings.ToLower(s)
+}
+
+// matchesNamespaceTree performs hierarchical path and wildcard matching between
+// a normalized pattern and normalized candidate target.
+func matchesNamespaceTree(p, t string) bool {
+	if p == "" || t == "" {
+		return false
+	}
+
+	// 1. Universal wildcards
+	if p == "*" || p == "all" || p == "**" {
+		return true
+	}
+
+	// 2. Direct exact match
+	if p == t {
+		return true
+	}
+
+	// 3. Trailing recursive wildcard (e.g. "devops/*" or "devops/**")
+	if strings.HasSuffix(p, "/*") || strings.HasSuffix(p, "/**") {
+		base := strings.TrimSuffix(p, "/*")
+		base = strings.TrimSuffix(base, "/**")
+		base = strings.TrimRight(base, "/")
+
+		// Authorize root group itself (e.g. target "devops" matches "devops/*")
+		if matchesNamespaceTree(base, t) {
+			return true
+		}
+
+		// Authorize all descendants (target must start with base + "/")
+		if strings.HasPrefix(t, base+"/") {
+			return true
+		}
+
+		// If base contains wildcards (e.g. "acme-*/*")
+		if strings.ContainsAny(base, "*?[") {
+			baseParts := strings.Split(base, "/")
+			tParts := strings.Split(t, "/")
+			if len(tParts) > len(baseParts) {
+				tPrefix := strings.Join(tParts[:len(baseParts)], "/")
+				if matchesNamespaceTree(base, tPrefix) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+
+	// 4. Non-wildcard hierarchical root (e.g. "devops" authorizes "devops/backend", "devops/backend/service")
+	if !strings.ContainsAny(p, "*?[") {
+		if strings.HasPrefix(t, p+"/") {
+			return true
+		}
+		return false
+	}
+
+	// 5. Glob matching for patterns with wildcards (e.g. "team-*", "acme-*/backend")
+	if matchFeaturePattern(p, t) {
+		return true
+	}
+
+	// Check descendant matching when pattern has wildcards (e.g. "team-*" matching "team-alpha/backend")
+	pParts := strings.Split(p, "/")
+	tParts := strings.Split(t, "/")
+	if len(tParts) > len(pParts) {
+		tPrefix := strings.Join(tParts[:len(pParts)], "/")
+		if matchFeaturePattern(p, tPrefix) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// matchesNamespacePattern evaluates whether a target namespace matches an allowed pattern.
+// It normalizes both pattern and target using NormalizeNamespace, supports hierarchical tree
+// matching (root and descendants), and handles host-qualified patterns or targets.
+func matchesNamespacePattern(pattern, target string) bool {
+	p := NormalizeNamespace(pattern)
+	t := NormalizeNamespace(target)
+	if p == "" || t == "" {
+		return false
+	}
+
+	// 1. Universal wildcards
+	if p == "*" || p == "all" || p == "**" {
+		return true
+	}
+
+	// 2. Direct tree match against target
+	if matchesNamespaceTree(p, t) {
+		return true
+	}
+
+	// 3. Handle host-aware target vs pattern
+	// Check if target has a slash separating first segment and path
+	if tFirstSlash := strings.Index(t, "/"); tFirstSlash != -1 {
+		tHost := t[:tFirstSlash]
+		tPath := t[tFirstSlash+1:]
+
+		// If pattern also has slashes:
+		if pFirstSlash := strings.Index(p, "/"); pFirstSlash != -1 {
+			pHost := p[:pFirstSlash]
+			pPath := p[pFirstSlash+1:]
+
+			// If pattern has a host component (contains dot or wildcard prefix):
+			if strings.Contains(pHost, ".") || strings.HasPrefix(pHost, "*.") {
+				if matchesHostPattern(pHost, tHost) && matchesNamespaceTree(pPath, tPath) {
+					return true
+				}
+			} else {
+				// Pattern has slashes but no host (e.g. "devops/backend/*")
+				// If target has a host (contains dot or is localhost), match pattern against target's path
+				if strings.Contains(tHost, ".") || tHost == "localhost" {
+					if matchesNamespaceTree(p, tPath) {
+						return true
+					}
+				}
+			}
+		} else {
+			// Pattern has no slashes (e.g. "devops")
+			// If target has a host (contains dot or is localhost) and pattern has no dot:
+			if (strings.Contains(tHost, ".") || tHost == "localhost") && !strings.Contains(p, ".") {
+				if matchesNamespaceTree(p, tPath) {
+					return true
+				}
+			}
+		}
+	}
+
+	return false
+}
+
+// matchesNamespaceScope evaluates whether target matches any namespace pattern in allowed.
+// If allowed is empty, returns true (unrestricted).
+// If target is empty, returns false.
+func matchesNamespaceScope(allowed []string, target string) bool {
+	if len(allowed) == 0 {
+		return true
+	}
+	normTarget := NormalizeNamespace(target)
+	if normTarget == "" {
+		return false
+	}
+
+	for _, entry := range allowed {
+		if matchesNamespacePattern(entry, normTarget) {
 			return true
 		}
 	}
