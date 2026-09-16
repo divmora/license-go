@@ -116,7 +116,7 @@ For perpetual licenses, pass `-valid-days 0`.
 
 ---
 
-### Workflow C: Verify or Inspect a License via CLI
+### Workflow C: Verify, Inspect, or Format Status via CLI
 
 ```bash
 # Verify explicit license file or token with standard and custom scope assertions:
@@ -140,6 +140,14 @@ license-cli verify -product "<product-name>"
 # Inspect claims without signature verification (direct or env fallback)
 license-cli inspect -license ./license.key
 license-cli inspect
+
+# Print standardized visual status card with live capacity/usage overlays:
+license-cli status \
+  -license ./license.key \
+  -usage "max_runners=142,max_nodes=6"
+
+# Or zero-configuration status card:
+license-cli status -usage "max_runners=142"
 ```
 
 ---
@@ -386,7 +394,7 @@ license-cli verify \
 
 ---
 
-### Workflow H: Cryptographic Release Attestation & Binary Provenance
+### Workflow I: Cryptographic Release Attestation & Binary Provenance
 
 To prevent local binary tampering, unauthorized compile-time `-ldflags` manipulation (e.g. forging an ancient release date to claim premature BSL 1.1 Apache 2.0 open-source conversion), or supply-chain compromise:
 
@@ -449,6 +457,39 @@ if result.Provenance != nil && result.Provenance.Attested {
 	log.Printf("Certified release: %s %s (signed by: %s)",
 		result.Provenance.Claims.Product, result.Provenance.Claims.Version, result.Provenance.VerifiedByKeyID)
 }
+```
+
+---
+
+### Workflow J: Standardized License Status Formatting (CLI & Go SDK)
+
+For user-facing CLI commands (`<product> license status`, e.g., `gitlab-fleet-governor license status` or `otel-aws-log-processor license status`), render high-impact status card banners with visual badges and capacity/quota utilization tables:
+
+```go
+result, err := validator.VerifyWithResultEnv()
+if err != nil {
+	log.Fatalf("License verification failed: %v", err)
+}
+
+// Render status card with live runtime capacity utilization
+statusCard := result.FormatStatus(
+	license.WithStatusBannerTitle("GITLAB FLEET GOVERNOR - LICENSE STATUS"),
+	license.WithStatusUsage(map[string]int64{
+		"max_runners": 142,
+		"max_nodes":   6,
+	}),
+)
+fmt.Print(statusCard)
+```
+
+In standalone CLI:
+
+```bash
+# Render visual status card with capacity utilization
+license-cli status -license ./license.key -usage "max_runners=142,max_nodes=6"
+
+# Or compact mode (omits box border)
+license-cli status -license ./license.key -compact
 ```
 
 ---

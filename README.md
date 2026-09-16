@@ -328,7 +328,22 @@ license-cli verify \
   -require-release-attestation
 ```
 
-### 4. Inspect a License (No Key Required)
+### 4. Display Standardized License Status Card (`license-cli status`)
+
+Display a visual status card with active tier, countdown, BSL 1.1 open-source transition, and resource quota utilization table:
+
+```bash
+# Display status with live runtime usage counts:
+license-cli status \
+  -product "gitlab-fleet-governor" \
+  -license ./acme.license.key \
+  -usage "max_runners=142,max_nodes=6"
+
+# Or display compact status card from environment:
+license-cli status -compact
+```
+
+### 5. Inspect a License (No Key Required)
 
 ```bash
 # Direct file / token inspect:
@@ -338,7 +353,7 @@ license-cli inspect -license ./acme.license.key
 license-cli inspect
 ```
 
-### 5. Mint a Release Attestation (CI/CD Pipeline)
+### 6. Mint a Release Attestation (CI/CD Pipeline)
 
 Mint an Ed25519 cryptographic release attestation token or armored PEM sidecar (`release.sig`) in your CI/CD release build step to certify binary build authenticity, official Git commit, SemVer version, authoritative BSL 1.1 release date, and binary SHA-256 digest:
 
@@ -354,7 +369,7 @@ license-cli sign-release \
   -armored
 ```
 
-### 6. Verify Release Provenance & Binary Integrity
+### 7. Verify Release Provenance & Binary Integrity
 
 Verify an official release binary against a cryptographic release attestation:
 
@@ -368,7 +383,7 @@ license-cli verify-release \
   -binary "./bin/gitlab-fleet-governor"
 ```
 
-### 7. Inspect Release Attestation Claims (No Key Required)
+### 8. Inspect Release Attestation Claims (No Key Required)
 
 Inspect the unverified release claims embedded within an armored `.sig` file or compact token:
 

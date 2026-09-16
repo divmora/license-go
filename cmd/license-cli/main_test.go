@@ -479,3 +479,87 @@ func TestCLI_SignVerifyInspectRelease(t *testing.T) {
 		t.Fatalf("runVerify with release attestation failed: %v", err)
 	}
 }
+
+func TestCLI_StatusSubcommand(t *testing.T) {
+	tmpDir := t.TempDir()
+	privKeyPath := filepath.Join(tmpDir, "private.pem")
+	pubKeyPath := filepath.Join(tmpDir, "public.pem")
+	licensePath := filepath.Join(tmpDir, "status.license.key")
+
+	// 1. Keygen
+	err := runKeygen([]string{
+		"-out-dir", tmpDir,
+		"-priv-name", "private.pem",
+		"-pub-name", "public.pem",
+	})
+	if err != nil {
+		t.Fatalf("runKeygen failed: %v", err)
+	}
+
+	// 2. Issue license with limits and features
+	err = runIssue([]string{
+		"-private-key", privKeyPath,
+		"-customer", "Acme Corporation",
+		"-org-id", "org_acme_status",
+		"-product", "gitlab-fleet-governor",
+		"-plan", "enterprise",
+		"-valid-days", "30",
+		"-features", "ha,audit-logs,auto-scaling",
+		"-limits", "max_runners=200,max_nodes=10",
+		"-scope-envs", "production",
+		"-out", licensePath,
+	})
+	if err != nil {
+		t.Fatalf("runIssue failed: %v", err)
+	}
+
+	// 3. Status with verified license and usage overlay
+	err = runStatus([]string{
+		"-public-key", pubKeyPath,
+		"-license", licensePath,
+		"-product", "gitlab-fleet-governor",
+		"-usage", "max_runners=142,max_nodes=6",
+		"-title", "FLEET GOVERNOR STATUS",
+	})
+	if err != nil {
+		t.Fatalf("runStatus with usage failed: %v", err)
+	}
+
+	// 4. Compact status
+	err = runStatus([]string{
+		"-public-key", pubKeyPath,
+		"-license", licensePath,
+		"-compact",
+	})
+	if err != nil {
+		t.Fatalf("runStatus with -compact failed: %v", err)
+	}
+
+	// 5. Status without public key (unverified claims fallback)
+	err = runStatus([]string{
+		"-license", licensePath,
+	})
+	if err != nil {
+		t.Fatalf("runStatus unverified fallback failed: %v", err)
+	}
+
+	// 6. Status with environment variables auto-resolution
+	licBytes, err := os.ReadFile(licensePath)
+	if err != nil {
+		t.Fatalf("ReadFile licensePath failed: %v", err)
+	}
+	pubBytes, err := os.ReadFile(pubKeyPath)
+	if err != nil {
+		t.Fatalf("ReadFile pubKeyPath failed: %v", err)
+	}
+
+	t.Setenv(license.EnvLicenseKey, string(licBytes))
+	t.Setenv(license.EnvPublicKeysPEM, string(pubBytes))
+
+	err = runStatus([]string{
+		"-usage", "max_runners=50",
+	})
+	if err != nil {
+		t.Fatalf("runStatus with auto-resolved env vars failed: %v", err)
+	}
+}

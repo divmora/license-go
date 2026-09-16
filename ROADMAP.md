@@ -20,7 +20,7 @@ This document tracks upcoming capabilities, planned optimizations, and ecosystem
 - [ ] **BSL 1.1 Additional Use Grant Evaluator (`BSLPolicy.EvaluateEntitlement`)**: Provide standard BSL 1.1 dual-licensing entitlement evaluation modeling vendor-specific Additional Use Grants (e.g. Grant A: non-production / simulation / test exemption; Grant B: free community production quota up to $N$ units like `max_projects` or `max_nodes`). Automatically enforces commercial token requirements only when usage exceeds free tier bounds while granting full open-source access upon Change Date arrival.
 
 ### 🖥️ Developer Experience & CLI Tooling
-- [ ] **Standardized CLI License Status Formatter**: Provide reusable status banner and tabular formatters for downstream CLI applications implementing `app license status` or `app license check` commands, presenting active tiers, quota limits, days remaining, grace period countdowns, and BSL 1.1 Apache 2.0 conversion status consistently across all Divmora tools.
+- [ ] *(Additional CLI capabilities will be tracked here)*
 
 ### 📊 Concurrency-Safe Usage Metering & Watermarking
 - [ ] **In-Memory `UsageMeter`**: Provide a thread-safe consumption tracker against `Claims.Limits` (e.g. `meter.CanConsume("runners", n)`).
@@ -56,6 +56,12 @@ This document tracks upcoming capabilities, planned optimizations, and ecosystem
 
 ## ✅ Delivered Capabilities
 
+- **Standardized CLI License Status Formatter (`FormatStatus` & `license-cli status`)**:
+  - `VerificationResult.FormatStatus(opts...)`, `VerificationResult.FormatStatusBanner(opts...)`, `Claims.FormatStatus(opts...)`, and `FormatStatus(...)`: Formats high-impact terminal status cards and quota utilization tables for downstream CLI applications (`app license status` or `license-cli status`).
+  - Visual status badges: Clear badges for `ACTIVE [✓ Valid]`, `GRACE PERIOD [⚠️ Operating under grace buffer]`, `OPEN SOURCE [✓ Converted to Apache-2.0]`, `EXPIRED [❌ Commercial License Expired]`, and `PENDING [⏳ Not active yet]`.
+  - Live runtime usage overlay: Supports `WithStatusUsage(map[string]int64)` and `WithStatusUsageFunc(fn)` to calculate live percentage utilization (`71%`), available headroom (`58 available`), and over-quota warnings (`130% [EXCEEDED]`, `OVER QUOTA (+15)`).
+  - Open-source transition countdown: Displays remaining days until BSL 1.1 converts to Apache 2.0.
+  - Subcommand `license-cli status`: First-class administrative tool supporting `-license`, `-usage`, `-compact`, `-title`, and zero-configuration environment auto-resolution.
 - **Cryptographic Release Attestation & Provenance Engine (`DIVREL1` & `EvaluateProvenance`)**:
   - `ReleaseClaims`, `SignRelease`, `SignReleaseArmored`, `VerifyRelease`, `InspectRelease`, and `InspectReleaseFromFile`: End-to-end cryptographic minting and verification of release provenance metadata.
   - Wire format `DIVREL1` (`DIVREL1.<payloadB64>.<sigB64>`) and armored PEM block `-----BEGIN DIVMORA RELEASE ATTESTATION-----`.

@@ -19,12 +19,14 @@ license-go/
 │       ├── signer.go           # License generation & signing engine (private key)
 │       ├── validator.go        # Client-side verification engine (public key)
 │       ├── provenance.go       # Cryptographic release attestation & binary provenance engine
+│       ├── status_formatter.go # Standardized CLI status card & quota utilization formatter
 │       ├── manager.go          # Daemon background monitor, file watcher, expiry alerts
 │       ├── keys_test.go        # Key generation & PEM round-trip tests
 │       ├── keyring_test.go     # KeyRing rotation, revocation & multi-key tests
 │       ├── bsl_test.go         # BSL 1.1 conversion & clock tampering defense tests
 │       ├── license_test.go     # Signing, verification, tampering, expiration tests
 │       ├── provenance_test.go  # Release attestation & binary checksum verification tests
+│       ├── status_formatter_test.go # Status banner & quota table tests
 │       ├── manager_test.go     # Background daemon lifecycle & hot-reloading tests
 │       ├── policy_test.go      # Operational policy modes (Strict, Degraded, WarnOnly) tests
 │       └── version_test.go     # Perpetual license version lock & maintenance cutoff tests
