@@ -20,7 +20,7 @@ This document tracks upcoming capabilities, planned optimizations, and ecosystem
 - [ ] *(Additional validation capabilities will be tracked here)*
 
 ### 🖥️ Developer Experience & CLI Tooling
-- [ ] **Reusable Terminal Claims Inspection Formatter (`Claims.FormatInspect()`)**: Provide a reusable multi-line or tabular formatter for claims metadata (Customer, Tier, Product, Features, Limits, Scope, Version Bounds, Maintenance, Expiration) to standardize `license inspect` CLI subcommands across downstream binaries.
+- [ ] *(Additional CLI tooling capabilities will be tracked here)*
 
 ### 📊 Concurrency-Safe Usage Metering & Watermarking
 - [ ] **In-Memory `UsageMeter`**: Provide a thread-safe consumption tracker against `Claims.Limits` (e.g. `meter.CanConsume("runners", n)`).
@@ -56,6 +56,10 @@ This document tracks upcoming capabilities, planned optimizations, and ecosystem
 
 ## ✅ Delivered Capabilities
 
+- **Reusable Terminal Claims Inspection Formatter (`Claims.FormatInspect()`)**:
+  - `Claims.FormatInspect()` and `Claims.FormatInspectAt(t)`: Reusable, aligned terminal formatter presenting complete claims metadata (Status, Customer, Plan, Product, Validity Timeline, Version Bounds, Maintenance Cutoff, Entitlements & Limits, Operational Infrastructure Scopes, and Custom Metadata) with deterministic sorting.
+  - `VerificationResult.FormatInspect()`: Enriched terminal inspector combining cryptographic signature verification status, key lifecycle status, BSL 1.1 transition status, and authoritative clock attestation with formatted claims.
+  - `license-cli inspect` formatted inspection: Defaults to `claims.FormatInspect()` with a `-json` flag for raw JSON output.
 - **Diagnostic Human Status Message (`VerificationResult.StatusMessage()`)**:
   - `VerificationResult.StatusMessage()`: Standard human-readable descriptions of operational validity, covering active subscriptions with remaining days, in-grace-period notices with remaining grace days and cutoff countdown, perpetual active status, future `NotBefore` activation windows, BSL 1.1 open-source transition notices, and past-expiration notices with grace period summaries.
   - `Claims.StatusMessage()` and `Claims.StatusMessageAt(t)`: Reusable claims status formatting for unverified inspection, daemon logs, and custom telemetry.

@@ -116,10 +116,15 @@ func TestCLI_IssueVerifyInspect_StandardAndCustomScopeAndMeta(t *testing.T) {
 		t.Fatalf("runIssue failed: %v", err)
 	}
 
-	// 3. Inspect (should parse without error)
+	// 3. Inspect (should parse without error, testing both standard terminal format and -json format)
 	err = runInspect([]string{"-license", licensePath})
 	if err != nil {
 		t.Fatalf("runInspect failed: %v", err)
+	}
+
+	err = runInspect([]string{"-license", licensePath, "-json"})
+	if err != nil {
+		t.Fatalf("runInspect with -json failed: %v", err)
 	}
 
 	// 4. Verify - valid scopes and custom scope match

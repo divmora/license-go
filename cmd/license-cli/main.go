@@ -458,6 +458,7 @@ func runVerify(args []string) error {
 func runInspect(args []string) error {
 	fs := flag.NewFlagSet("inspect", flag.ExitOnError)
 	licenseSource := fs.String("license", "", "Path to license file or raw token string (optional; falls back to DIVMORA_LICENSE_KEY/DIVMORA_LICENSE_FILE)")
+	jsonOutput := fs.Bool("json", false, "Output claims in raw JSON format")
 
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -473,24 +474,17 @@ func runInspect(args []string) error {
 		return fmt.Errorf("failed to inspect license: %w", err)
 	}
 
+	if *jsonOutput {
+		claimsJSON, _ := json.MarshalIndent(claims, "", "  ")
+		fmt.Println(string(claimsJSON))
+		return nil
+	}
+
 	fmt.Println("License Inspection (Unverified Signature):")
 	if resolved.Source != "explicit_file" && resolved.Source != "explicit_token" {
 		fmt.Printf("ℹ️  Loaded license from: %s\n", resolved.Source)
 	}
-	fmt.Println("--------------------------------------------------")
-	claimsJSON, _ := json.MarshalIndent(claims, "", "  ")
-	fmt.Println(string(claimsJSON))
-	fmt.Println("--------------------------------------------------")
-	fmt.Printf("Status: %s\n", claims.StatusMessage())
-	if claims.MaxVersion != "" {
-		fmt.Printf("Max Authorized Version: %s\n", claims.MaxVersion)
-	}
-	if len(claims.AllowedVersions) > 0 {
-		fmt.Printf("Allowed Versions: %v\n", claims.AllowedVersions)
-	}
-	if !claims.MaintenanceExpiresAt.IsZero() {
-		fmt.Printf("Maintenance / Updates Cutoff: %s\n", claims.MaintenanceExpiresAt.Format(time.RFC3339))
-	}
+	fmt.Print(claims.FormatInspect())
 	return nil
 }
 
