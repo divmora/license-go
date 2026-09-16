@@ -318,6 +318,14 @@ license-cli verify \
 # Or verify automatically with zero configuration (resolves license from DIVMORA_LICENSE_KEY/FILE
 # and public key from DIVMORA_PUBLIC_KEY / DIVMORA_PUBLIC_KEYS_PEM / /etc/divmora/public.pem):
 license-cli verify -product "gitlab-fleet-governor"
+
+# Verify license enforced with release attestation sidecar and binary checksum:
+license-cli verify \
+  -product "gitlab-fleet-governor" \
+  -license ./acme.license.key \
+  -release-attestation ./release.sig \
+  -binary ./bin/gitlab-fleet-governor \
+  -require-release-attestation
 ```
 
 ### 4. Inspect a License (No Key Required)
@@ -328,6 +336,48 @@ license-cli inspect -license ./acme.license.key
 
 # Or inspect automatically from $DIVMORA_LICENSE_KEY or $DIVMORA_LICENSE_FILE:
 license-cli inspect
+```
+
+### 5. Mint a Release Attestation (CI/CD Pipeline)
+
+Mint an Ed25519 cryptographic release attestation token or armored PEM sidecar (`release.sig`) in your CI/CD release build step to certify binary build authenticity, official Git commit, SemVer version, authoritative BSL 1.1 release date, and binary SHA-256 digest:
+
+```bash
+license-cli sign-release \
+  -private-key ./keys/private.pem \
+  -product "gitlab-fleet-governor" \
+  -version "v2.5.0" \
+  -git-commit "${CI_COMMIT_SHA}" \
+  -binary "./bin/gitlab-fleet-governor" \
+  -authority "divmora.com/release" \
+  -out "./bin/release.sig" \
+  -armored
+```
+
+### 6. Verify Release Provenance & Binary Integrity
+
+Verify an official release binary against a cryptographic release attestation:
+
+```bash
+license-cli verify-release \
+  -public-key ./keys/public.pem \
+  -attestation ./bin/release.sig \
+  -product "gitlab-fleet-governor" \
+  -version "v2.5.0" \
+  -git-commit "${CI_COMMIT_SHA}" \
+  -binary "./bin/gitlab-fleet-governor"
+```
+
+### 7. Inspect Release Attestation Claims (No Key Required)
+
+Inspect the unverified release claims embedded within an armored `.sig` file or compact token:
+
+```bash
+# Standard formatted inspection:
+license-cli inspect-release -attestation ./bin/release.sig
+
+# Or output raw JSON:
+license-cli inspect-release -attestation ./bin/release.sig -json
 ```
 
 ---

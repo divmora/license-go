@@ -386,6 +386,73 @@ license-cli verify \
 
 ---
 
+### Workflow H: Cryptographic Release Attestation & Binary Provenance
+
+To prevent local binary tampering, unauthorized compile-time `-ldflags` manipulation (e.g. forging an ancient release date to claim premature BSL 1.1 Apache 2.0 open-source conversion), or supply-chain compromise:
+
+#### 1. Mint Release Attestation in CI/CD
+
+During official build pipelines, mint an Ed25519 cryptographic release attestation token or armored sidecar (`release.sig`):
+
+```bash
+license-cli sign-release \
+  -private-key ./keys/private.pem \
+  -product "gitlab-fleet-governor" \
+  -version "v2.5.0" \
+  -git-commit "${CI_COMMIT_SHA}" \
+  -binary "./bin/gitlab-fleet-governor" \
+  -authority "divmora.com/release" \
+  -out "./bin/release.sig" \
+  -armored
+```
+
+#### 2. Verify Release Binary & Checksum via CLI
+
+```bash
+license-cli verify-release \
+  -public-key ./keys/public.pem \
+  -attestation ./bin/release.sig \
+  -product "gitlab-fleet-governor" \
+  -version "v2.5.0" \
+  -git-commit "${CI_COMMIT_SHA}" \
+  -binary "./bin/gitlab-fleet-governor"
+```
+
+#### 3. Inspect Release Claims (Unverified)
+
+```bash
+license-cli inspect-release -attestation ./bin/release.sig
+```
+
+#### 4. Embed Provenance Enforcement in Go Services
+
+```go
+validator, err := license.NewValidatorFromPEM(
+	publicKeyPEM,
+	license.WithProduct("gitlab-fleet-governor"),
+	license.WithCurrentVersion(version),
+	license.WithCurrentGitCommit(gitCommit),
+	license.WithBinaryPath(executablePath),
+	license.WithReleaseAttestationFile("/etc/divmora/release.sig"),
+	license.WithRequireReleaseAttestation(true), // Enforce fail-closed verification
+)
+if err != nil {
+	log.Fatal(err)
+}
+
+result, err := validator.VerifyWithResultEnv()
+if err != nil {
+	log.Fatalf("Release provenance or license validation failed: %v", err)
+}
+
+if result.Provenance != nil && result.Provenance.Attested {
+	log.Printf("Certified release: %s %s (signed by: %s)",
+		result.Provenance.Claims.Product, result.Provenance.Claims.Version, result.Provenance.VerifiedByKeyID)
+}
+```
+
+---
+
 ## 4. Troubleshooting & Sentinel Errors
 
 | Error | Cause | Resolution |
@@ -404,4 +471,11 @@ license-cli verify \
 | `ErrClockTamperingDetected` | Local system clock was advanced forward to bypass BSL or license checks | Ensure the system clock is synchronized via NTP. Authoritative server time is used to enforce genuine validity. |
 | `ErrDegradedMode` | License is expired or missing while operating in `PolicyDegraded` | Re-issue or restore valid commercial license key to unlock enterprise tier entitlements. |
 | `ErrDegradedReadOnly` | Mutation attempted while manager is in degraded read-only mode (`DegradedReadOnly: true`) | Renew commercial license to re-enable write operations and full operational capacity. |
+| `ErrInvalidReleaseAttestation` | Release attestation signature is invalid or token is malformed | Ensure the release attestation was signed with a trusted key in the KeyRing. |
+| `ErrReleaseAttestationMissing` | Release attestation is required by policy (`WithRequireReleaseAttestation`) but missing | Provide an official release attestation sidecar (`release.sig`) with the binary. |
+| `ErrReleaseTampered` | Binary build parameters (build date, release date, version, commit) contradict attested claims | Ensure the binary was compiled from official release sources without spoofed build metadata. |
+| `ErrReleaseProductMismatch` | Release attestation was issued for a different product | Ensure the attestation matches the running binary product name. |
+| `ErrReleaseVersionMismatch` | Release attestation version does not match running binary version | Verify that the release attestation matches the binary SemVer release. |
+| `ErrReleaseDigestMismatch` | Compiled binary SHA-256 digest does not match the attested release digest | Ensure binary executable was not modified or corrupted after build. |
+
 
