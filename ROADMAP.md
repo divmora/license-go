@@ -39,7 +39,7 @@ This document tracks upcoming capabilities, planned optimizations, and ecosystem
 - [ ] Centralized Cryptographic Revocation List (CRL) fetching and background caching.
 
 ### 📑 Ecosystem & Cross-Language Parity
-- [ ] **`license-portal` Sync**: Update Cloudflare Pages Functions in `divmora/license-portal` to issue `DIV1` tokens and match the unified `Scope` and `Customer` schema.
+- [ ] *(Cross-language SDKs and SDK parity tasks will be tracked here)*
 
 ### ⚡ Performance & Telemetry
 - [ ] Zero-allocation validator optimizations for microservices processing high-frequency tenant licenses.
