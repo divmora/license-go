@@ -1,0 +1,9 @@
+{
+  "packages": {
+    ".": {
+      "release-type": "go",
+      "package-name": "license-go",
+      "include-component-in-tag": false
+    }
+  }
+}

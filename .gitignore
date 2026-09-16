@@ -1,0 +1,21 @@
+# Binaries
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test artifacts & keys
+*.pem
+*.key
+*.lic
+*.bak
+test-keys/
+
+# IDE & OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
