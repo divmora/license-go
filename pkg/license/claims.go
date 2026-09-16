@@ -49,6 +49,9 @@ type Claims struct {
 	// ID is the unique identifier for this license (e.g. UUIDv4).
 	ID string `json:"id"`
 
+	// KeyID optionally identifies the signing key used to issue this token (e.g., "divmora-2026-root" or key fingerprint).
+	KeyID string `json:"kid,omitempty"`
+
 	// Customer contains the customer organization identity and tenant details.
 	Customer Customer `json:"customer"`
 

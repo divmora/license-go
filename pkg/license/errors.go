@@ -41,6 +41,12 @@ var (
 
 	// ErrScopeMismatch is returned when an environment, account, region, cluster, namespace, or host is not authorized by the license scope.
 	ErrScopeMismatch = errors.New("license: scope mismatch")
+
+	// ErrKeyRevoked is returned when a license was signed by a key that has been marked as revoked.
+	ErrKeyRevoked = errors.New("license: signing key has been revoked")
+
+	// ErrKeyNotFound is returned when a requested Key ID is not found in the KeyRing.
+	ErrKeyNotFound = errors.New("license: key not found in keyring")
 )
 
 // LimitExceededError provides structured detail when a quota is exceeded.

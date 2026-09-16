@@ -12,7 +12,6 @@ This document tracks upcoming capabilities, planned optimizations, and ecosystem
 ### 🔑 Cryptographic & Key Lifecycle
 - [ ] **AWS KMS Asymmetric Signing**: Support AWS KMS asymmetric Ed25519 signing in `license-cli` (enabling license generation in CI/CD without exposing private key files).
 - [ ] **HashiCorp Vault Transit Engine**: Support Vault Transit engine for enterprise automated license issuance workflows.
-- [ ] **Key Rotation & Multi-Key Ring (`KeyRing`)**: Support multiple active and previous public keys in `Validator` so rotated signing keys do not break existing long-term customer licenses; optional Key ID (`kid`) support.
 - [ ] **Embedded Public Key Helpers**: Provide standard helper functions (`license.NewValidatorFromEmbeddedPEM(...)`) and documentation patterns for compile-time `//go:embed` without distributing separate `.pem` files on disk.
 
 ### 📊 Concurrency-Safe Usage Metering & Watermarking

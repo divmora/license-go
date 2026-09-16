@@ -14,10 +14,12 @@ license-go/
 │       ├── errors.go           # Typed sentinel errors & structured error types
 │       ├── keys.go             # Ed25519 key generation, PEM PKCS#8/PKIX serialization
 │       ├── envelope.go         # Token serialization (compact DIV1 & armored PEM blocks)
+│       ├── keyring.go          # KeyRing multi-key rotation, bundle management & revocation
 │       ├── signer.go           # License generation & signing engine (private key)
 │       ├── validator.go        # Client-side verification engine (public key)
 │       ├── manager.go          # Daemon background monitor, file watcher, expiry alerts
 │       ├── keys_test.go        # Key generation & PEM round-trip tests
+│       ├── keyring_test.go     # KeyRing rotation, revocation & multi-key tests
 │       ├── license_test.go     # Signing, verification, tampering, expiration tests
 │       └── manager_test.go     # Background daemon lifecycle & hot-reloading tests
 ├── cmd/

@@ -32,6 +32,8 @@ func main() {
 		err = runVerify(args)
 	case "inspect":
 		err = runInspect(args)
+	case "keyring":
+		err = runKeyring(args)
 	case "help", "-h", "--help":
 		printUsage()
 		return
@@ -58,6 +60,7 @@ Available Commands:
   issue     Issue and sign a new software license
   verify    Verify a license signature and evaluate its claims
   inspect   Decode and inspect license claims without verification
+  keyring   Inspect public keys inside a PEM bundle file
   help      Display help information
 
 Use "license-cli <command> -help" for more information about a command.`)
@@ -121,6 +124,7 @@ func runIssue(args []string) error {
 	scopeHosts := fs.String("scope-hosts", "", "Comma-separated authorized hostnames/domains (e.g. '*.acme.corp,runner-*.internal')")
 	armored := fs.Bool("armored", true, "Output license in armored text format (default: true)")
 	outFile := fs.String("out", "", "Output file path (default: stdout)")
+	kid := fs.String("kid", "", "Optional Key ID or descriptor to embed in token claims (e.g. 'divmora-2026-root')")
 
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -136,7 +140,12 @@ func runIssue(args []string) error {
 		return fmt.Errorf("-customer is required")
 	}
 
-	signer, err := license.NewSignerFromPEMFile(*privKeyPath)
+	var signerOpts []license.SignerOption
+	if *kid != "" {
+		signerOpts = append(signerOpts, license.WithSignerKeyID(*kid))
+	}
+
+	signer, err := license.NewSignerFromPEMFile(*privKeyPath, signerOpts...)
 	if err != nil {
 		return fmt.Errorf("failed to load private key: %w", err)
 	}
@@ -321,6 +330,9 @@ func runVerify(args []string) error {
 	}
 
 	fmt.Println("✓ VERIFICATION SUCCESSFUL: Signature is valid and claims match!")
+	if result.VerifiedByKeyID != "" {
+		fmt.Printf("🔑 Verified by Key: %s (Status: %s)\n", result.VerifiedByKeyID, result.VerifiedByKeyStatus)
+	}
 	if resolved.Source != "explicit_file" && resolved.Source != "explicit_token" {
 		fmt.Printf("ℹ️  Loaded license from: %s\n", resolved.Source)
 	}
@@ -370,5 +382,32 @@ func runInspect(args []string) error {
 	} else {
 		fmt.Printf("Validity: Active (%d days remaining, expires %s)\n", claims.DaysRemaining(), claims.ExpiresAt.Format(time.RFC3339))
 	}
+	return nil
+}
+
+func runKeyring(args []string) error {
+	if len(args) < 1 {
+		return fmt.Errorf("usage: license-cli keyring <public-keys-bundle.pem>")
+	}
+	bundlePath := args[0]
+	ring, err := license.NewKeyRingFromPEMFile(bundlePath)
+	if err != nil {
+		return fmt.Errorf("failed to load keyring bundle: %w", err)
+	}
+
+	keys := ring.Keys()
+	fmt.Printf("KeyRing Bundle: %s (%d public key(s))\n", bundlePath, len(keys))
+	fmt.Println("--------------------------------------------------------------------------------")
+	fmt.Printf("%-6s %-12s %-24s %-20s\n", "INDEX", "STATUS", "ID / FINGERPRINT", "ROLE")
+	fmt.Println("--------------------------------------------------------------------------------")
+	primary := ring.Primary()
+	for i, k := range keys {
+		role := "Fallback"
+		if primary != nil && k == primary {
+			role = "Primary (Active)"
+		}
+		fmt.Printf("%-6d %-12s %-24s %-20s\n", i+1, k.Status, k.ID, role)
+	}
+	fmt.Println("--------------------------------------------------------------------------------")
 	return nil
 }

@@ -13,9 +13,9 @@ import (
 // DefaultClockSkew provides 5 minutes tolerance for system clock discrepancies.
 const DefaultClockSkew = 5 * time.Minute
 
-// Validator validates license tokens against an Ed25519 public key and evaluates claims.
+// Validator validates license tokens against trusted Ed25519 public keys in a KeyRing and evaluates claims.
 type Validator struct {
-	publicKey           ed25519.PublicKey
+	keyRing             *KeyRing
 	expectedProduct     string
 	clockSkew           time.Duration
 	gracePeriod         time.Duration
@@ -136,13 +136,89 @@ func WithAllowInactive(allow bool) ValidatorOption {
 	}
 }
 
-// NewValidator creates a new Validator with the given Ed25519 public key and options.
+// WithKeyRing configures the validator to use a custom KeyRing containing trusted keys.
+func WithKeyRing(ring *KeyRing) ValidatorOption {
+	return func(v *Validator) {
+		if ring != nil {
+			v.keyRing = ring
+		}
+	}
+}
+
+// WithAdditionalPublicKeys registers secondary or fallback public keys in the validator's KeyRing.
+func WithAdditionalPublicKeys(keys ...ed25519.PublicKey) ValidatorOption {
+	return func(v *Validator) {
+		if v.keyRing == nil {
+			v.keyRing = NewKeyRing(nil)
+		}
+		for _, k := range keys {
+			_, _ = v.keyRing.AddKey(k, WithKeyStatus(KeyStatusRetiring))
+		}
+	}
+}
+
+// WithAdditionalPublicKeyPEM parses and registers all public keys from a PEM bundle byte slice into the validator's KeyRing.
+func WithAdditionalPublicKeyPEM(pemBytes []byte) ValidatorOption {
+	return func(v *Validator) {
+		keys, err := ParsePublicKeysFromPEM(pemBytes)
+		if err == nil {
+			for _, k := range keys {
+				if v.keyRing == nil {
+					v.keyRing = NewKeyRing(k)
+				} else {
+					_, _ = v.keyRing.AddKey(k, WithKeyStatus(KeyStatusRetiring))
+				}
+			}
+		}
+	}
+}
+
+// WithRevokedKeyIDs marks the specified Key IDs or fingerprints as REVOKED in the validator's KeyRing.
+func WithRevokedKeyIDs(ids ...string) ValidatorOption {
+	return func(v *Validator) {
+		if v.keyRing != nil {
+			for _, id := range ids {
+				_ = v.keyRing.Revoke(id)
+			}
+		}
+	}
+}
+
+// PublicKey returns the primary public key in the validator's KeyRing, or nil if none is configured.
+func (v *Validator) PublicKey() ed25519.PublicKey {
+	if v.keyRing != nil && v.keyRing.Primary() != nil {
+		return v.keyRing.Primary().PublicKey
+	}
+	return nil
+}
+
+// KeyRing returns the KeyRing instance used by the validator.
+func (v *Validator) KeyRing() *KeyRing {
+	return v.keyRing
+}
+
+// NewValidator creates a new Validator with the given primary Ed25519 public key and options.
 func NewValidator(publicKey ed25519.PublicKey, opts ...ValidatorOption) (*Validator, error) {
 	if len(publicKey) != ed25519.PublicKeySize {
 		return nil, ErrMissingPublicKey
 	}
 	v := &Validator{
-		publicKey: publicKey,
+		keyRing:   NewKeyRing(publicKey),
+		clockSkew: DefaultClockSkew,
+	}
+	for _, opt := range opts {
+		opt(v)
+	}
+	return v, nil
+}
+
+// NewValidatorWithKeyRing creates a Validator using an existing KeyRing containing one or more trusted keys.
+func NewValidatorWithKeyRing(ring *KeyRing, opts ...ValidatorOption) (*Validator, error) {
+	if ring == nil || ring.Count() == 0 {
+		return nil, ErrMissingPublicKey
+	}
+	v := &Validator{
+		keyRing:   ring,
 		clockSkew: DefaultClockSkew,
 	}
 	for _, opt := range opts {
@@ -152,21 +228,24 @@ func NewValidator(publicKey ed25519.PublicKey, opts ...ValidatorOption) (*Valida
 }
 
 // NewValidatorFromPEM creates a Validator from PKIX PEM-encoded public key bytes.
+// If the PEM data contains multiple public key blocks, all keys are loaded into the KeyRing,
+// with the first key designated as Primary and subsequent keys designated as Retiring.
 func NewValidatorFromPEM(pemBytes []byte, opts ...ValidatorOption) (*Validator, error) {
-	pubKey, err := ParsePublicKeyFromPEM(pemBytes)
+	ring, err := NewKeyRingFromPEM(pemBytes)
 	if err != nil {
 		return nil, err
 	}
-	return NewValidator(pubKey, opts...)
+	return NewValidatorWithKeyRing(ring, opts...)
 }
 
-// NewValidatorFromPEMFile creates a Validator by loading an Ed25519 public key from a PEM file.
+// NewValidatorFromPEMFile creates a Validator by loading Ed25519 public keys from a PEM file.
+// If the file contains multiple public key blocks, all keys are loaded into the KeyRing.
 func NewValidatorFromPEMFile(filePath string, opts ...ValidatorOption) (*Validator, error) {
-	data, err := os.ReadFile(filePath)
+	ring, err := NewKeyRingFromPEMFile(filePath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read public key file: %w", err)
+		return nil, err
 	}
-	return NewValidatorFromPEM(data, opts...)
+	return NewValidatorWithKeyRing(ring, opts...)
 }
 
 // NewValidatorFromBase64 creates a Validator from a base64-encoded raw or PKIX public key string.
@@ -214,7 +293,7 @@ func (v *Validator) VerifyResolved(explicitSource ...string) (*Claims, error) {
 
 // VerifyAt validates the license against the specified reference time `now`.
 func (v *Validator) VerifyAt(rawLicense string, now time.Time) (*Claims, error) {
-	if v.publicKey == nil {
+	if v.keyRing == nil || v.keyRing.Count() == 0 {
 		return nil, ErrMissingPublicKey
 	}
 
@@ -223,11 +302,24 @@ func (v *Validator) VerifyAt(rawLicense string, now time.Time) (*Claims, error) 
 		return nil, err
 	}
 
-	// 1. Verify cryptographic signature
-	if !ed25519.Verify(v.publicKey, signedData, sig) {
-		return nil, ErrInvalidSignature
+	var kidHint string
+	var peekClaims struct {
+		KeyID string `json:"kid"`
+	}
+	if err := json.Unmarshal(payloadJSON, &peekClaims); err == nil {
+		kidHint = peekClaims.KeyID
 	}
 
+	// 1. Verify cryptographic signature against KeyRing
+	if _, err := v.keyRing.VerifySignature(signedData, sig, kidHint); err != nil {
+		return nil, err
+	}
+
+	// 2-7. Evaluate claims
+	return v.verifyClaims(payloadJSON, now)
+}
+
+func (v *Validator) verifyClaims(payloadJSON []byte, now time.Time) (*Claims, error) {
 	// 2. Decode claims
 	var claims Claims
 	if err := json.Unmarshal(payloadJSON, &claims); err != nil {
@@ -382,13 +474,20 @@ func resolveRegionFromProcess() string {
 	return ""
 }
 
-// VerificationResult encapsulates verified license claims alongside explicit grace period dynamics.
+// VerificationResult encapsulates verified license claims alongside explicit grace period dynamics
+// and key rotation metadata.
 type VerificationResult struct {
 	// Claims contains the verified payload fields.
 	Claims *Claims
 
 	// Status indicates the current operational status (ACTIVE, GRACE_PERIOD, EXPIRED, NOT_YET_VALID).
 	Status Status
+
+	// VerifiedByKeyID identifies the Key ID or fingerprint that successfully verified the cryptographic signature.
+	VerifiedByKeyID string
+
+	// VerifiedByKeyStatus indicates the lifecycle status (ACTIVE, RETIRING) of the verifying key.
+	VerifiedByKeyStatus KeyStatus
 
 	// InGracePeriod reports whether the license is currently operating in grace period.
 	InGracePeriod bool
@@ -407,17 +506,41 @@ func (v *Validator) VerifyWithResult(rawLicense string) (*VerificationResult, er
 
 // VerifyWithResultAt validates the license against reference time `now` and returns a detailed VerificationResult.
 func (v *Validator) VerifyWithResultAt(rawLicense string, now time.Time) (*VerificationResult, error) {
-	claims, err := v.VerifyAt(rawLicense, now)
+	if v.keyRing == nil || v.keyRing.Count() == 0 {
+		return nil, ErrMissingPublicKey
+	}
+
+	payloadJSON, sig, signedData, err := ParseToken(rawLicense)
+	if err != nil {
+		return nil, err
+	}
+
+	var kidHint string
+	var peekClaims struct {
+		KeyID string `json:"kid"`
+	}
+	if err := json.Unmarshal(payloadJSON, &peekClaims); err == nil {
+		kidHint = peekClaims.KeyID
+	}
+
+	matchedKey, err := v.keyRing.VerifySignature(signedData, sig, kidHint)
+	if err != nil {
+		return nil, err
+	}
+
+	claims, err := v.verifyClaims(payloadJSON, now)
 	if err != nil {
 		return nil, err
 	}
 
 	return &VerificationResult{
-		Claims:             claims,
-		Status:             claims.StatusAt(now),
-		InGracePeriod:      claims.IsInGracePeriodAt(now),
-		GraceDaysRemaining: claims.GraceDaysRemainingAt(now),
-		EffectiveExpiry:    claims.EffectiveExpiration(),
+		Claims:              claims,
+		Status:              claims.StatusAt(now),
+		VerifiedByKeyID:     matchedKey.ID,
+		VerifiedByKeyStatus: matchedKey.Status,
+		InGracePeriod:       claims.IsInGracePeriodAt(now),
+		GraceDaysRemaining:  claims.GraceDaysRemainingAt(now),
+		EffectiveExpiry:     claims.EffectiveExpiration(),
 	}, nil
 }
 

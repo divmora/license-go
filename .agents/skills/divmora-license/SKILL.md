@@ -233,13 +233,46 @@ func startLicenseManager(ctx context.Context, pubKeyPath string) (*license.Manag
 
 ---
 
+### Workflow F: Zero-Downtime Key Rotation & Multi-Key Ring
+
+When rotating signing keys (e.g. 2025 $\rightarrow$ 2026 key), or parsing a multi-key PEM bundle:
+
+```bash
+# 1. Inspect all keys inside a trusted PEM bundle:
+license-cli keyring ./trusted_keys.pem
+
+# 2. Issue a license with an explicit Key ID:
+license-cli issue -private-key ./2026-private.pem -kid "divmora-2026-root" ...
+```
+
+In Go applications, load a multi-key PEM bundle or configure fallback keys:
+
+```go
+// Automatically loads all PUBLIC KEY blocks; first key is Primary, subsequent keys are Fallback:
+validator, err := license.NewValidatorFromPEMFile("/etc/divmora/trusted_keys.pem")
+
+// Or programmatic registration with revocation support:
+ring := license.NewKeyRing(primary2026Key)
+ring.AddKeyWithID("divmora-2025-root", legacy2025Key, license.KeyStatusRetiring)
+
+// If a key was compromised:
+ring.Revoke("compromised-key-id") // Any license signed by this key returns ErrKeyRevoked
+
+validator, err := license.NewValidatorWithKeyRing(ring)
+```
+
+---
+
 ## 4. Troubleshooting & Sentinel Errors
 
 | Error | Cause | Resolution |
 | :--- | :--- | :--- |
-| `ErrInvalidSignature` | License payload or signature was altered or signed by an untrusted key | Verify that the license was signed with the corresponding private key and has not been modified. |
+| `ErrInvalidSignature` | License payload or signature was altered or signed by an untrusted key | Verify that the license was signed with a trusted private key in the validator's KeyRing. |
+| `ErrKeyRevoked` | License was signed by a key explicitly marked as `REVOKED` | The key has been compromised or retired. Re-issue the license using an active signing key. |
 | `ErrProductMismatch` | License was issued for a different Divmora product | Check that `-product` in the license matches the service product name. |
 | `ErrExpired` | Current time is past `ExpiresAt` + clock skew tolerance | Re-issue a renewed license. |
 | `ErrNotYetValid` | `NotBefore` is in the future | Check server system time / NTP sync. |
 | `ErrFeatureNotEntitled` | Feature is not in `claims.Features` | Upgrade license tier or add feature flag during issuance. |
 | `ErrLimitExceeded` | Current resource count exceeds `claims.Limits` | Increase quota limit during issuance. |
+| `ErrFingerprintMismatch` | License node/cluster fingerprint does not match host | Pass expected host fingerprint or check machine identity. |
+| `ErrScopeMismatch` | Deployment environment, cloud account, region, host, or cluster is not allowed | Verify the license `Scope` allowlist contains the target deployment infrastructure. |

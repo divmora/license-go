@@ -11,39 +11,63 @@ import (
 	"time"
 )
 
+// SignerOption is a functional option for configuring a Signer.
+type SignerOption func(*Signer)
+
+// WithSignerKeyID configures the default Key ID to embed in signed license claims.
+func WithSignerKeyID(kid string) SignerOption {
+	return func(s *Signer) {
+		s.keyID = kid
+	}
+}
+
 // Signer signs license claims using an Ed25519 private key.
 type Signer struct {
 	privateKey ed25519.PrivateKey
+	keyID      string
 }
 
-// NewSigner creates a new Signer with the provided Ed25519 private key.
-func NewSigner(privateKey ed25519.PrivateKey) (*Signer, error) {
+// NewSigner creates a new Signer with the provided Ed25519 private key and options.
+func NewSigner(privateKey ed25519.PrivateKey, opts ...SignerOption) (*Signer, error) {
 	if len(privateKey) != ed25519.PrivateKeySize {
 		return nil, ErrMissingPrivateKey
 	}
-	return &Signer{privateKey: privateKey}, nil
+	s := &Signer{privateKey: privateKey}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s, nil
+}
+
+// WithKeyID returns a copy of the Signer configured with the given Key ID.
+func (s *Signer) WithKeyID(kid string) *Signer {
+	return &Signer{
+		privateKey: s.privateKey,
+		keyID:      kid,
+	}
 }
 
 // NewSignerFromPEM creates a new Signer from PKCS#8 PEM-encoded private key bytes.
-func NewSignerFromPEM(pemBytes []byte) (*Signer, error) {
+func NewSignerFromPEM(pemBytes []byte, opts ...SignerOption) (*Signer, error) {
 	privKey, err := ParsePrivateKeyFromPEM(pemBytes)
 	if err != nil {
 		return nil, err
 	}
-	return NewSigner(privKey)
+	return NewSigner(privKey, opts...)
 }
 
 // NewSignerFromPEMFile creates a new Signer by loading an Ed25519 private key from a file.
-func NewSignerFromPEMFile(filePath string) (*Signer, error) {
+func NewSignerFromPEMFile(filePath string, opts ...SignerOption) (*Signer, error) {
 	data, err := os.ReadFile(filePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read private key file: %w", err)
 	}
-	return NewSignerFromPEM(data)
+	return NewSignerFromPEM(data, opts...)
 }
 
 // Sign marshals and signs the given Claims, returning a compact token string.
 // If claims.ID is empty, a random unique ID is generated.
+// If claims.KeyID is empty and the signer is configured with a Key ID, it is automatically set.
 // If claims.IssuedAt is zero, it defaults to the current UTC time.
 func (s *Signer) Sign(claims Claims) (string, error) {
 	if s.privateKey == nil {
@@ -60,6 +84,11 @@ func (s *Signer) Sign(claims Claims) (string, error) {
 	// Default ID if not provided
 	if claims.ID == "" {
 		claims.ID = generateRandomID()
+	}
+
+	// Default KeyID if configured on signer
+	if claims.KeyID == "" && s.keyID != "" {
+		claims.KeyID = s.keyID
 	}
 
 	// Default IssuedAt if not provided
