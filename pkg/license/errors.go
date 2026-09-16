@@ -66,6 +66,24 @@ var (
 
 	// ErrDegradedReadOnly is returned when a mutation or write operation is attempted while in degraded read-only mode.
 	ErrDegradedReadOnly = errors.New("license: operating in degraded read-only mode; mutations not permitted")
+
+	// ErrInvalidReleaseAttestation is returned when the release attestation format or cryptographic signature is invalid.
+	ErrInvalidReleaseAttestation = errors.New("license: invalid release attestation format or signature")
+
+	// ErrReleaseAttestationMissing is returned when release attestation is required by policy but not provided.
+	ErrReleaseAttestationMissing = errors.New("license: release attestation is required but missing")
+
+	// ErrReleaseTampered is returned when running binary build metadata contradicts the attested release claims.
+	ErrReleaseTampered = errors.New("license: release metadata tampering detected")
+
+	// ErrReleaseProductMismatch is returned when the release attestation product does not match expected product.
+	ErrReleaseProductMismatch = errors.New("license: release attestation product does not match expected product")
+
+	// ErrReleaseVersionMismatch is returned when the release attestation version does not match running binary version.
+	ErrReleaseVersionMismatch = errors.New("license: release attestation version does not match binary version")
+
+	// ErrReleaseDigestMismatch is returned when the compiled binary digest does not match the attested release digest.
+	ErrReleaseDigestMismatch = errors.New("license: binary digest does not match release attestation")
 )
 
 // LimitExceededError provides structured detail when a quota is exceeded.
@@ -169,4 +187,23 @@ func (e *ClockTamperingError) Error() string {
 
 func (e *ClockTamperingError) Is(target error) bool {
 	return target == ErrClockTamperingDetected
+}
+
+// ReleaseTamperingError provides structured details when binary build parameters contradict attested release claims.
+type ReleaseTamperingError struct {
+	Field    string
+	Expected string
+	Actual   string
+	Reason   string
+}
+
+func (e *ReleaseTamperingError) Error() string {
+	if e.Reason != "" {
+		return fmt.Sprintf("license: release tampering detected: %s (field %s: expected %q, got %q)", e.Reason, e.Field, e.Expected, e.Actual)
+	}
+	return fmt.Sprintf("license: release tampering detected on %s: expected %q, got %q", e.Field, e.Expected, e.Actual)
+}
+
+func (e *ReleaseTamperingError) Is(target error) bool {
+	return target == ErrReleaseTampered
 }

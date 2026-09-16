@@ -366,3 +366,116 @@ func TestCLI_VerifyAndKeyringAutoResolveKeyRing(t *testing.T) {
 		t.Fatal("expected runKeyring to fail when no public key is provided")
 	}
 }
+
+func TestCLI_SignVerifyInspectRelease(t *testing.T) {
+	tmpDir := t.TempDir()
+	privKeyPath := filepath.Join(tmpDir, "private.pem")
+	pubKeyPath := filepath.Join(tmpDir, "public.pem")
+	attestationPath := filepath.Join(tmpDir, "release.sig")
+	binaryPath := filepath.Join(tmpDir, "app-binary")
+	licensePath := filepath.Join(tmpDir, "app.license.key")
+
+	// 1. Keygen
+	err := runKeygen([]string{
+		"-out-dir", tmpDir,
+		"-priv-name", "private.pem",
+		"-pub-name", "public.pem",
+	})
+	if err != nil {
+		t.Fatalf("runKeygen failed: %v", err)
+	}
+
+	// 2. Dummy binary executable
+	origBinaryBytes := []byte("#!/usr/bin/env bash\necho 'running release binary'\n")
+	if err := os.WriteFile(binaryPath, origBinaryBytes, 0755); err != nil {
+		t.Fatalf("WriteFile binary failed: %v", err)
+	}
+
+	// 3. Sign Release
+	err = runSignRelease([]string{
+		"-private-key", privKeyPath,
+		"-product", "gitlab-fleet-governor",
+		"-version", "v2.5.0",
+		"-git-commit", "897f05812345",
+		"-binary", binaryPath,
+		"-authority", "divmora.com/release",
+		"-key-id", "rel-2026",
+		"-meta", "builder=drone-ci",
+		"-out", attestationPath,
+		"-armored",
+	})
+	if err != nil {
+		t.Fatalf("runSignRelease failed: %v", err)
+	}
+
+	// 4. Inspect Release
+	err = runInspectRelease([]string{
+		"-attestation", attestationPath,
+	})
+	if err != nil {
+		t.Fatalf("runInspectRelease failed: %v", err)
+	}
+
+	err = runInspectRelease([]string{
+		"-attestation", attestationPath,
+		"-json",
+	})
+	if err != nil {
+		t.Fatalf("runInspectRelease with -json failed: %v", err)
+	}
+
+	// 5. Verify Release
+	err = runVerifyRelease([]string{
+		"-public-key", pubKeyPath,
+		"-attestation", attestationPath,
+		"-product", "gitlab-fleet-governor",
+		"-version", "v2.5.0",
+		"-git-commit", "897f05812345",
+		"-binary", binaryPath,
+	})
+	if err != nil {
+		t.Fatalf("runVerifyRelease failed: %v", err)
+	}
+
+	// 6. Verify Release with Tampered Binary Fails
+	tamperedBinaryPath := filepath.Join(tmpDir, "tampered-binary")
+	if err := os.WriteFile(tamperedBinaryPath, []byte("tampered content"), 0755); err != nil {
+		t.Fatalf("WriteFile tampered binary failed: %v", err)
+	}
+	err = runVerifyRelease([]string{
+		"-public-key", pubKeyPath,
+		"-attestation", attestationPath,
+		"-product", "gitlab-fleet-governor",
+		"-version", "v2.5.0",
+		"-binary", tamperedBinaryPath,
+	})
+	if err == nil {
+		t.Fatal("expected runVerifyRelease to fail on tampered binary")
+	}
+
+	// 7. Verify License with Provenance Integration
+	err = runIssue([]string{
+		"-private-key", privKeyPath,
+		"-customer", "Acme Enterprise",
+		"-product", "gitlab-fleet-governor",
+		"-valid-days", "30",
+		"-out", licensePath,
+	})
+	if err != nil {
+		t.Fatalf("runIssue failed: %v", err)
+	}
+
+	err = runVerify([]string{
+		"-public-key", pubKeyPath,
+		"-license", licensePath,
+		"-product", "gitlab-fleet-governor",
+		"-version", "v2.5.0",
+		"-git-commit", "897f05812345",
+		"-binary", binaryPath,
+		"-release-attestation", attestationPath,
+		"-require-release-attestation",
+	})
+	if err != nil {
+		t.Fatalf("runVerify with release attestation failed: %v", err)
+	}
+}

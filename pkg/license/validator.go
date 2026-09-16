@@ -15,29 +15,34 @@ const DefaultClockSkew = 5 * time.Minute
 
 // Validator validates license tokens against trusted Ed25519 public keys in a KeyRing and evaluates claims.
 type Validator struct {
-	keyRing             *KeyRing
-	expectedProduct     string
-	clockSkew           time.Duration
-	gracePeriod         time.Duration
-	expectedFingerprint string
-	requireFingerprint  bool
-	currentEnvironment  string
-	currentAccount      string
-	currentRegion       string
-	currentCluster      string
-	currentNamespace    string
-	currentHost         string
-	currentCustomScope  map[string]string
-	currentVersion      string
-	buildDate           time.Time
-	bslPolicy           *BSLPolicy
-	authoritativeTime   time.Time
-	maxClockDrift       time.Duration
-	serverTimeAttested  bool
-	strictClockDefense  bool
-	allowExpired        bool
-	allowInactive       bool
-	initErr             error
+	keyRing                   *KeyRing
+	expectedProduct           string
+	clockSkew                 time.Duration
+	gracePeriod               time.Duration
+	expectedFingerprint       string
+	requireFingerprint        bool
+	currentEnvironment        string
+	currentAccount            string
+	currentRegion             string
+	currentCluster            string
+	currentNamespace          string
+	currentHost               string
+	currentCustomScope        map[string]string
+	currentVersion            string
+	buildDate                 time.Time
+	bslPolicy                 *BSLPolicy
+	authoritativeTime         time.Time
+	maxClockDrift             time.Duration
+	serverTimeAttested        bool
+	strictClockDefense        bool
+	allowExpired              bool
+	allowInactive             bool
+	releaseAttestation        string
+	requireReleaseAttestation bool
+	releaseGitCommit          string
+	binaryPath                string
+	binaryBytes               []byte
+	initErr                   error
 }
 
 // ValidatorOption is a functional option for configuring a Validator.
@@ -301,6 +306,85 @@ func WithRevokedKeyIDs(ids ...string) ValidatorOption {
 	}
 }
 
+// WithReleaseAttestation provides an Ed25519 cryptographic release attestation token or armored PEM block.
+func WithReleaseAttestation(tokenOrPEM string) ValidatorOption {
+	return func(v *Validator) {
+		v.releaseAttestation = strings.TrimSpace(tokenOrPEM)
+	}
+}
+
+// WithReleaseAttestationFile loads the release attestation from a file on disk (e.g. "release.sig").
+func WithReleaseAttestationFile(filePath string) ValidatorOption {
+	return func(v *Validator) {
+		data, err := os.ReadFile(filePath)
+		if err != nil {
+			v.initErr = fmt.Errorf("failed to read release attestation file %s: %w", filePath, err)
+			return
+		}
+		v.releaseAttestation = strings.TrimSpace(string(data))
+	}
+}
+
+// WithRequireReleaseAttestation enforces that binaries must have a valid cryptographic release attestation.
+// If true and no attestation is provided, or if attestation is invalid, validation fails.
+func WithRequireReleaseAttestation(require bool) ValidatorOption {
+	return func(v *Validator) {
+		v.requireReleaseAttestation = require
+	}
+}
+
+// WithCurrentGitCommit sets the current git commit to cross-check against release attestation.
+func WithCurrentGitCommit(commit string) ValidatorOption {
+	return func(v *Validator) {
+		v.releaseGitCommit = commit
+	}
+}
+
+// WithBinaryPath sets the executable path on disk to verify binary SHA-256 digest against release attestation.
+func WithBinaryPath(filePath string) ValidatorOption {
+	return func(v *Validator) {
+		v.binaryPath = filePath
+	}
+}
+
+// WithBinaryBytes sets executable bytes to verify binary SHA-256 digest against release attestation.
+func WithBinaryBytes(data []byte) ValidatorOption {
+	return func(v *Validator) {
+		v.binaryBytes = data
+	}
+}
+
+// EvaluateProvenance evaluates the binary release authenticity and provenance against the validator's KeyRing.
+func (v *Validator) EvaluateProvenance() (*ReleaseProvenance, error) {
+	if v.initErr != nil {
+		return nil, v.initErr
+	}
+
+	if v.releaseAttestation == "" {
+		if v.requireReleaseAttestation {
+			return nil, ErrReleaseAttestationMissing
+		}
+		return &ReleaseProvenance{Attested: false}, nil
+	}
+
+	var releaseDate time.Time
+	if v.bslPolicy != nil {
+		releaseDate = v.bslPolicy.ReleaseDate
+	}
+
+	params := ProvenanceParams{
+		ExpectedProduct:    v.expectedProduct,
+		CurrentVersion:     v.currentVersion,
+		CurrentCommit:      v.releaseGitCommit,
+		CurrentBuildDate:   v.buildDate,
+		CurrentReleaseDate: releaseDate,
+		BinaryPath:         v.binaryPath,
+		BinaryBytes:        v.binaryBytes,
+	}
+
+	return EvaluateProvenance(v.releaseAttestation, v.keyRing, params)
+}
+
 // PublicKey returns the primary public key in the validator's KeyRing, or nil if none is configured.
 func (v *Validator) PublicKey() ed25519.PublicKey {
 	if v.keyRing != nil && v.keyRing.Primary() != nil {
@@ -547,46 +631,11 @@ func (v *Validator) VerifyResolved(explicitSource ...string) (*Claims, error) {
 
 // VerifyAt validates the license against the specified reference time `now`.
 func (v *Validator) VerifyAt(rawLicense string, now time.Time) (*Claims, error) {
-	if v.initErr != nil {
-		return nil, v.initErr
-	}
-	evalTime, _, _, err := v.resolveEvaluationTime(now)
+	res, err := v.VerifyWithResultAt(rawLicense, now)
 	if err != nil {
 		return nil, err
 	}
-
-	// 0. Automatic BSL 1.1 Change Date Check (Apache 2.0 Conversion)
-	if v.bslPolicy != nil && v.bslPolicy.IsConverted(evalTime) {
-		if strings.TrimSpace(rawLicense) == "" {
-			return &Claims{
-				Product:  v.expectedProduct,
-				Plan:     "open-source",
-				Customer: Customer{Name: "Open Source Community"},
-				Features: []string{"*"},
-				Limits:   map[string]int64{},
-			}, nil
-		}
-
-		vCopy := *v
-		vCopy.allowExpired = true
-		claims, err := vCopy.verifyTokenPayload(rawLicense, evalTime)
-		if err == nil {
-			return claims, nil
-		}
-		return &Claims{
-			Product:  v.expectedProduct,
-			Plan:     "open-source",
-			Customer: Customer{Name: "Open Source Community"},
-			Features: []string{"*"},
-			Limits:   map[string]int64{},
-		}, nil
-	}
-
-	if strings.TrimSpace(rawLicense) == "" {
-		return nil, ErrLicenseNotFound
-	}
-
-	return v.verifyTokenPayload(rawLicense, evalTime)
+	return res.Claims, nil
 }
 
 func (v *Validator) verifyTokenPayload(rawLicense string, evalTime time.Time) (*Claims, error) {
@@ -835,6 +884,9 @@ type VerificationResult struct {
 
 	// EvaluationTime records the exact timestamp (local or authoritative) used for evaluation.
 	EvaluationTime time.Time
+
+	// Provenance contains the evaluation of the binary's release attestation and build authenticity.
+	Provenance *ReleaseProvenance
 }
 
 // StatusMessage returns a standardized human-readable description of the verification result.
@@ -898,6 +950,11 @@ func (v *Validator) VerifyWithResultAt(rawLicense string, now time.Time) (*Verif
 		return nil, v.initErr
 	}
 
+	prov, err := v.EvaluateProvenance()
+	if err != nil {
+		return nil, err
+	}
+
 	evalTime, tampered, skew, err := v.resolveEvaluationTime(now)
 	if err != nil {
 		return nil, err
@@ -905,13 +962,19 @@ func (v *Validator) VerifyWithResultAt(rawLicense string, now time.Time) (*Verif
 
 	var changeDate time.Time
 	effectiveLic := DefaultBSLLicense
-	if v.bslPolicy != nil {
-		changeDate = v.bslPolicy.ChangeDate()
-		effectiveLic = v.bslPolicy.EffectiveLicense(evalTime)
+	effectiveBSL := v.bslPolicy
+	if effectiveBSL != nil {
+		if prov != nil && prov.Attested && prov.Claims != nil && !prov.Claims.ReleaseDate.IsZero() {
+			policyCopy := *effectiveBSL
+			policyCopy.ReleaseDate = prov.Claims.ReleaseDate
+			effectiveBSL = &policyCopy
+		}
+		changeDate = effectiveBSL.ChangeDate()
+		effectiveLic = effectiveBSL.EffectiveLicense(evalTime)
 	}
 
 	// 0. Automatic BSL 1.1 Change Date Check
-	if v.bslPolicy != nil && v.bslPolicy.IsConverted(evalTime) {
+	if effectiveBSL != nil && effectiveBSL.IsConverted(evalTime) {
 		if strings.TrimSpace(rawLicense) == "" {
 			claims := &Claims{
 				Product:  v.expectedProduct,
@@ -931,6 +994,7 @@ func (v *Validator) VerifyWithResultAt(rawLicense string, now time.Time) (*Verif
 				ServerTime:         v.authoritativeTime.UTC(),
 				ClockSkew:          skew,
 				EvaluationTime:     evalTime,
+				Provenance:         prov,
 			}, nil
 		}
 
@@ -949,6 +1013,7 @@ func (v *Validator) VerifyWithResultAt(rawLicense string, now time.Time) (*Verif
 				ServerTime:         v.authoritativeTime.UTC(),
 				ClockSkew:          skew,
 				EvaluationTime:     evalTime,
+				Provenance:         prov,
 			}, nil
 		}
 
@@ -970,6 +1035,7 @@ func (v *Validator) VerifyWithResultAt(rawLicense string, now time.Time) (*Verif
 			ServerTime:         v.authoritativeTime.UTC(),
 			ClockSkew:          skew,
 			EvaluationTime:     evalTime,
+			Provenance:         prov,
 		}, nil
 	}
 
@@ -1020,6 +1086,7 @@ func (v *Validator) VerifyWithResultAt(rawLicense string, now time.Time) (*Verif
 		ServerTime:          v.authoritativeTime.UTC(),
 		ClockSkew:           skew,
 		EvaluationTime:      evalTime,
+		Provenance:          prov,
 	}, nil
 }
 

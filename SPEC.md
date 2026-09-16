@@ -42,6 +42,7 @@ This document defines the **Divmora License Protocol (`DIV1`)**, an enterprise-g
    - [7.2 Step-by-Step Security Pipeline](#72-step-by-step-security-pipeline)
 8. [Standard Error Codes & Failure Modes](#8-standard-error-codes--failure-modes)
 9. [Cross-Language Interoperability Guidelines](#9-cross-language-interoperability-guidelines)
+10. [Cryptographic Release Attestation & Provenance Engine (`DIVREL1`)](#10-cryptographic-release-attestation--provenance-engine-divrel1)
 
 ---
 
@@ -434,6 +435,12 @@ Conforming implementations MUST distinguish the following typed error conditions
 | `ErrClockTamperingDetected`| `DIV_ERR_CLOCK_TAMPERED` | Local clock advanced forward to simulate BSL conversion. |
 | `ErrDegradedMode` | `DIV_ERR_DEGRADED_MODE` | Service is operating in fallback/community mode. |
 | `ErrDegradedReadOnly` | `DIV_ERR_DEGRADED_READONLY` | Mutation rejected because service is in degraded read-only mode. |
+| `ErrInvalidReleaseAttestation` | `DIV_ERR_INVALID_RELEASE_ATTESTATION` | Release attestation format or cryptographic signature is invalid. |
+| `ErrReleaseAttestationMissing` | `DIV_ERR_RELEASE_ATTESTATION_MISSING` | Release attestation is required by policy but not provided. |
+| `ErrReleaseTampered` | `DIV_ERR_RELEASE_TAMPERED` | Running binary build metadata contradicts the attested release claims. |
+| `ErrReleaseProductMismatch` | `DIV_ERR_RELEASE_PRODUCT_MISMATCH` | Attestation product does not match expected product. |
+| `ErrReleaseVersionMismatch` | `DIV_ERR_RELEASE_VERSION_MISMATCH` | Attestation version does not match running binary version. |
+| `ErrReleaseDigestMismatch` | `DIV_ERR_RELEASE_DIGEST_MISMATCH` | Compiled binary SHA-256 digest does not match attested digest. |
 
 ---
 
@@ -445,3 +452,48 @@ When implementing the `DIV1` protocol in other languages (such as TypeScript, Py
 2. **Canonical Signed String**: Always verify the signature against the ASCII bytes of `"DIV1." + payloadBase64`. Never re-serialize the JSON object before verifying signature! Re-serializing JSON introduces formatting, ordering, and whitespace discrepancies. Always verify the exact Base64URL string received on the wire.
 3. **Strict SemVer Matching**: Version comparisons for `max_version` should follow standard Semantic Versioning 2.0.0 rules (e.g. `v1.2.3` stripped to `1.2.3`).
 4. **Armored Unwrapping**: Strip all boundary whitespace, carriage returns (`\r`), and newlines (`\n`) prior to decoding.
+
+---
+
+## 10. Cryptographic Release Attestation & Provenance Engine (`DIVREL1`)
+
+To prevent supply chain tampering, unauthorized fork compilation, and spoofing of compile-time `-ldflags` (such as setting an ancient release date to trigger premature BSL 1.1 open-source conversion), the `DIVREL1` protocol specifies signed release attestations.
+
+### 10.1 Protocol Envelope & Wire Formats
+
+- **Protocol Magic Header**: `DIVREL1`
+- **Armored PEM Type**: `DIVMORA RELEASE ATTESTATION`
+- **Canonical Signed String**:
+  $$\text{SignedData} = \text{"DIVREL1."} \parallel \text{Base64URL}(\text{PayloadJSON})$$
+- **Compact Token**:
+  $$\text{Token} = \text{"DIVREL1."} \parallel \text{Base64URL}(\text{PayloadJSON}) \parallel \text{"."} \parallel \text{Base64URL}(\text{Signature}_{64})$$
+
+### 10.2 Release Claims Schema
+
+```json
+{
+  "product": "gitlab-fleet-governor",
+  "version": "v2.5.0",
+  "git_commit": "897f058123456789abcdef",
+  "build_date": "2026-06-01T12:00:00Z",
+  "release_date": "2026-06-01T00:00:00Z",
+  "binary_digest": "sha256:77945114a2ad974b9860a114311be7e4cc0bf64a8a4130704dcb07a66aceee2d",
+  "authority": "divmora.com/release",
+  "kid": "rel-2026",
+  "issued_at": "2026-06-01T12:00:00Z",
+  "metadata": {
+    "builder": "ci-runner-linux-amd64"
+  }
+}
+```
+
+### 10.3 Evaluation & Tampering Defenses
+
+When release attestation is evaluated via `EvaluateProvenance`:
+1. **Cryptographic Integrity**: Signature verified against trusted `KeyRing`.
+2. **Product Identity**: `claims.product` must match the expected product name.
+3. **Version Consistency**: Binary version (via ldflags) must match `claims.version` under SemVer normalization.
+4. **Git Commit Verification**: Running commit SHA must match or be a valid prefix of `claims.git_commit`.
+5. **Build & Release Date Pinning**: If local runtime claims a build or release date earlier than the attested timestamps (>24h drift), tampering is flagged (`ErrReleaseTampered`).
+6. **Binary Checksum Verification**: If binary bytes or path are provided, computed SHA-256 must match `claims.binary_digest`.
+7. **BSL 1.1 Change Date Anchoring**: The attested `claims.release_date` overrides compile-time flags, preventing attackers from forging dates to trigger premature Apache 2.0 conversion.

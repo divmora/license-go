@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -34,6 +35,12 @@ func main() {
 		err = runInspect(args)
 	case "keyring":
 		err = runKeyring(args)
+	case "sign-release":
+		err = runSignRelease(args)
+	case "verify-release":
+		err = runVerifyRelease(args)
+	case "inspect-release":
+		err = runInspectRelease(args)
 	case "help", "-h", "--help":
 		printUsage()
 		return
@@ -56,12 +63,15 @@ Usage:
   license-cli <command> [arguments]
 
 Available Commands:
-  keygen    Generate a new Ed25519 private/public keypair
-  issue     Issue and sign a new software license
-  verify    Verify a license signature and evaluate its claims
-  inspect   Decode and inspect license claims without verification
-  keyring   Inspect public keys inside a PEM bundle file
-  help      Display help information
+  keygen          Generate a new Ed25519 private/public keypair
+  issue           Issue and sign a new software license
+  verify          Verify a license signature and evaluate its claims
+  inspect         Decode and inspect license claims without verification
+  keyring         Inspect public keys inside a PEM bundle file
+  sign-release    Mint a cryptographic release attestation token (DIVREL1)
+  verify-release  Verify binary release attestation and SHA-256 checksum
+  inspect-release Decode and inspect release attestation claims
+  help            Display help information
 
 Use "license-cli <command> -help" for more information about a command.`)
 }
@@ -298,6 +308,10 @@ func runVerify(args []string) error {
 	maxSkewFlag := fs.Duration("max-skew", 0, "Maximum allowed clock skew threshold (e.g. 5m, 1h) when using authoritative server time")
 	strictClockFlag := fs.Bool("strict-clock", false, "Fail verification if clock tampering or excessive skew is detected")
 	allowExpired := fs.Bool("allow-expired", false, "Allow signature verification even if license has expired")
+	releaseAttestation := fs.String("release-attestation", "", "Path to release attestation file or raw DIVREL1 token")
+	requireReleaseAttestation := fs.Bool("require-release-attestation", false, "Require a valid cryptographic release attestation")
+	gitCommit := fs.String("git-commit", "", "Current git commit SHA to assert against release attestation")
+	binaryPath := fs.String("binary", "", "Path to running binary executable to assert SHA-256 digest against release attestation")
 
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -408,6 +422,23 @@ func runVerify(args []string) error {
 	if *allowExpired {
 		opts = append(opts, license.WithAllowExpired(true))
 	}
+	if *releaseAttestation != "" {
+		data, err := os.ReadFile(*releaseAttestation)
+		if err == nil {
+			opts = append(opts, license.WithReleaseAttestation(string(data)))
+		} else {
+			opts = append(opts, license.WithReleaseAttestation(*releaseAttestation))
+		}
+	}
+	if *requireReleaseAttestation {
+		opts = append(opts, license.WithRequireReleaseAttestation(true))
+	}
+	if *gitCommit != "" {
+		opts = append(opts, license.WithCurrentGitCommit(*gitCommit))
+	}
+	if *binaryPath != "" {
+		opts = append(opts, license.WithBinaryPath(*binaryPath))
+	}
 
 	validator, err := license.NewValidatorWithKeyRing(ring, opts...)
 	if err != nil {
@@ -435,6 +466,15 @@ func runVerify(args []string) error {
 	} else if result.ServerTimeAttested {
 		fmt.Printf("⏱️  Authoritative server time attested: %s (local skew: %s)\n",
 			result.ServerTime.Format(time.RFC3339), result.ClockSkew)
+	}
+	if result.Provenance != nil && result.Provenance.Attested {
+		provClaims := result.Provenance.Claims
+		if provClaims != nil {
+			fmt.Printf("📦 Attested Release: %s %s (signed by: %s)\n", provClaims.Product, provClaims.Version, result.Provenance.VerifiedByKeyID)
+			if result.Provenance.DigestMatched {
+				fmt.Printf("🔒 Binary Checksum: %s (VERIFIED)\n", provClaims.BinaryDigest)
+			}
+		}
 	}
 	if result.VerifiedByKeyID != "" {
 		fmt.Printf("🔑 Verified by Key: %s (Status: %s)\n", result.VerifiedByKeyID, result.VerifiedByKeyStatus)
@@ -573,4 +613,254 @@ func parseCustomScope(raw string) map[string][]string {
 		return nil
 	}
 	return result
+}
+
+func parseMetadata(raw string) map[string]string {
+	meta := make(map[string]string)
+	if strings.TrimSpace(raw) == "" {
+		return meta
+	}
+	for _, item := range strings.Split(raw, ",") {
+		parts := strings.SplitN(strings.TrimSpace(item), "=", 2)
+		if len(parts) == 2 {
+			k := strings.TrimSpace(parts[0])
+			v := strings.TrimSpace(parts[1])
+			if k != "" {
+				meta[k] = v
+			}
+		}
+	}
+	return meta
+}
+
+func runSignRelease(args []string) error {
+	fs := flag.NewFlagSet("sign-release", flag.ExitOnError)
+	privKeyPath := fs.String("private-key", "", "Path to Ed25519 private key PEM file (required)")
+	product := fs.String("product", "", "Software product name (required)")
+	version := fs.String("version", "", "Official release version string (e.g. 'v1.2.0') (required)")
+	gitCommit := fs.String("git-commit", "", "Official Git commit SHA")
+	buildDateFlag := fs.String("build-date", "", "Build timestamp (RFC3339 or YYYY-MM-DD, defaults to now)")
+	releaseDateFlag := fs.String("release-date", "", "BSL 1.1 release date (RFC3339 or YYYY-MM-DD, defaults to build-date)")
+	binaryPath := fs.String("binary", "", "Path to compiled binary executable to automatically compute SHA-256 digest")
+	digestFlag := fs.String("digest", "", "Explicit binary digest (sha256:<hex>)")
+	authority := fs.String("authority", "divmora.com/release", "Issuing release authority")
+	keyID := fs.String("key-id", "", "Signing Key ID hint")
+	metaFlag := fs.String("meta", "", "Custom release metadata key-value pairs (k=v,k2=v2)")
+	armored := fs.Bool("armored", true, "Output armored PEM block")
+	outFile := fs.String("out", "", "Output file path (prints to stdout if omitted)")
+
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	if *privKeyPath == "" {
+		return errors.New("private key required: pass -private-key <path>")
+	}
+	if *product == "" {
+		return errors.New("product name required: pass -product <name>")
+	}
+	if *version == "" {
+		return errors.New("version required: pass -version <version>")
+	}
+
+	privKeyPEM, err := os.ReadFile(*privKeyPath)
+	if err != nil {
+		return fmt.Errorf("failed to read private key file: %w", err)
+	}
+
+	privKey, err := license.ParsePrivateKeyFromPEM(privKeyPEM)
+	if err != nil {
+		return fmt.Errorf("failed to parse private key: %w", err)
+	}
+
+	now := time.Now().UTC()
+	buildDate := now
+	if *buildDateFlag != "" {
+		bDate, err := time.Parse(time.RFC3339, *buildDateFlag)
+		if err != nil {
+			bDate, err = time.Parse("2006-01-02", *buildDateFlag)
+			if err != nil {
+				return fmt.Errorf("invalid -build-date %q: expected RFC3339 or YYYY-MM-DD", *buildDateFlag)
+			}
+		}
+		buildDate = bDate.UTC()
+	}
+
+	releaseDate := buildDate
+	if *releaseDateFlag != "" {
+		rDate, err := time.Parse(time.RFC3339, *releaseDateFlag)
+		if err != nil {
+			rDate, err = time.Parse("2006-01-02", *releaseDateFlag)
+			if err != nil {
+				return fmt.Errorf("invalid -release-date %q: expected RFC3339 or YYYY-MM-DD", *releaseDateFlag)
+			}
+		}
+		releaseDate = rDate.UTC()
+	}
+
+	binaryDigest := strings.TrimSpace(*digestFlag)
+	if binaryDigest == "" && *binaryPath != "" {
+		d, err := license.ComputeFileDigest(*binaryPath)
+		if err != nil {
+			return fmt.Errorf("failed to compute digest of binary %s: %w", *binaryPath, err)
+		}
+		binaryDigest = d
+	}
+
+	meta := parseMetadata(*metaFlag)
+
+	claims := license.ReleaseClaims{
+		Product:      *product,
+		Version:      *version,
+		GitCommit:    *gitCommit,
+		BuildDate:    buildDate,
+		ReleaseDate:  releaseDate,
+		BinaryDigest: binaryDigest,
+		Authority:    *authority,
+		KeyID:        *keyID,
+		IssuedAt:     now,
+		Metadata:     meta,
+	}
+
+	var output string
+	var opts []license.SignerOption
+	if *keyID != "" {
+		opts = append(opts, license.WithSignerKeyID(*keyID))
+	}
+
+	if *armored {
+		output, err = license.SignReleaseArmored(claims, privKey, opts...)
+	} else {
+		output, err = license.SignRelease(claims, privKey, opts...)
+	}
+	if err != nil {
+		return fmt.Errorf("failed to sign release attestation: %w", err)
+	}
+
+	if *outFile != "" {
+		if err := os.WriteFile(*outFile, []byte(output), 0644); err != nil {
+			return fmt.Errorf("failed to write output file: %w", err)
+		}
+		fmt.Printf("✓ Successfully issued release attestation for %s (%s) -> %s\n", *product, *version, *outFile)
+	} else {
+		fmt.Print(output)
+	}
+
+	return nil
+}
+
+func runVerifyRelease(args []string) error {
+	fs := flag.NewFlagSet("verify-release", flag.ExitOnError)
+	pubKeyPath := fs.String("public-key", "", "Path to public key PEM or PEM bundle file (optional; falls back to DIVMORA_PUBLIC_KEY/DIVMORA_PUBLIC_KEYS_PEM)")
+	attestationSource := fs.String("attestation", "", "Path to release attestation file or raw DIVREL1 token (required)")
+	product := fs.String("product", "", "Expected product name to assert")
+	version := fs.String("version", "", "Running binary version to assert")
+	gitCommit := fs.String("git-commit", "", "Running git commit SHA to assert")
+	binaryPath := fs.String("binary", "", "Path to binary executable to verify against attested SHA-256 digest")
+
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	if *attestationSource == "" {
+		return errors.New("attestation required: pass -attestation <file or token>")
+	}
+
+	var ring *license.KeyRing
+	if *pubKeyPath != "" {
+		r, err := license.ParseKeyRingFromString(*pubKeyPath)
+		if err != nil {
+			return fmt.Errorf("failed to load public key from %s: %w", *pubKeyPath, err)
+		}
+		ring = r
+	} else {
+		resolvedKey, err := license.ResolveKeyRingWithSource()
+		if err != nil {
+			return fmt.Errorf("public verification key required: %w (pass -public-key or set %s / %s)", err, license.EnvPublicKey, license.EnvPublicKeysPEM)
+		}
+		ring = resolvedKey.KeyRing
+	}
+
+	rawToken := *attestationSource
+	if data, err := os.ReadFile(*attestationSource); err == nil {
+		rawToken = string(data)
+	}
+
+	params := license.ProvenanceParams{
+		ExpectedProduct: *product,
+		CurrentVersion:  *version,
+		CurrentCommit:   *gitCommit,
+		BinaryPath:      *binaryPath,
+	}
+
+	prov, err := license.EvaluateProvenance(rawToken, ring, params)
+	if err != nil {
+		return fmt.Errorf("RELEASE VERIFICATION FAILED: %w", err)
+	}
+
+	fmt.Println("✓ RELEASE ATTESTATION VERIFIED: Signature and release provenance are valid!")
+	if prov.Claims != nil {
+		fmt.Printf("Product:       %s\n", prov.Claims.Product)
+		fmt.Printf("Version:       %s\n", prov.Claims.Version)
+		if prov.Claims.GitCommit != "" {
+			fmt.Printf("Git Commit:    %s\n", prov.Claims.GitCommit)
+		}
+		if !prov.Claims.BuildDate.IsZero() {
+			fmt.Printf("Build Date:    %s\n", prov.Claims.BuildDate.Format(time.RFC3339))
+		}
+		if !prov.Claims.ReleaseDate.IsZero() {
+			fmt.Printf("Release Date:  %s\n", prov.Claims.ReleaseDate.Format(time.RFC3339))
+		}
+		if prov.Claims.BinaryDigest != "" {
+			status := "Verified"
+			if !prov.DigestMatched {
+				status = "Not checked"
+			}
+			fmt.Printf("Binary Digest: %s (%s)\n", prov.Claims.BinaryDigest, status)
+		}
+	}
+	if prov.VerifiedByKeyID != "" {
+		fmt.Printf("Verified Key:  %s (Status: %s)\n", prov.VerifiedByKeyID, prov.VerifiedKeyStatus)
+	}
+
+	return nil
+}
+
+func runInspectRelease(args []string) error {
+	fs := flag.NewFlagSet("inspect-release", flag.ExitOnError)
+	attestationSource := fs.String("attestation", "", "Path to release attestation file or raw DIVREL1 token")
+	jsonOutput := fs.Bool("json", false, "Output claims in raw JSON format")
+
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	var rawToken string
+	if *attestationSource != "" {
+		rawToken = *attestationSource
+		if data, err := os.ReadFile(*attestationSource); err == nil {
+			rawToken = string(data)
+		}
+	} else if len(fs.Args()) > 0 {
+		rawToken = fs.Args()[0]
+		if data, err := os.ReadFile(rawToken); err == nil {
+			rawToken = string(data)
+		}
+	} else {
+		return errors.New("attestation required: pass -attestation <file or token> or provide token argument")
+	}
+
+	claims, err := license.InspectRelease(rawToken)
+	if err != nil {
+		return fmt.Errorf("failed to inspect release attestation: %w", err)
+	}
+
+	if *jsonOutput {
+		claimsJSON, _ := json.MarshalIndent(claims, "", "  ")
+		fmt.Println(string(claimsJSON))
+		return nil
+	}
+
+	fmt.Print(claims.FormatInspect())
+	return nil
 }

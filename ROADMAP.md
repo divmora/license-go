@@ -12,7 +12,6 @@ This document tracks upcoming capabilities, planned optimizations, and ecosystem
 ### 🔑 Cryptographic & Key Lifecycle
 - [ ] **AWS KMS Asymmetric Signing**: Support AWS KMS asymmetric Ed25519 signing in `license-cli` (enabling license generation in CI/CD without exposing private key files).
 - [ ] **HashiCorp Vault Transit Engine**: Support Vault Transit engine for enterprise automated license issuance workflows.
-- [ ] **Cryptographic Release Attestation & Provenance Engine (`EvaluateProvenance`)**: Implement Ed25519 cryptographic release metadata signing and verification (`ReleaseClaims`, `SignRelease`, `VerifyRelease`, `EvaluateProvenance`) to certify authentic compiled binary releases against official build metadata (`Version`, `GitCommit`, `BuildDate`, `Authority`). Prevents local compilation tampering (e.g. forging build timestamps) from claiming premature BSL 1.1 Apache 2.0 open-source conversion.
 
 ### 🏢 Organizational Scoping & Multi-Tenancy
 - [ ] *(Additional multi-tenancy capabilities will be tracked here)*
@@ -21,7 +20,6 @@ This document tracks upcoming capabilities, planned optimizations, and ecosystem
 - [ ] **BSL 1.1 Additional Use Grant Evaluator (`BSLPolicy.EvaluateEntitlement`)**: Provide standard BSL 1.1 dual-licensing entitlement evaluation modeling vendor-specific Additional Use Grants (e.g. Grant A: non-production / simulation / test exemption; Grant B: free community production quota up to $N$ units like `max_projects` or `max_nodes`). Automatically enforces commercial token requirements only when usage exceeds free tier bounds while granting full open-source access upon Change Date arrival.
 
 ### 🖥️ Developer Experience & CLI Tooling
-- [ ] **Release Provenance CLI Subcommands (`sign-release` & `verify-release`)**: Add `license-cli sign-release` and `license-cli verify-release` subcommands to allow CI/CD pipelines to mint and verify Ed25519 release attestation tokens and sidecar files (`release.sig`), consolidating downstream license generators (such as `fleet-license-gen`) into a single canonical Divmora administrative CLI tool.
 - [ ] **Standardized CLI License Status Formatter**: Provide reusable status banner and tabular formatters for downstream CLI applications implementing `app license status` or `app license check` commands, presenting active tiers, quota limits, days remaining, grace period countdowns, and BSL 1.1 Apache 2.0 conversion status consistently across all Divmora tools.
 
 ### 📊 Concurrency-Safe Usage Metering & Watermarking
@@ -58,6 +56,14 @@ This document tracks upcoming capabilities, planned optimizations, and ecosystem
 
 ## ✅ Delivered Capabilities
 
+- **Cryptographic Release Attestation & Provenance Engine (`DIVREL1` & `EvaluateProvenance`)**:
+  - `ReleaseClaims`, `SignRelease`, `SignReleaseArmored`, `VerifyRelease`, `InspectRelease`, and `InspectReleaseFromFile`: End-to-end cryptographic minting and verification of release provenance metadata.
+  - Wire format `DIVREL1` (`DIVREL1.<payloadB64>.<sigB64>`) and armored PEM block `-----BEGIN DIVMORA RELEASE ATTESTATION-----`.
+  - Binary integrity checksum verification: SHA-256 binary digest evaluation via `ComputeBytesDigest`, `ComputeReaderDigest`, and `ComputeFileDigest`.
+  - Comprehensive anti-tampering assertions: Validates product identity, SemVer version normalization, Git commit SHA prefix matching, and build date consistency (>24h earlier drift detection).
+  - BSL 1.1 compile-time spoofing defeat: Cross-checks local release dates against certified release claims and anchors `BSLPolicy.ReleaseDate` to prevent attackers from forging build timestamps to claim premature Apache 2.0 open-source conversion.
+  - Fail-closed enforcement: `WithRequireReleaseAttestation(true)` mandates valid release attestation before granting commercial or open-source entitlements.
+  - CLI subcommands: `license-cli sign-release`, `license-cli verify-release`, `license-cli inspect-release`, and integrated `-release-attestation`, `-require-release-attestation`, `-binary`, and `-git-commit` flags in `license-cli verify`.
 - **Reusable Terminal Claims Inspection Formatter (`Claims.FormatInspect()`)**:
   - `Claims.FormatInspect()` and `Claims.FormatInspectAt(t)`: Reusable, aligned terminal formatter presenting complete claims metadata (Status, Customer, Plan, Product, Validity Timeline, Version Bounds, Maintenance Cutoff, Entitlements & Limits, Operational Infrastructure Scopes, and Custom Metadata) with deterministic sorting.
   - `VerificationResult.FormatInspect()`: Enriched terminal inspector combining cryptographic signature verification status, key lifecycle status, BSL 1.1 transition status, and authoritative clock attestation with formatted claims.

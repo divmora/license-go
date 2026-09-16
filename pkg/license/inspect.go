@@ -236,6 +236,25 @@ func (r *VerificationResult) FormatInspect() string {
 	if r.ClockTampered {
 		b.WriteString("⚠️  WARNING: Clock tampering or excessive drift was detected!\n")
 	}
+	if r.Provenance != nil && r.Provenance.Attested {
+		provClaims := r.Provenance.Claims
+		if provClaims != nil {
+			fmt.Fprintf(&b, "%-24s Certified Release (%s %s)\n", "Release Attestation:", provClaims.Product, provClaims.Version)
+			if r.Provenance.VerifiedByKeyID != "" {
+				fmt.Fprintf(&b, "%-24s %s (Status: %s)\n", "Attestation Key:", r.Provenance.VerifiedByKeyID, r.Provenance.VerifiedKeyStatus)
+			}
+			if provClaims.GitCommit != "" {
+				fmt.Fprintf(&b, "%-24s %s\n", "Attested Git Commit:", provClaims.GitCommit)
+			}
+			if provClaims.BinaryDigest != "" {
+				digestStatus := "Verified"
+				if !r.Provenance.DigestMatched {
+					digestStatus = "Not checked"
+				}
+				fmt.Fprintf(&b, "%-24s %s (%s)\n", "Binary Digest:", provClaims.BinaryDigest, digestStatus)
+			}
+		}
+	}
 
 	if r.Claims != nil {
 		b.WriteString(divider + "\n")

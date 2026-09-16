@@ -18,11 +18,13 @@ license-go/
 │       ├── bsl.go              # BSL 1.1 Change Date, Apache 2.0 conversion & clock defense
 │       ├── signer.go           # License generation & signing engine (private key)
 │       ├── validator.go        # Client-side verification engine (public key)
+│       ├── provenance.go       # Cryptographic release attestation & binary provenance engine
 │       ├── manager.go          # Daemon background monitor, file watcher, expiry alerts
 │       ├── keys_test.go        # Key generation & PEM round-trip tests
 │       ├── keyring_test.go     # KeyRing rotation, revocation & multi-key tests
 │       ├── bsl_test.go         # BSL 1.1 conversion & clock tampering defense tests
 │       ├── license_test.go     # Signing, verification, tampering, expiration tests
+│       ├── provenance_test.go  # Release attestation & binary checksum verification tests
 │       ├── manager_test.go     # Background daemon lifecycle & hot-reloading tests
 │       ├── policy_test.go      # Operational policy modes (Strict, Degraded, WarnOnly) tests
 │       └── version_test.go     # Perpetual license version lock & maintenance cutoff tests
@@ -41,16 +43,17 @@ license-go/
 - **Zero External Crypto Dependencies**: The package relies purely on Go's standard library (`crypto/ed25519`, `crypto/rand`, `crypto/x509`, `encoding/pem`). Do not introduce CGo or third-party cryptographic dependencies.
 - **Asymmetric Security**: Private keys must never be committed to source code or embedded into client libraries. Only the public key may be distributed with or embedded into consuming services.
 - **Strict Verification Order**: Any modifications to verification must maintain the strict security sequence:
-  0. Authoritative reference time check (`WithAuthoritativeTime`) to detect forward clock tampering
-  1. BSL 1.1 Change Date check (`BSLPolicy`): if converted, grant open-source entitlements
-  2. Token unpacking and format assertion
-  3. Cryptographic signature verification against KeyRing with canonical data `DIV1.<payloadB64>`
-  4. JSON payload unmarshaling
-  5. Product identity match
-  6. Machine/cluster fingerprint match (if applicable)
-  7. NotBefore & Expiration checks (accounting for clock skew and grace periods)
-  8. Scope constraints check (environments, accounts, regions, clusters, namespaces, hosts)
-  9. Version constraints check (`MaxVersion` / `AllowedVersions`) and maintenance cutoff (`MaintenanceExpiresAt`)
+  0. Release attestation and build provenance evaluation (`EvaluateProvenance`): verify binary build authenticity and anchor authoritative BSL release date
+  1. Authoritative reference time check (`WithAuthoritativeTime` / `WithServerTimeAttestation`) to detect forward clock tampering
+  2. BSL 1.1 Change Date check (`BSLPolicy`): if converted, grant open-source entitlements
+  3. Token unpacking and format assertion
+  4. Cryptographic signature verification against KeyRing with canonical data `DIV1.<payloadB64>`
+  5. JSON payload unmarshaling
+  6. Product identity match
+  7. Machine/cluster fingerprint match (if applicable)
+  8. NotBefore & Expiration checks (accounting for clock skew and grace periods)
+  9. Scope constraints check (environments, accounts, regions, clusters, namespaces, hosts)
+  10. Version constraints check (`MaxVersion` / `AllowedVersions`) and maintenance cutoff (`MaintenanceExpiresAt`)
 
 ---
 
