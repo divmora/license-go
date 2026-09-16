@@ -53,6 +53,9 @@ var (
 
 	// ErrMaintenanceExpired is returned when the running binary release/build date is past the maintenance entitlement period.
 	ErrMaintenanceExpired = errors.New("license: software maintenance/update period has expired")
+
+	// ErrClockTamperingDetected is returned when local system clock contradicts authoritative server time.
+	ErrClockTamperingDetected = errors.New("license: clock tampering detected; local clock contradicts authoritative server time")
 )
 
 // LimitExceededError provides structured detail when a quota is exceeded.

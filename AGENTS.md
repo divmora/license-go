@@ -15,11 +15,13 @@ license-go/
 │       ├── keys.go             # Ed25519 key generation, PEM PKCS#8/PKIX serialization
 │       ├── envelope.go         # Token serialization (compact DIV1 & armored PEM blocks)
 │       ├── keyring.go          # KeyRing multi-key rotation, bundle management & revocation
+│       ├── bsl.go              # BSL 1.1 Change Date, Apache 2.0 conversion & clock defense
 │       ├── signer.go           # License generation & signing engine (private key)
 │       ├── validator.go        # Client-side verification engine (public key)
 │       ├── manager.go          # Daemon background monitor, file watcher, expiry alerts
 │       ├── keys_test.go        # Key generation & PEM round-trip tests
 │       ├── keyring_test.go     # KeyRing rotation, revocation & multi-key tests
+│       ├── bsl_test.go         # BSL 1.1 conversion & clock tampering defense tests
 │       ├── license_test.go     # Signing, verification, tampering, expiration tests
 │       ├── manager_test.go     # Background daemon lifecycle & hot-reloading tests
 │       └── version_test.go     # Perpetual license version lock & maintenance cutoff tests
@@ -38,14 +40,16 @@ license-go/
 - **Zero External Crypto Dependencies**: The package relies purely on Go's standard library (`crypto/ed25519`, `crypto/rand`, `crypto/x509`, `encoding/pem`). Do not introduce CGo or third-party cryptographic dependencies.
 - **Asymmetric Security**: Private keys must never be committed to source code or embedded into client libraries. Only the public key may be distributed with or embedded into consuming services.
 - **Strict Verification Order**: Any modifications to verification must maintain the strict security sequence:
-  1. Token unpacking and format assertion
-  2. Cryptographic signature verification against canonical data `DIV1.<payloadB64>`
-  3. JSON payload unmarshaling
-  4. Product identity match
-  5. Machine/cluster fingerprint match (if applicable)
-  6. NotBefore & Expiration checks (accounting for clock skew and grace periods)
-  7. Scope constraints check (environments, accounts, regions, clusters, namespaces, hosts)
-  8. Version constraints check (`MaxVersion` / `AllowedVersions`) and maintenance cutoff (`MaintenanceExpiresAt`)
+  0. Authoritative reference time check (`WithAuthoritativeTime`) to detect forward clock tampering
+  1. BSL 1.1 Change Date check (`BSLPolicy`): if converted, grant open-source entitlements
+  2. Token unpacking and format assertion
+  3. Cryptographic signature verification against KeyRing with canonical data `DIV1.<payloadB64>`
+  4. JSON payload unmarshaling
+  5. Product identity match
+  6. Machine/cluster fingerprint match (if applicable)
+  7. NotBefore & Expiration checks (accounting for clock skew and grace periods)
+  8. Scope constraints check (environments, accounts, regions, clusters, namespaces, hosts)
+  9. Version constraints check (`MaxVersion` / `AllowedVersions`) and maintenance cutoff (`MaintenanceExpiresAt`)
 
 ---
 

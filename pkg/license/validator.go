@@ -30,6 +30,9 @@ type Validator struct {
 	currentCustomScope  map[string]string
 	currentVersion      string
 	buildDate           time.Time
+	bslPolicy           *BSLPolicy
+	authoritativeTime   time.Time
+	maxClockDrift       time.Duration
 	allowExpired        bool
 	allowInactive       bool
 }
@@ -135,6 +138,28 @@ func WithCurrentVersion(version string) ValidatorOption {
 func WithBuildDate(buildDate time.Time) ValidatorOption {
 	return func(v *Validator) {
 		v.buildDate = buildDate
+	}
+}
+
+// WithBSLPolicy configures Business Source License (BSL 1.1) terms and automatic open-source conversion.
+func WithBSLPolicy(policy BSLPolicy) ValidatorOption {
+	return func(v *Validator) {
+		v.bslPolicy = &policy
+	}
+}
+
+// WithAuthoritativeTime sets an authoritative reference time (e.g., from an HTTP Date header or cloud API)
+// to defend against local system clock manipulation and false BSL conversion claims.
+func WithAuthoritativeTime(t time.Time) ValidatorOption {
+	return func(v *Validator) {
+		v.authoritativeTime = t
+	}
+}
+
+// WithMaxClockDrift configures the tolerance threshold before the local clock is anchored to authoritative time (default: 1 hour).
+func WithMaxClockDrift(drift time.Duration) ValidatorOption {
+	return func(v *Validator) {
+		v.maxClockDrift = drift
 	}
 }
 
@@ -287,28 +312,122 @@ func (v *Validator) VerifyFromFile(filePath string) (*Claims, error) {
 	return v.Verify(string(data))
 }
 
+// resolveEvaluationTime reconciles the local reference time with any configured authoritative time,
+// detecting forward clock tampering attempts while respecting clock drift boundaries.
+func (v *Validator) resolveEvaluationTime(localNow time.Time) (evalTime time.Time, tampered bool) {
+	evalTime = localNow
+	if v.authoritativeTime.IsZero() {
+		return evalTime, false
+	}
+
+	authTime := v.authoritativeTime.UTC()
+	localUTC := localNow.UTC()
+
+	// 1. Forward Clock Tampering Detection:
+	// Local clock claims BSL Change Date has arrived, but authoritative server clock attests it has not!
+	if v.bslPolicy != nil && v.bslPolicy.IsConverted(localUTC) && !v.bslPolicy.IsConverted(authTime) {
+		return authTime, true
+	}
+
+	// 2. Significant Clock Drift Check:
+	driftLimit := v.maxClockDrift
+	if driftLimit <= 0 {
+		driftLimit = time.Hour
+	}
+	drift := localUTC.Sub(authTime)
+	if drift < -driftLimit || drift > driftLimit {
+		return authTime, false
+	}
+
+	return evalTime, false
+}
+
 // VerifyEnv resolves the license automatically from standard environment variables
 // (DIVMORA_LICENSE_KEY, DIVMORA_LICENSE_FILE, or /etc/divmora/license.key) and validates it.
+// If the BSL 1.1 Change Date has arrived, open-source entitlements are granted automatically.
 func (v *Validator) VerifyEnv() (*Claims, error) {
+	evalTime, _ := v.resolveEvaluationTime(time.Now())
+	if v.bslPolicy != nil && v.bslPolicy.IsConverted(evalTime) {
+		return &Claims{
+			Product:  v.expectedProduct,
+			Plan:     "open-source",
+			Customer: Customer{Name: "Open Source Community"},
+			Features: []string{"*"},
+			Limits:   map[string]int64{},
+		}, nil
+	}
+
 	resolved, err := ResolveLicense()
 	if err != nil {
 		return nil, err
 	}
-	return v.Verify(resolved.Content)
+	return v.VerifyAt(resolved.Content, time.Now())
 }
 
 // VerifyResolved resolves a license from an explicit input (file path or token string)
 // or falls back to standard environment variables, then verifies it.
 func (v *Validator) VerifyResolved(explicitSource ...string) (*Claims, error) {
+	evalTime, _ := v.resolveEvaluationTime(time.Now())
+	if v.bslPolicy != nil && v.bslPolicy.IsConverted(evalTime) {
+		resolved, err := ResolveLicense(explicitSource...)
+		if err == nil {
+			return v.VerifyAt(resolved.Content, time.Now())
+		}
+		return &Claims{
+			Product:  v.expectedProduct,
+			Plan:     "open-source",
+			Customer: Customer{Name: "Open Source Community"},
+			Features: []string{"*"},
+			Limits:   map[string]int64{},
+		}, nil
+	}
+
 	resolved, err := ResolveLicense(explicitSource...)
 	if err != nil {
 		return nil, err
 	}
-	return v.Verify(resolved.Content)
+	return v.VerifyAt(resolved.Content, time.Now())
 }
 
 // VerifyAt validates the license against the specified reference time `now`.
 func (v *Validator) VerifyAt(rawLicense string, now time.Time) (*Claims, error) {
+	evalTime, _ := v.resolveEvaluationTime(now)
+
+	// 0. Automatic BSL 1.1 Change Date Check (Apache 2.0 Conversion)
+	if v.bslPolicy != nil && v.bslPolicy.IsConverted(evalTime) {
+		if strings.TrimSpace(rawLicense) == "" {
+			return &Claims{
+				Product:  v.expectedProduct,
+				Plan:     "open-source",
+				Customer: Customer{Name: "Open Source Community"},
+				Features: []string{"*"},
+				Limits:   map[string]int64{},
+			}, nil
+		}
+
+		vCopy := *v
+		vCopy.allowExpired = true
+		claims, err := vCopy.verifyTokenPayload(rawLicense, evalTime)
+		if err == nil {
+			return claims, nil
+		}
+		return &Claims{
+			Product:  v.expectedProduct,
+			Plan:     "open-source",
+			Customer: Customer{Name: "Open Source Community"},
+			Features: []string{"*"},
+			Limits:   map[string]int64{},
+		}, nil
+	}
+
+	if strings.TrimSpace(rawLicense) == "" {
+		return nil, ErrLicenseNotFound
+	}
+
+	return v.verifyTokenPayload(rawLicense, evalTime)
+}
+
+func (v *Validator) verifyTokenPayload(rawLicense string, evalTime time.Time) (*Claims, error) {
 	if v.keyRing == nil || v.keyRing.Count() == 0 {
 		return nil, ErrMissingPublicKey
 	}
@@ -331,8 +450,8 @@ func (v *Validator) VerifyAt(rawLicense string, now time.Time) (*Claims, error) 
 		return nil, err
 	}
 
-	// 2-7. Evaluate claims
-	return v.verifyClaims(payloadJSON, now)
+	// 2-9. Evaluate claims
+	return v.verifyClaims(payloadJSON, evalTime)
 }
 
 func (v *Validator) verifyClaims(payloadJSON []byte, now time.Time) (*Claims, error) {
@@ -507,8 +626,8 @@ func resolveRegionFromProcess() string {
 	return ""
 }
 
-// VerificationResult encapsulates verified license claims alongside explicit grace period dynamics
-// and key rotation metadata.
+// VerificationResult encapsulates verified license claims alongside explicit grace period dynamics,
+// key rotation metadata, and BSL 1.1 open-source transition state.
 type VerificationResult struct {
 	// Claims contains the verified payload fields.
 	Claims *Claims
@@ -530,6 +649,18 @@ type VerificationResult struct {
 
 	// EffectiveExpiry is the final cutoff timestamp including grace period.
 	EffectiveExpiry time.Time
+
+	// BSLConverted indicates whether the software has automatically transitioned to open-source under BSL terms.
+	BSLConverted bool
+
+	// EffectiveLicense indicates the governing license identifier ("BSL-1.1" or "Apache-2.0").
+	EffectiveLicense string
+
+	// ChangeDate is the timestamp when the software converts to open source under BSL terms.
+	ChangeDate time.Time
+
+	// ClockTampered indicates that local system clock contradicted authoritative server time.
+	ClockTampered bool
 }
 
 // VerifyWithResult validates the license and returns a detailed VerificationResult exposing grace period dynamics.
@@ -539,6 +670,70 @@ func (v *Validator) VerifyWithResult(rawLicense string) (*VerificationResult, er
 
 // VerifyWithResultAt validates the license against reference time `now` and returns a detailed VerificationResult.
 func (v *Validator) VerifyWithResultAt(rawLicense string, now time.Time) (*VerificationResult, error) {
+	evalTime, tampered := v.resolveEvaluationTime(now)
+
+	var changeDate time.Time
+	effectiveLic := DefaultBSLLicense
+	if v.bslPolicy != nil {
+		changeDate = v.bslPolicy.ChangeDate()
+		effectiveLic = v.bslPolicy.EffectiveLicense(evalTime)
+	}
+
+	// 0. Automatic BSL 1.1 Change Date Check
+	if v.bslPolicy != nil && v.bslPolicy.IsConverted(evalTime) {
+		if strings.TrimSpace(rawLicense) == "" {
+			claims := &Claims{
+				Product:  v.expectedProduct,
+				Plan:     "open-source",
+				Customer: Customer{Name: "Open Source Community"},
+				Features: []string{"*"},
+				Limits:   map[string]int64{},
+			}
+			return &VerificationResult{
+				Claims:           claims,
+				Status:           StatusActive,
+				BSLConverted:     true,
+				EffectiveLicense: effectiveLic,
+				ChangeDate:       changeDate,
+				ClockTampered:    tampered,
+			}, nil
+		}
+
+		vCopy := *v
+		vCopy.allowExpired = true
+		claims, err := vCopy.verifyTokenPayload(rawLicense, evalTime)
+		if err == nil {
+			return &VerificationResult{
+				Claims:           claims,
+				Status:           StatusActive,
+				BSLConverted:     true,
+				EffectiveLicense: effectiveLic,
+				ChangeDate:       changeDate,
+				ClockTampered:    tampered,
+			}, nil
+		}
+
+		claims = &Claims{
+			Product:  v.expectedProduct,
+			Plan:     "open-source",
+			Customer: Customer{Name: "Open Source Community"},
+			Features: []string{"*"},
+			Limits:   map[string]int64{},
+		}
+		return &VerificationResult{
+			Claims:           claims,
+			Status:           StatusActive,
+			BSLConverted:     true,
+			EffectiveLicense: effectiveLic,
+			ChangeDate:       changeDate,
+			ClockTampered:    tampered,
+		}, nil
+	}
+
+	if strings.TrimSpace(rawLicense) == "" {
+		return nil, ErrLicenseNotFound
+	}
+
 	if v.keyRing == nil || v.keyRing.Count() == 0 {
 		return nil, ErrMissingPublicKey
 	}
@@ -561,19 +756,23 @@ func (v *Validator) VerifyWithResultAt(rawLicense string, now time.Time) (*Verif
 		return nil, err
 	}
 
-	claims, err := v.verifyClaims(payloadJSON, now)
+	claims, err := v.verifyClaims(payloadJSON, evalTime)
 	if err != nil {
 		return nil, err
 	}
 
 	return &VerificationResult{
 		Claims:              claims,
-		Status:              claims.StatusAt(now),
+		Status:              claims.StatusAt(evalTime),
 		VerifiedByKeyID:     matchedKey.ID,
 		VerifiedByKeyStatus: matchedKey.Status,
-		InGracePeriod:       claims.IsInGracePeriodAt(now),
-		GraceDaysRemaining:  claims.GraceDaysRemainingAt(now),
+		InGracePeriod:       claims.IsInGracePeriodAt(evalTime),
+		GraceDaysRemaining:  claims.GraceDaysRemainingAt(evalTime),
 		EffectiveExpiry:     claims.EffectiveExpiration(),
+		BSLConverted:        false,
+		EffectiveLicense:    effectiveLic,
+		ChangeDate:          changeDate,
+		ClockTampered:       tampered,
 	}, nil
 }
 

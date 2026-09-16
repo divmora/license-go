@@ -307,6 +307,46 @@ func verifyServiceLicense() {
 
 ---
 
+### Workflow H: BSL 1.1 Automatic Open-Source Conversion & Clock Defense
+
+Products licensed under Business Source License 1.1 convert automatically to open source (`Apache-2.0`) after a set period (default: 3 years from release date). Once converted, commercial license keys are no longer required and standard open-source entitlements are granted automatically.
+
+```go
+releaseDate, _ := time.Parse(time.RFC3339, "2025-01-01T00:00:00Z")
+
+validator, err := license.NewValidatorFromPEMFile(
+	"/etc/divmora/public.pem",
+	license.WithProduct("gitlab-fleet-governor"),
+	// Configure BSL 1.1 policy (converts to Apache-2.0 after 3 years):
+	license.WithBSLPolicy(license.BSLPolicy{
+		ReleaseDate:       releaseDate,
+		ChangePeriodYears: 3,
+	}),
+	// Defend against forward host clock manipulation by anchoring to authoritative API/NTP time:
+	license.WithAuthoritativeTime(serverHttpDate),
+)
+if err != nil {
+	log.Fatalf("failed to create validator: %v", err)
+}
+
+// If after Change Date: automatically succeeds with open-source entitlements even without a license!
+// If before Change Date: strictly enforces commercial license key and validity period.
+claims, err := validator.VerifyEnv()
+```
+
+In `license-cli verify`:
+
+```bash
+license-cli verify \
+  -public-key /path/to/public.pem \
+  -product gitlab-fleet-governor \
+  -bsl-release-date 2025-01-01 \
+  -bsl-years 3 \
+  -authoritative-time "2026-06-01T12:00:00Z"
+```
+
+---
+
 ## 4. Troubleshooting & Sentinel Errors
 
 | Error | Cause | Resolution |
@@ -322,3 +362,5 @@ func verifyServiceLicense() {
 | `ErrScopeMismatch` | Deployment environment, cloud account, region, host, or cluster is not allowed | Verify the license `Scope` allowlist contains the target deployment infrastructure. |
 | `ErrVersionNotEntitled` | Running software version exceeds `claims.MaxVersion` or is not in `claims.AllowedVersions` | Upgrade perpetual license to entitle the newer major version. |
 | `ErrMaintenanceExpired` | Software build date exceeds `claims.MaintenanceExpiresAt` | Customer's annual maintenance contract has expired. Renew maintenance to unlock newer binary releases. |
+| `ErrClockTamperingDetected` | Local system clock was advanced forward to bypass BSL or license checks | Ensure the system clock is synchronized via NTP. Authoritative server time is used to enforce genuine validity. |
+

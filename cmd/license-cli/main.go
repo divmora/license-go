@@ -288,6 +288,9 @@ func runVerify(args []string) error {
 	host := fs.String("host", "", "Current hostname or domain to assert against Scope.Hosts")
 	version := fs.String("version", "", "Current running software version to assert (e.g. '1.2.0')")
 	buildDateFlag := fs.String("build-date", "", "Software binary build/release date to assert against maintenance window (RFC3339 or YYYY-MM-DD)")
+	bslRelease := fs.String("bsl-release-date", "", "Software release date to configure BSL 1.1 Change Date (RFC3339 or YYYY-MM-DD)")
+	bslYears := fs.Int("bsl-years", 3, "Duration in years before BSL 1.1 converts to Apache 2.0 (default: 3)")
+	authTimeFlag := fs.String("authoritative-time", "", "Authoritative server timestamp to defend against clock tampering (RFC3339)")
 	allowExpired := fs.Bool("allow-expired", false, "Allow signature verification even if license has expired")
 
 	if err := fs.Parse(args); err != nil {
@@ -299,7 +302,7 @@ func runVerify(args []string) error {
 	}
 
 	resolved, err := license.ResolveLicense(*licenseSource)
-	if err != nil {
+	if err != nil && *bslRelease == "" {
 		return fmt.Errorf("failed to locate license: %w (pass -license or set %s / %s)", err, license.EnvLicenseKey, license.EnvLicenseFile)
 	}
 
@@ -341,6 +344,26 @@ func runVerify(args []string) error {
 		}
 		opts = append(opts, license.WithBuildDate(bDate))
 	}
+	if *bslRelease != "" {
+		rDate, err := time.Parse(time.RFC3339, *bslRelease)
+		if err != nil {
+			rDate, err = time.Parse("2006-01-02", *bslRelease)
+			if err != nil {
+				return fmt.Errorf("invalid -bsl-release-date %q: expected RFC3339 or YYYY-MM-DD", *bslRelease)
+			}
+		}
+		opts = append(opts, license.WithBSLPolicy(license.BSLPolicy{
+			ReleaseDate:       rDate,
+			ChangePeriodYears: *bslYears,
+		}))
+	}
+	if *authTimeFlag != "" {
+		aDate, err := time.Parse(time.RFC3339, *authTimeFlag)
+		if err != nil {
+			return fmt.Errorf("invalid -authoritative-time %q: expected RFC3339", *authTimeFlag)
+		}
+		opts = append(opts, license.WithAuthoritativeTime(aDate))
+	}
 	if *allowExpired {
 		opts = append(opts, license.WithAllowExpired(true))
 	}
@@ -350,16 +373,27 @@ func runVerify(args []string) error {
 		return fmt.Errorf("failed to load public key: %w", err)
 	}
 
-	result, err := validator.VerifyWithResult(resolved.Content)
+	var content string
+	if resolved != nil {
+		content = resolved.Content
+	}
+	result, err := validator.VerifyWithResult(content)
 	if err != nil {
 		return fmt.Errorf("VERIFICATION FAILED: %w", err)
 	}
 
 	fmt.Println("✓ VERIFICATION SUCCESSFUL: Signature is valid and claims match!")
+	if result.BSLConverted {
+		fmt.Printf("ℹ️  GOVERNING LICENSE: %s (BSL 1.1 Change Date reached on %s; open source terms apply)\n",
+			result.EffectiveLicense, result.ChangeDate.Format("2006-01-02"))
+	}
+	if result.ClockTampered {
+		fmt.Println("⚠️  WARNING: Local clock contradiction detected; anchored evaluation to authoritative server time.")
+	}
 	if result.VerifiedByKeyID != "" {
 		fmt.Printf("🔑 Verified by Key: %s (Status: %s)\n", result.VerifiedByKeyID, result.VerifiedByKeyStatus)
 	}
-	if resolved.Source != "explicit_file" && resolved.Source != "explicit_token" {
+	if resolved != nil && resolved.Source != "explicit_file" && resolved.Source != "explicit_token" {
 		fmt.Printf("ℹ️  Loaded license from: %s\n", resolved.Source)
 	}
 	if result.InGracePeriod {
