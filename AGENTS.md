@@ -84,6 +84,7 @@ All commits MUST follow the [Conventional Commits](https://www.conventionalcommi
 ## 5. Living Product Roadmap (`ROADMAP.md`)
 
 - **Adding Tasks**: Whenever an optimization, edge case, or capability is identified during pair programming, log it in `ROADMAP.md`.
+- **Deduplication with GitHub Issues**: If an active GitHub Issue already exists or is explicitly created for a feature, bug fix, or task, **do not duplicate it in `ROADMAP.md`**. GitHub Issues track active, assigned, or triaged tasks, while `ROADMAP.md` captures high-level, unassigned architectural vision and backlog capabilities.
 - **Pruning Tasks**: Once an item is implemented, verified with automated tests, and committed, remove it from `ROADMAP.md` immediately.
 
 ---

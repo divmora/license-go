@@ -3,7 +3,7 @@
 This document tracks upcoming capabilities, planned optimizations, and ecosystem integrations for the Divmora licensing package and CLI.
 
 > [!NOTE]
-> In accordance with [AGENTS.md](file:///Users/ngoyal16/divmora/github-repos/license-go/AGENTS.md), items are added when identified and pruned immediately once implemented, tested, and committed.
+> In accordance with [AGENTS.md](file:///Users/ngoyal16/divmora/github-repos/license-go/AGENTS.md), items are added when identified and pruned immediately once implemented, tested, and committed. Active tasks or defects tracked as GitHub Issues are intentionally omitted to avoid duplication.
 
 ---
 
@@ -17,13 +17,7 @@ This document tracks upcoming capabilities, planned optimizations, and ecosystem
 - [ ] *(Additional multi-tenancy capabilities will be tracked here)*
 
 ### 🛡️ Validation & Diagnostic Reporting
-- [ ] **Trust Root Immutability (#11)**: Prevent environment variables from overriding compile-time embedded vendor public verification keys.
-- [ ] **`Manager` Expiration Enforcement (#12)**: Enforce license active state within `HasFeature()` and `CheckLimit()` during post-expiration.
-- [ ] **Cross-Directory Wildcard Isolation (#13)**: Prevent `*` in `matchFeaturePattern()` from matching across `/` hierarchy delimiters.
-- [ ] **Kubernetes Cluster Fingerprint Hardening (#14)**: Prevent cluster fingerprint collision across identical namespaces when API RBAC is restricted.
-- [ ] **Environment Scope Fallback (#16)**: Fallback to process environment when `claims.Environment` is set and validator environment is empty.
-- [ ] **Compile-Time Build Date Clock Defense (#17)**: Reject offline backward system clock manipulation set prior to binary compilation date.
-- [ ] **Clock Skew Lifecycle State Consistency (#18)**: Reconcile `StatusAt()` lifecycle state reporting with validator clock skew buffer.
+- [ ] *(Active security and validation hardening tasks are tracked directly in GitHub Issues)*
 
 ### 🖥️ Developer Experience & CLI Tooling
 - [ ] *(Additional CLI capabilities will be tracked here)*
