@@ -424,7 +424,7 @@ func (v *Validator) EvaluateProvenance() (*ReleaseProvenance, error) {
 		return nil, v.initErr
 	}
 
-	if v.releaseAttestation == "" {
+	if IsPlaceholderAttestation(v.releaseAttestation) {
 		if v.requireReleaseAttestation {
 			return nil, ErrReleaseAttestationMissing
 		}

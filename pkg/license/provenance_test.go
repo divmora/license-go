@@ -412,3 +412,105 @@ func TestValidator_WithRequireReleaseAttestation(t *testing.T) {
 		t.Fatalf("expected release attestation in FormatInspect, got:\n%s", inspectedOutput)
 	}
 }
+
+func TestEvaluateProvenance_PlaceholderValues(t *testing.T) {
+	pub, _ := generateTestKeyPair(t)
+	ring := NewKeyRing(pub)
+
+	params := ProvenanceParams{
+		ExpectedProduct: "gitlab-fleet-governor",
+		CurrentVersion:  "v1.0.0",
+	}
+
+	placeholders := []string{
+		"",
+		"   ",
+		"none",
+		"None",
+		"NONE",
+		`"none"`,
+		"'none'",
+		"dev",
+		"development",
+		"unattested",
+		"null",
+		"nil",
+		"false",
+		"disabled",
+		"0",
+		"unset",
+		"n/a",
+		"na",
+		"undefined",
+		"unknown",
+		"placeholder",
+		"test",
+	}
+
+	for _, ph := range placeholders {
+		t.Run("placeholder: "+ph, func(t *testing.T) {
+			if !IsPlaceholderAttestation(ph) {
+				t.Fatalf("expected IsPlaceholderAttestation(%q) to be true", ph)
+			}
+
+			prov, err := EvaluateProvenance(ph, ring, params)
+			if err != nil {
+				t.Fatalf("EvaluateProvenance(%q) failed: %v", ph, err)
+			}
+			if prov == nil {
+				t.Fatalf("expected non-nil ReleaseProvenance for %q", ph)
+			}
+			if prov.Attested {
+				t.Fatalf("expected Attested == false for placeholder %q", ph)
+			}
+		})
+	}
+
+	// Non-placeholder invalid token should still return error
+	_, err := EvaluateProvenance("some-invalid-token", ring, params)
+	if err == nil {
+		t.Fatal("expected error for non-placeholder invalid token, got nil")
+	}
+}
+
+func TestValidator_PlaceholderAttestation_RequireAttestation(t *testing.T) {
+	pub, priv := generateTestKeyPair(t)
+
+	claims := Claims{
+		Product:   "gitlab-fleet-governor",
+		ExpiresAt: time.Now().Add(24 * time.Hour),
+		Customer:  Customer{Name: "Acme Corp"},
+	}
+	signer, _ := NewSigner(priv)
+	lic, _ := signer.Sign(claims)
+
+	// 1. Placeholder with WithRequireReleaseAttestation(false): cleanly treated as unattested (no error)
+	vUnattested, err := NewValidator(pub,
+		WithProduct("gitlab-fleet-governor"),
+		WithReleaseAttestation("none"),
+	)
+	if err != nil {
+		t.Fatalf("NewValidator failed: %v", err)
+	}
+	res, err := vUnattested.VerifyWithResult(lic)
+	if err != nil {
+		t.Fatalf("VerifyWithResult failed: %v", err)
+	}
+	if res.Provenance == nil || res.Provenance.Attested {
+		t.Fatalf("expected Attested == false for 'none' placeholder")
+	}
+
+	// 2. Placeholder with WithRequireReleaseAttestation(true): fails with ErrReleaseAttestationMissing
+	vRequired, err := NewValidator(pub,
+		WithProduct("gitlab-fleet-governor"),
+		WithRequireReleaseAttestation(true),
+		WithReleaseAttestation("dev"),
+	)
+	if err != nil {
+		t.Fatalf("NewValidator failed: %v", err)
+	}
+	_, err = vRequired.Verify(lic)
+	if !errors.Is(err, ErrReleaseAttestationMissing) {
+		t.Fatalf("expected ErrReleaseAttestationMissing for 'dev' placeholder with RequireReleaseAttestation, got: %v", err)
+	}
+}

@@ -396,14 +396,31 @@ func VerifyRelease(rawAttestation string, ring *KeyRing) (*ReleaseClaims, *KeyEn
 	return &claims, matchedKey, nil
 }
 
+// IsPlaceholderAttestation reports whether an attestation string is empty or contains common
+// placeholder/unattested build values (e.g. "none", "dev", "unattested", "null", "false", "disabled", "0").
+func IsPlaceholderAttestation(rawAttestation string) bool {
+	trimmed := strings.TrimSpace(rawAttestation)
+	trimmed = strings.Trim(trimmed, `"'`)
+	if trimmed == "" {
+		return true
+	}
+	switch strings.ToLower(trimmed) {
+	case "none", "dev", "development", "unattested", "null", "nil", "false", "disabled", "0", "unset", "n/a", "na", "undefined", "unknown", "placeholder", "test":
+		return true
+	default:
+		return false
+	}
+}
+
 // EvaluateProvenance evaluates a binary's authenticity, build parameters, and integrity against a release attestation.
 func EvaluateProvenance(rawAttestation string, ring *KeyRing, params ProvenanceParams) (*ReleaseProvenance, error) {
-	trimmed := strings.TrimSpace(rawAttestation)
-	if trimmed == "" {
+	if IsPlaceholderAttestation(rawAttestation) {
 		return &ReleaseProvenance{
 			Attested: false,
 		}, nil
 	}
+
+	trimmed := strings.TrimSpace(rawAttestation)
 
 	claims, matchedKey, err := VerifyRelease(trimmed, ring)
 	if err != nil {
