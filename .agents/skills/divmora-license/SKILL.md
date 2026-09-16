@@ -100,6 +100,14 @@ license-cli issue \
   -grace-days 14 \
   -features "ha,audit-logs,sso" \
   -limits "max_nodes=50,max_runners=200" \
+  -scope-envs "production,staging" \
+  -scope-accounts "123456789012" \
+  -scope-regions "us-east-1,eu-west-1" \
+  -scope-clusters "prod-eks-01" \
+  -scope-namespaces "acme-corp/*" \
+  -scope-hosts "*.acme.corp" \
+  -scope-custom "tier=platinum,gold;datacenter=dc-east,dc-west" \
+  -meta "billing_id=inv-9981,contact=admin@customer.com" \
   -out ./license.key \
   -armored
 ```
@@ -111,10 +119,17 @@ For perpetual licenses, pass `-valid-days 0`.
 ### Workflow C: Verify or Inspect a License via CLI
 
 ```bash
-# Verify explicit license file or token:
+# Verify explicit license file or token with standard and custom scope assertions:
 license-cli verify \
   -public-key /path/to/public.pem \
   -product "<product-name>" \
+  -env "production" \
+  -account "123456789012" \
+  -region "us-east-1" \
+  -cluster "prod-eks-01" \
+  -namespace "acme-corp/fleet" \
+  -host "srv-01.acme.corp" \
+  -custom-scope "tier=platinum,datacenter=dc-east" \
   -fingerprint "<host-fingerprint>" \
   -license ./license.key
 

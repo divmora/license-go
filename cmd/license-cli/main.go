@@ -122,6 +122,7 @@ func runIssue(args []string) error {
 	scopeClusters := fs.String("scope-clusters", "", "Comma-separated authorized clusters (e.g. 'prod-eks-01')")
 	scopeNamespaces := fs.String("scope-namespaces", "", "Comma-separated authorized namespaces/groups (e.g. 'gitlab.com/acme/*')")
 	scopeHosts := fs.String("scope-hosts", "", "Comma-separated authorized hostnames/domains (e.g. '*.acme.corp,runner-*.internal')")
+	scopeCustomFlag := fs.String("scope-custom", "", "Custom scope dimensions in key=val format; multiple dimensions separated by ';' and values separated by ',' (e.g. 'tier=platinum,gold;datacenter=dc-1')")
 	armored := fs.Bool("armored", true, "Output license in armored text format (default: true)")
 	outFile := fs.String("out", "", "Output file path (default: stdout)")
 	kid := fs.String("kid", "", "Optional Key ID or descriptor to embed in token claims (e.g. 'divmora-2026-root')")
@@ -213,9 +214,10 @@ func runIssue(args []string) error {
 	clusters := parseSlice(*scopeClusters)
 	namespaces := parseSlice(*scopeNamespaces)
 	hosts := parseSlice(*scopeHosts)
+	customScope := parseCustomScope(*scopeCustomFlag)
 
 	var scope *license.Scope
-	if len(envs) > 0 || len(accounts) > 0 || len(regions) > 0 || len(clusters) > 0 || len(namespaces) > 0 || len(hosts) > 0 {
+	if len(envs) > 0 || len(accounts) > 0 || len(regions) > 0 || len(clusters) > 0 || len(namespaces) > 0 || len(hosts) > 0 || len(customScope) > 0 {
 		scope = &license.Scope{
 			Environments: envs,
 			Accounts:     accounts,
@@ -223,6 +225,7 @@ func runIssue(args []string) error {
 			Clusters:     clusters,
 			Namespaces:   namespaces,
 			Hosts:        hosts,
+			Custom:       customScope,
 		}
 	}
 
@@ -286,6 +289,7 @@ func runVerify(args []string) error {
 	cluster := fs.String("cluster", "", "Current cluster identifier to assert against Scope.Clusters")
 	namespace := fs.String("namespace", "", "Current project/group namespace to assert against Scope.Namespaces")
 	host := fs.String("host", "", "Current hostname or domain to assert against Scope.Hosts")
+	customScopeFlag := fs.String("custom-scope", "", "Current custom scope assertions in key=val format separated by ';' or ',' (e.g. 'tier=platinum,datacenter=dc-1')")
 	version := fs.String("version", "", "Current running software version to assert (e.g. '1.2.0')")
 	buildDateFlag := fs.String("build-date", "", "Software binary build/release date to assert against maintenance window (RFC3339 or YYYY-MM-DD)")
 	bslRelease := fs.String("bsl-release-date", "", "Software release date to configure BSL 1.1 Change Date (RFC3339 or YYYY-MM-DD)")
@@ -330,6 +334,21 @@ func runVerify(args []string) error {
 	}
 	if *host != "" {
 		opts = append(opts, license.WithCurrentHost(*host))
+	}
+	if *customScopeFlag != "" {
+		dims := strings.FieldsFunc(*customScopeFlag, func(r rune) bool {
+			return r == ';' || r == ','
+		})
+		for _, item := range dims {
+			parts := strings.SplitN(strings.TrimSpace(item), "=", 2)
+			if len(parts) == 2 {
+				dim := strings.TrimSpace(parts[0])
+				val := strings.TrimSpace(parts[1])
+				if dim != "" && val != "" {
+					opts = append(opts, license.WithCurrentCustomScope(dim, val))
+				}
+			}
+		}
 	}
 	if *version != "" {
 		opts = append(opts, license.WithCurrentVersion(*version))
@@ -479,4 +498,51 @@ func runKeyring(args []string) error {
 	}
 	fmt.Println("--------------------------------------------------------------------------------")
 	return nil
+}
+
+func parseCustomScope(raw string) map[string][]string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	result := make(map[string][]string)
+
+	var entries []string
+	if strings.Contains(raw, ";") {
+		entries = strings.Split(raw, ";")
+	} else if strings.Count(raw, "=") > 1 && strings.Contains(raw, ",") {
+		entries = strings.Split(raw, ",")
+	} else {
+		entries = []string{raw}
+	}
+
+	for _, entry := range entries {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		parts := strings.SplitN(entry, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		dim := strings.TrimSpace(parts[0])
+		valsPart := strings.TrimSpace(parts[1])
+		if dim == "" {
+			continue
+		}
+
+		valFields := strings.FieldsFunc(valsPart, func(r rune) bool {
+			return r == ',' || r == '|'
+		})
+		for _, v := range valFields {
+			v = strings.TrimSpace(v)
+			if v != "" {
+				result[dim] = append(result[dim], v)
+			}
+		}
+	}
+
+	if len(result) == 0 {
+		return nil
+	}
+	return result
 }

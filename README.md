@@ -266,8 +266,13 @@ license-cli issue \
   -features "ha,audit-logs,auto-scaling" \
   -limits "max_runners=200,max_nodes=10" \
   -scope-envs "production" \
+  -scope-accounts "123456789012" \
+  -scope-regions "us-east-1,eu-west-1" \
+  -scope-clusters "prod-eks-01" \
   -scope-namespaces "gitlab.com/acme-corp/*" \
   -scope-hosts "*.acme.corp" \
+  -scope-custom "tier=platinum,gold;datacenter=dc-east,dc-west" \
+  -meta "billing_id=inv-9981,contact=admin@acme.corp" \
   -fingerprint "node-cluster-01" \
   -out ./acme.license.key
 ```
@@ -282,6 +287,7 @@ license-cli verify \
   -env "production" \
   -namespace "gitlab.com/acme-corp/fleet" \
   -host "runner-01.acme.corp" \
+  -custom-scope "tier=platinum,datacenter=dc-east" \
   -fingerprint "node-cluster-01" \
   -license ./acme.license.key
 
