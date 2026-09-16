@@ -1,6 +1,7 @@
 package license
 
 import (
+	"context"
 	"crypto/ed25519"
 	"encoding/json"
 	"errors"
@@ -21,6 +22,8 @@ type Validator struct {
 	gracePeriod               time.Duration
 	expectedFingerprint       string
 	requireFingerprint        bool
+	autoFingerprint           bool
+	fingerprintResolver       FingerprintResolver
 	currentEnvironment        string
 	currentAccount            string
 	currentRegion             string
@@ -82,6 +85,20 @@ func WithExpectedFingerprint(fingerprint string) ValidatorOption {
 func WithRequireFingerprint(require bool) ValidatorOption {
 	return func(v *Validator) {
 		v.requireFingerprint = require
+	}
+}
+
+// WithAutoFingerprint enables automated machine fingerprint resolution when evaluating node-locked licenses.
+func WithAutoFingerprint(auto bool) ValidatorOption {
+	return func(v *Validator) {
+		v.autoFingerprint = auto
+	}
+}
+
+// WithFingerprintResolver sets a custom FingerprintResolver for auto-fingerprint resolution.
+func WithFingerprintResolver(resolver FingerprintResolver) ValidatorOption {
+	return func(v *Validator) {
+		v.fingerprintResolver = resolver
 	}
 }
 
@@ -689,34 +706,61 @@ func (v *Validator) verifyTokenPayload(rawLicense string, evalTime time.Time) (*
 }
 
 func (v *Validator) verifyClaims(payloadJSON []byte, now time.Time) (*Claims, error) {
+	claims, _, _, err := v.verifyClaimsWithDetails(payloadJSON, now)
+	return claims, err
+}
+
+func (v *Validator) verifyClaimsWithDetails(payloadJSON []byte, now time.Time) (*Claims, *MachineFingerprint, bool, error) {
 	// 2. Decode claims
 	var claims Claims
 	if err := json.Unmarshal(payloadJSON, &claims); err != nil {
-		return nil, fmt.Errorf("%w: failed to parse claims json: %v", ErrInvalidLicenseFormat, err)
+		return nil, nil, false, fmt.Errorf("%w: failed to parse claims json: %v", ErrInvalidLicenseFormat, err)
 	}
 
 	// 3. Product match check
 	if v.expectedProduct != "" && !claims.IsValidForProduct(v.expectedProduct) {
-		return nil, fmt.Errorf("%w: expected %q, got %q", ErrProductMismatch, v.expectedProduct, claims.Product)
+		return nil, nil, false, fmt.Errorf("%w: expected %q, got %q", ErrProductMismatch, v.expectedProduct, claims.Product)
 	}
 
 	// 4. Fingerprint check
+	var resolvedFP *MachineFingerprint
+	fingerprintMatched := false
 	if claims.Fingerprint != "" {
-		if v.expectedFingerprint == "" {
-			return nil, fmt.Errorf("%w: license is bound to node fingerprint %q, but no expected fingerprint was configured on validator", ErrFingerprintMismatch, claims.Fingerprint)
-		}
-		if !strings.EqualFold(claims.Fingerprint, v.expectedFingerprint) {
-			return nil, fmt.Errorf("%w: expected %q, license bound to %q", ErrFingerprintMismatch, v.expectedFingerprint, claims.Fingerprint)
+		if v.expectedFingerprint != "" {
+			if strings.EqualFold(claims.Fingerprint, v.expectedFingerprint) {
+				fingerprintMatched = true
+			} else {
+				return nil, nil, false, fmt.Errorf("%w: expected %q, license bound to %q", ErrFingerprintMismatch, v.expectedFingerprint, claims.Fingerprint)
+			}
+		} else if v.autoFingerprint {
+			resolver := v.fingerprintResolver
+			if resolver == nil {
+				resolver = NewDefaultCompositeResolver()
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+
+			fp, err := resolver.Resolve(ctx)
+			if err != nil {
+				return nil, nil, false, fmt.Errorf("%w: failed to auto-resolve machine fingerprint: %v", ErrFingerprintMismatch, err)
+			}
+			resolvedFP = fp
+			if !fp.Matches(claims.Fingerprint) {
+				return nil, resolvedFP, false, fmt.Errorf("%w: local machine %q (%s) does not match license bound to %q", ErrFingerprintMismatch, fp.Primary, fp.Platform, claims.Fingerprint)
+			}
+			fingerprintMatched = true
+		} else {
+			return nil, nil, false, fmt.Errorf("%w: license is bound to node fingerprint %q, but no expected fingerprint was configured on validator", ErrFingerprintMismatch, claims.Fingerprint)
 		}
 	} else if v.requireFingerprint {
-		return nil, fmt.Errorf("%w: validator requires node-locked license, but license has no fingerprint", ErrFingerprintMismatch)
+		return nil, nil, false, fmt.Errorf("%w: validator requires node-locked license, but license has no fingerprint", ErrFingerprintMismatch)
 	}
 
 	// 5. NotBefore check (with clock skew)
 	if !v.allowInactive && !claims.NotBefore.IsZero() {
 		effectiveNotBefore := claims.NotBefore.Add(-v.clockSkew)
 		if now.Before(effectiveNotBefore) {
-			return nil, ErrNotYetValid
+			return nil, resolvedFP, fingerprintMatched, ErrNotYetValid
 		}
 	}
 
@@ -729,21 +773,20 @@ func (v *Validator) verifyClaims(payloadJSON []byte, now time.Time) (*Claims, er
 				effectiveGrace = claimGrace
 			}
 		}
-
 		effectiveExpiry := claims.ExpiresAt.Add(v.clockSkew).Add(effectiveGrace)
 		if now.After(effectiveExpiry) {
-			return nil, ErrExpired
+			return nil, resolvedFP, fingerprintMatched, ErrExpired
 		}
 	}
 
 	// 7. Scope constraints check
 	if err := v.checkScope(&claims); err != nil {
-		return nil, err
+		return nil, resolvedFP, fingerprintMatched, err
 	}
 
 	// 8. Version constraints check
 	if v.currentVersion != "" && !claims.IsVersionAllowed(v.currentVersion) {
-		return nil, &VersionNotEntitledError{
+		return nil, resolvedFP, fingerprintMatched, &VersionNotEntitledError{
 			CurrentVersion: v.currentVersion,
 			MaxVersion:     claims.MaxVersion,
 			Allowed:        claims.AllowedVersions,
@@ -752,13 +795,13 @@ func (v *Validator) verifyClaims(payloadJSON []byte, now time.Time) (*Claims, er
 
 	// 9. Maintenance / Support update cutoff check
 	if !v.buildDate.IsZero() && claims.HasMaintenanceExpired(v.buildDate) {
-		return nil, &MaintenanceExpiredError{
+		return nil, resolvedFP, fingerprintMatched, &MaintenanceExpiredError{
 			BuildDate:            v.buildDate.Format(time.RFC3339),
 			MaintenanceExpiresAt: claims.MaintenanceExpiresAt.Format(time.RFC3339),
 		}
 	}
 
-	return &claims, nil
+	return &claims, resolvedFP, fingerprintMatched, nil
 }
 
 func (v *Validator) checkScope(claims *Claims) error {
@@ -919,6 +962,12 @@ type VerificationResult struct {
 
 	// Provenance contains the evaluation of the binary's release attestation and build authenticity.
 	Provenance *ReleaseProvenance
+
+	// ResolvedFingerprint contains the machine fingerprint resolved during validation, if resolved.
+	ResolvedFingerprint *MachineFingerprint
+
+	// FingerprintMatched reports whether the license's node-lock fingerprint was matched.
+	FingerprintMatched bool
 }
 
 // StatusMessage returns a standardized human-readable description of the verification result.
@@ -1145,7 +1194,7 @@ func (v *Validator) VerifyWithResultAt(rawLicense string, now time.Time) (*Verif
 		return nil, err
 	}
 
-	claims, err := v.verifyClaims(payloadJSON, evalTime)
+	claims, resolvedFP, fpMatched, err := v.verifyClaimsWithDetails(payloadJSON, evalTime)
 	if err != nil {
 		return nil, err
 	}
@@ -1167,6 +1216,8 @@ func (v *Validator) VerifyWithResultAt(rawLicense string, now time.Time) (*Verif
 		ClockSkew:           skew,
 		EvaluationTime:      evalTime,
 		Provenance:          prov,
+		ResolvedFingerprint: resolvedFP,
+		FingerprintMatched:  fpMatched,
 	}, nil
 }
 

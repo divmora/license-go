@@ -354,6 +354,7 @@ func runVerify(args []string) error {
 	requireReleaseAttestation := fs.Bool("require-release-attestation", false, "Require a valid cryptographic release attestation")
 	gitCommit := fs.String("git-commit", "", "Current git commit SHA to assert against release attestation")
 	binaryPath := fs.String("binary", "", "Path to running binary executable to assert SHA-256 digest against release attestation")
+	autoFingerprint := fs.Bool("auto-fingerprint", true, "Automatically resolve and match machine/cluster fingerprint for node-locked licenses (default: true)")
 
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -391,6 +392,8 @@ func runVerify(args []string) error {
 	}
 	if *fingerprint != "" {
 		opts = append(opts, license.WithExpectedFingerprint(*fingerprint))
+	} else if *autoFingerprint {
+		opts = append(opts, license.WithAutoFingerprint(true))
 	}
 	if *env != "" {
 		opts = append(opts, license.WithCurrentEnvironment(*env))
@@ -520,6 +523,13 @@ func runVerify(args []string) error {
 	}
 	if result.VerifiedByKeyID != "" {
 		fmt.Printf("🔑 Verified by Key: %s (Status: %s)\n", result.VerifiedByKeyID, result.VerifiedByKeyStatus)
+	}
+	if result.FingerprintMatched {
+		if result.ResolvedFingerprint != nil {
+			fmt.Printf("🖥️  Node Lock: %s (%s, VERIFIED MATCH)\n", result.ResolvedFingerprint.Primary, result.ResolvedFingerprint.Platform)
+		} else if result.Claims != nil && result.Claims.Fingerprint != "" {
+			fmt.Printf("🖥️  Node Lock: %s (VERIFIED MATCH)\n", result.Claims.Fingerprint)
+		}
 	}
 	if *pubKeyPath == "" && keySource != "" {
 		fmt.Printf("🗝️  Loaded public key from: %s\n", keySource)

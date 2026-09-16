@@ -169,3 +169,192 @@ func TestHostResolver_Metadata(t *testing.T) {
 		t.Errorf("expected platform %v, got %v", PlatformHost, resolver.Platform())
 	}
 }
+
+func TestValidator_AutoFingerprint_Match(t *testing.T) {
+	pub, priv, err := GenerateKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	signer, err := NewSigner(priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Resolve local host machine fingerprint
+	localFP, err := ResolveHostFingerprint()
+	if err != nil {
+		t.Fatalf("failed to resolve local host fingerprint: %v", err)
+	}
+
+	// Issue license locked to local machine fingerprint
+	claims := Claims{
+		Customer:    Customer{Name: "Acme Corp"},
+		Product:     "gitlab-fleet-governor",
+		Fingerprint: localFP.Primary,
+		ExpiresAt:   time.Now().Add(24 * time.Hour),
+	}
+	token, err := signer.Sign(claims)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Validator with WithAutoFingerprint(true)
+	val, err := NewValidator(pub,
+		WithProduct("gitlab-fleet-governor"),
+		WithAutoFingerprint(true),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := val.VerifyWithResult(token)
+	if err != nil {
+		t.Fatalf("VerifyWithResult() failed unexpectedly: %v", err)
+	}
+
+	if !res.FingerprintMatched {
+		t.Error("expected FingerprintMatched == true")
+	}
+	if res.ResolvedFingerprint == nil {
+		t.Fatal("expected non-nil ResolvedFingerprint in result")
+	}
+	if res.ResolvedFingerprint.Primary != localFP.Primary {
+		t.Errorf("ResolvedFingerprint.Primary = %q, want %q", res.ResolvedFingerprint.Primary, localFP.Primary)
+	}
+}
+
+func TestValidator_AutoFingerprint_Mismatch(t *testing.T) {
+	pub, priv, err := GenerateKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	signer, err := NewSigner(priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Issue license locked to a different machine fingerprint
+	claims := Claims{
+		Customer:    Customer{Name: "Acme Corp"},
+		Product:     "gitlab-fleet-governor",
+		Fingerprint: "fp:host:0000000000000000",
+		ExpiresAt:   time.Now().Add(24 * time.Hour),
+	}
+	token, err := signer.Sign(claims)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	val, err := NewValidator(pub,
+		WithProduct("gitlab-fleet-governor"),
+		WithAutoFingerprint(true),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = val.VerifyWithResult(token)
+	if err == nil {
+		t.Fatal("expected ErrFingerprintMismatch, got nil")
+	}
+	if !strings.Contains(err.Error(), "does not match license bound to") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+}
+
+func TestValidator_AutoFingerprint_CustomResolver(t *testing.T) {
+	pub, priv, err := GenerateKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	signer, err := NewSigner(priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mockFP := &MachineFingerprint{
+		Primary:         "fp:k8s:aabbccddeeff0011",
+		Platform:        PlatformKubernetes,
+		CanonicalDigest: "aabbccddeeff0011aabbccddeeff0011aabbccddeeff0011aabbccddeeff0011",
+		ShortDigest:     "aabbccddeeff0011",
+		Components: map[string]string{
+			"cluster_uid": "mock-k8s-uid-9999",
+		},
+	}
+
+	mock := &mockResolver{
+		name:     "custom-k8s",
+		platform: PlatformKubernetes,
+		fp:       mockFP,
+	}
+
+	claims := Claims{
+		Customer:    Customer{Name: "Acme Corp"},
+		Product:     "gitlab-fleet-governor",
+		Fingerprint: "mock-k8s-uid-9999",
+		ExpiresAt:   time.Now().Add(24 * time.Hour),
+	}
+	token, err := signer.Sign(claims)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	val, err := NewValidator(pub,
+		WithProduct("gitlab-fleet-governor"),
+		WithAutoFingerprint(true),
+		WithFingerprintResolver(mock),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := val.VerifyWithResult(token)
+	if err != nil {
+		t.Fatalf("expected custom resolver match, got error: %v", err)
+	}
+	if !res.FingerprintMatched {
+		t.Error("expected FingerprintMatched == true")
+	}
+	if res.ResolvedFingerprint.Primary != mockFP.Primary {
+		t.Errorf("ResolvedFingerprint.Primary = %q, want %q", res.ResolvedFingerprint.Primary, mockFP.Primary)
+	}
+}
+
+func TestValidator_RequireFingerprint(t *testing.T) {
+	pub, priv, err := GenerateKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	signer, err := NewSigner(priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Floating license without fingerprint
+	claims := Claims{
+		Customer:  Customer{Name: "Acme Corp"},
+		Product:   "gitlab-fleet-governor",
+		ExpiresAt: time.Now().Add(24 * time.Hour),
+	}
+	token, err := signer.Sign(claims)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	val, err := NewValidator(pub,
+		WithProduct("gitlab-fleet-governor"),
+		WithRequireFingerprint(true),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = val.VerifyWithResult(token)
+	if err == nil {
+		t.Fatal("expected ErrFingerprintMismatch on missing fingerprint, got nil")
+	}
+}
