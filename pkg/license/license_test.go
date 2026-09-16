@@ -706,3 +706,49 @@ func TestValidator_VerifyEnvAndResolved(t *testing.T) {
 		t.Errorf("expected ID %q, got %q", claims.ID, verifiedFallback.ID)
 	}
 }
+
+func TestClaims_FeatureSlashIsolation(t *testing.T) {
+	t.Parallel()
+
+	claims := Claims{
+		Features: []string{
+			"audit:*",
+			"*-export",
+			"sec/**/report",
+		},
+	}
+
+	// 1. Single wildcard '*' within a segment
+	if !claims.HasFeature("audit:read") {
+		t.Error("expected 'audit:*' to match 'audit:read'")
+	}
+	if !claims.HasFeature("audit:write") {
+		t.Error("expected 'audit:*' to match 'audit:write'")
+	}
+	// Slash traversal must be blocked
+	if claims.HasFeature("audit:read/unauthorized") {
+		t.Error("expected 'audit:*' to NOT match 'audit:read/unauthorized'")
+	}
+
+	// 2. Trailing wildcard '*-export'
+	if !claims.HasFeature("s3-export") {
+		t.Error("expected '*-export' to match 's3-export'")
+	}
+	if claims.HasFeature("unauthorized/s3-export") {
+		t.Error("expected '*-export' to NOT match 'unauthorized/s3-export'")
+	}
+
+	// 3. Globstar '**' recursive feature matching
+	if !claims.HasFeature("sec/report") {
+		t.Error("expected 'sec/**/report' to match 'sec/report'")
+	}
+	if !claims.HasFeature("sec/finance/report") {
+		t.Error("expected 'sec/**/report' to match 'sec/finance/report'")
+	}
+	if !claims.HasFeature("sec/finance/monthly/report") {
+		t.Error("expected 'sec/**/report' to match 'sec/finance/monthly/report'")
+	}
+	if claims.HasFeature("other/sec/report") {
+		t.Error("expected 'sec/**/report' to NOT match 'other/sec/report'")
+	}
+}

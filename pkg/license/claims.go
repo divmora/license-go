@@ -436,19 +436,78 @@ func (c *Claims) HasFeature(feature string) bool {
 	return false
 }
 
-// matchFeaturePattern tests whether name matches pattern, allowing wildcards across separators.
-func matchFeaturePattern(pattern, name string) bool {
-	if matched, _ := path.Match(pattern, name); matched {
-		return true
-	}
-	if strings.Contains(name, "/") || strings.Contains(pattern, "/") {
-		safePattern := strings.ReplaceAll(pattern, "/", "::")
-		safeName := strings.ReplaceAll(name, "/", "::")
-		if matched, _ := path.Match(safePattern, safeName); matched {
-			return true
+// splitPathSegments splits a slash-delimited path into non-empty segments.
+func splitPathSegments(s string) []string {
+	parts := strings.Split(s, "/")
+	res := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p != "" {
+			res = append(res, p)
 		}
 	}
-	return false
+	return res
+}
+
+// matchSegments matches a slice of pattern segments against a slice of candidate segments.
+// Individual segments match using path.Match (where '*' matches any sequence of non-'/' characters).
+// The recursive wildcard segment '**' matches zero or more directory/hierarchy path segments.
+func matchSegments(pParts, nParts []string) bool {
+	for len(pParts) > 0 {
+		if pParts[0] == "**" {
+			// Collapse consecutive "**"
+			for len(pParts) > 1 && pParts[1] == "**" {
+				pParts = pParts[1:]
+			}
+			// If "**" is the terminal pattern segment, it matches all remaining candidate segments (including zero)
+			if len(pParts) == 1 {
+				return true
+			}
+			// Try matching the remainder of pattern against all possible sub-slices of nParts
+			for i := 0; i <= len(nParts); i++ {
+				if matchSegments(pParts[1:], nParts[i:]) {
+					return true
+				}
+			}
+			return false
+		}
+
+		// Pattern segment is not "**", so it must match exactly one candidate segment
+		if len(nParts) == 0 {
+			return false
+		}
+
+		matched, err := path.Match(pParts[0], nParts[0])
+		if err != nil || !matched {
+			return false
+		}
+
+		pParts = pParts[1:]
+		nParts = nParts[1:]
+	}
+
+	return len(nParts) == 0
+}
+
+// matchFeaturePattern tests whether candidate matches pattern.
+// Wildcards ('*', '?', character classes) match only within a single path segment and never across '/'.
+// The recursive wildcard ('**') matches across path segments.
+func matchFeaturePattern(pattern, name string) bool {
+	if pattern == "*" || pattern == "**" || pattern == "all" {
+		return true
+	}
+	if pattern == name {
+		return true
+	}
+
+	// Fast path: if neither string contains "/" and pattern does not contain "**", use path.Match directly.
+	if !strings.Contains(pattern, "/") && !strings.Contains(name, "/") && !strings.Contains(pattern, "**") {
+		matched, _ := path.Match(pattern, name)
+		return matched
+	}
+
+	pParts := splitPathSegments(pattern)
+	nParts := splitPathSegments(name)
+	return matchSegments(pParts, nParts)
 }
 
 // AssertFeature returns nil if the feature is enabled, or ErrFeatureNotEntitled if not.
@@ -933,14 +992,23 @@ func matchesNamespaceTree(p, t string) bool {
 			return true
 		}
 
-		// If base contains wildcards (e.g. "acme-*/*")
+		// If base contains wildcards (e.g. "acme-*/*" or "**/audit/*")
 		if strings.ContainsAny(base, "*?[") {
-			baseParts := strings.Split(base, "/")
-			tParts := strings.Split(t, "/")
-			if len(tParts) > len(baseParts) {
-				tPrefix := strings.Join(tParts[:len(baseParts)], "/")
-				if matchesNamespaceTree(base, tPrefix) {
-					return true
+			baseParts := splitPathSegments(base)
+			tParts := splitPathSegments(t)
+			if !strings.Contains(base, "**") {
+				if len(tParts) > len(baseParts) {
+					tPrefix := strings.Join(tParts[:len(baseParts)], "/")
+					if matchesNamespaceTree(base, tPrefix) {
+						return true
+					}
+				}
+			} else {
+				for i := 1; i < len(tParts); i++ {
+					tPrefix := strings.Join(tParts[:i], "/")
+					if matchesNamespaceTree(base, tPrefix) {
+						return true
+					}
 				}
 			}
 		}
@@ -958,12 +1026,21 @@ func matchesNamespaceTree(p, t string) bool {
 	}
 
 	// Check descendant matching when pattern has wildcards (e.g. "team-*" matching "team-alpha/backend")
-	pParts := strings.Split(p, "/")
-	tParts := strings.Split(t, "/")
-	if len(tParts) > len(pParts) {
-		tPrefix := strings.Join(tParts[:len(pParts)], "/")
-		if matchFeaturePattern(p, tPrefix) {
-			return true
+	pParts := splitPathSegments(p)
+	tParts := splitPathSegments(t)
+	if !strings.Contains(p, "**") {
+		if len(tParts) > len(pParts) {
+			tPrefix := strings.Join(tParts[:len(pParts)], "/")
+			if matchFeaturePattern(p, tPrefix) {
+				return true
+			}
+		}
+	} else {
+		for i := 1; i < len(tParts); i++ {
+			tPrefix := strings.Join(tParts[:i], "/")
+			if matchFeaturePattern(p, tPrefix) {
+				return true
+			}
 		}
 	}
 

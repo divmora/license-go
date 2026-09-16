@@ -575,3 +575,136 @@ func TestValidator_HierarchicalNamespaceEnforcement(t *testing.T) {
 		t.Errorf("expected ErrScopeMismatch for 'devops-tools/repo', got: %v", err)
 	}
 }
+
+func TestScope_WildcardSlashIsolation(t *testing.T) {
+	t.Parallel()
+
+	// 1. Single wildcard '*' must NOT match across path boundaries
+	scope := &Scope{
+		Namespaces: []string{"*-audit"},
+	}
+
+	// Legitimate single-segment / root match
+	if !scope.IsNamespaceAllowed("corp-audit") {
+		t.Error("expected '*-audit' to match single-segment 'corp-audit'")
+	}
+	if !scope.IsNamespaceAllowed("sec-audit") {
+		t.Error("expected '*-audit' to match single-segment 'sec-audit'")
+	}
+
+	// Legitimate descendants of authorized root
+	if !scope.IsNamespaceAllowed("corp-audit/project-x") {
+		t.Error("expected '*-audit' to authorize descendant 'corp-audit/project-x'")
+	}
+	if !scope.IsNamespaceAllowed("corp-audit/subgroup/project-y") {
+		t.Error("expected '*-audit' to authorize deep descendant 'corp-audit/subgroup/project-y'")
+	}
+
+	// UNAUTHORIZED: Nested targets must NOT match if root is not authorized
+	unauthorizedTargets := []string{
+		"attacker/unauthorized/corp-audit",
+		"attacker/corp-audit",
+		"other-tenant/corp-audit",
+		"gitlab.com/attacker/unauthorized/corp-audit",
+		"gitlab.com/attacker/corp-audit",
+	}
+	for _, target := range unauthorizedTargets {
+		if scope.IsNamespaceAllowed(target) {
+			t.Errorf("SECURITY VULNERABILITY: '*-audit' unexpectedly authorized slash-spanning nested target %q", target)
+		}
+	}
+
+	// 2. Multi-segment pattern boundaries (e.g. "team-*/backend")
+	scopeMulti := &Scope{
+		Namespaces: []string{"team-*/backend"},
+	}
+	if !scopeMulti.IsNamespaceAllowed("team-alpha/backend") {
+		t.Error("expected 'team-*/backend' to match 'team-alpha/backend'")
+	}
+	if !scopeMulti.IsNamespaceAllowed("team-alpha/backend/service") {
+		t.Error("expected 'team-*/backend' to authorize descendant 'team-alpha/backend/service'")
+	}
+
+	unauthorizedMulti := []string{
+		"attacker/team-alpha/backend",
+		"team-alpha/other/backend",
+		"team-alpha/extra/path/backend",
+		"other/team-beta/backend",
+	}
+	for _, target := range unauthorizedMulti {
+		if scopeMulti.IsNamespaceAllowed(target) {
+			t.Errorf("SECURITY VULNERABILITY: 'team-*/backend' unexpectedly authorized %q", target)
+		}
+	}
+
+	// 3. Custom scope dimension and environment slash isolation
+	claimsEnv := Claims{
+		Scope: &Scope{
+			Environments: []string{"*-prod"},
+		},
+	}
+	if !claimsEnv.IsInScope("env", "corp-prod") {
+		t.Error("expected '*-prod' to match 'corp-prod'")
+	}
+	if claimsEnv.IsInScope("env", "attacker/corp-prod") {
+		t.Error("SECURITY VULNERABILITY: '*-prod' unexpectedly matched 'attacker/corp-prod'")
+	}
+
+	claimsCustom := Claims{
+		Scope: &Scope{
+			Custom: map[string][]string{
+				"tier": {"*-enterprise"},
+			},
+		},
+	}
+	if !claimsCustom.IsInScope("tier", "gold-enterprise") {
+		t.Error("expected '*-enterprise' to match 'gold-enterprise'")
+	}
+	if claimsCustom.IsInScope("tier", "attacker/gold-enterprise") {
+		t.Error("SECURITY VULNERABILITY: '*-enterprise' unexpectedly matched 'attacker/gold-enterprise'")
+	}
+}
+
+func TestScope_GlobstarRecursiveWildcard(t *testing.T) {
+	t.Parallel()
+
+	// 1. Leading globstar '**/corp-audit'
+	scopeLeading := &Scope{
+		Namespaces: []string{"**/corp-audit"},
+	}
+	if !scopeLeading.IsNamespaceAllowed("corp-audit") {
+		t.Error("expected '**/corp-audit' to match apex 'corp-audit'")
+	}
+	if !scopeLeading.IsNamespaceAllowed("org/corp-audit") {
+		t.Error("expected '**/corp-audit' to match 'org/corp-audit'")
+	}
+	if !scopeLeading.IsNamespaceAllowed("org/team/corp-audit") {
+		t.Error("expected '**/corp-audit' to match 'org/team/corp-audit'")
+	}
+	if !scopeLeading.IsNamespaceAllowed("org/team/corp-audit/project-1") {
+		t.Error("expected '**/corp-audit' to authorize descendant 'org/team/corp-audit/project-1'")
+	}
+	if scopeLeading.IsNamespaceAllowed("org/team/other-audit") {
+		t.Error("expected '**/corp-audit' to NOT match 'org/team/other-audit'")
+	}
+
+	// 2. Middle globstar 'acme/**/backend'
+	scopeMiddle := &Scope{
+		Namespaces: []string{"acme/**/backend"},
+	}
+	if !scopeMiddle.IsNamespaceAllowed("acme/backend") {
+		t.Error("expected 'acme/**/backend' to match zero-segment 'acme/backend'")
+	}
+	if !scopeMiddle.IsNamespaceAllowed("acme/infra/backend") {
+		t.Error("expected 'acme/**/backend' to match 'acme/infra/backend'")
+	}
+	if !scopeMiddle.IsNamespaceAllowed("acme/infra/sub/backend") {
+		t.Error("expected 'acme/**/backend' to match 'acme/infra/sub/backend'")
+	}
+	if scopeMiddle.IsNamespaceAllowed("attacker/acme/infra/backend") {
+		t.Error("expected 'acme/**/backend' to NOT match 'attacker/acme/infra/backend'")
+	}
+	if scopeMiddle.IsNamespaceAllowed("acme/infra/frontend") {
+		t.Error("expected 'acme/**/backend' to NOT match 'acme/infra/frontend'")
+	}
+}
