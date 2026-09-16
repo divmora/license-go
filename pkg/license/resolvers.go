@@ -2,8 +2,11 @@ package license
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -418,12 +421,23 @@ func WithKubernetesClusterID(id string) KubernetesOption {
 	}
 }
 
+// WithAllowInsecureNamespaceClusterID permits falling back to 'ns:<namespace>' when cluster identity
+// cannot be uniquely established (e.g., in mock test environments where neither the Kubernetes API
+// nor ca.crt is available). This option must NOT be used in production environments due to the risk
+// of worldwide fingerprint collisions across clusters sharing the same namespace.
+func WithAllowInsecureNamespaceClusterID(allow bool) KubernetesOption {
+	return func(r *KubernetesResolver) {
+		r.allowInsecureNamespaceClusterID = allow
+	}
+}
+
 // KubernetesResolver inspects Kubernetes in-cluster secrets and API to extract cluster identity.
 type KubernetesResolver struct {
-	serviceAccountDir string
-	apiBaseURL        string
-	httpClient        *http.Client
-	clusterID         string
+	serviceAccountDir               string
+	apiBaseURL                      string
+	httpClient                      *http.Client
+	clusterID                       string
+	allowInsecureNamespaceClusterID bool
 }
 
 // NewKubernetesResolver constructs a new KubernetesResolver with optional configuration.
@@ -521,12 +535,35 @@ func (r *KubernetesResolver) Resolve(ctx context.Context) (*MachineFingerprint, 
 		}
 	}
 
-	// If still no cluster UID, but we are confirmed in K8s, fallback to namespace identification
+	// Extract in-cluster serviceaccount ca.crt to compute stable cryptographic cluster CA anchor
+	caPath := filepath.Join(r.serviceAccountDir, "ca.crt")
+	var caHash string
+	if caData, err := os.ReadFile(caPath); err == nil && len(caData) > 0 {
+		sum := sha256.Sum256(caData)
+		caHash = hex.EncodeToString(sum[:])
+		components["cluster_ca_hash"] = caHash
+	}
+
+	// Extract token issuer claim (iss) from in-cluster ServiceAccount token if present
+	tokenPath := filepath.Join(r.serviceAccountDir, "token")
+	if tokenData, err := os.ReadFile(tokenPath); err == nil && len(tokenData) > 0 {
+		if iss := extractJWTIssuer(string(tokenData)); iss != "" {
+			components["token_issuer"] = iss
+		}
+	}
+
+	// If cluster UID was not resolved from explicit config, env, /etc/kubernetes/cluster-id, or API,
+	// anchor cluster identity to the unique cluster CA certificate hash to prevent universal namespace collisions.
+	if clusterUID == "" && caHash != "" {
+		clusterUID = "ca:" + caHash[:16]
+	}
+
+	// If still no cluster UID, check whether insecure namespace fallback was explicitly enabled
 	if clusterUID == "" {
-		if namespace != "" {
+		if r.allowInsecureNamespaceClusterID && namespace != "" {
 			clusterUID = "ns:" + namespace
 		} else {
-			return nil, errors.New("kubernetes: unable to determine cluster UID or namespace")
+			return nil, fmt.Errorf("kubernetes: unable to establish unique cluster identity (kube-system UID inaccessible via RBAC and ca.crt unavailable); configure KUBERNETES_CLUSTER_ID or grant view access to kube-system namespace")
 		}
 	}
 
@@ -597,6 +634,28 @@ func (r *KubernetesResolver) queryKubeSystemNamespaceUID(ctx context.Context) (s
 	}
 
 	return ns.Metadata.UID, nil
+}
+
+func extractJWTIssuer(tokenStr string) string {
+	parts := strings.Split(strings.TrimSpace(tokenStr), ".")
+	if len(parts) < 2 {
+		return ""
+	}
+	payloadSegment := parts[1]
+	if m := len(payloadSegment) % 4; m != 0 {
+		payloadSegment += strings.Repeat("=", 4-m)
+	}
+	payloadBytes, err := base64.URLEncoding.DecodeString(payloadSegment)
+	if err != nil {
+		return ""
+	}
+	var claims struct {
+		Iss string `json:"iss"`
+	}
+	if err := json.Unmarshal(payloadBytes, &claims); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(claims.Iss)
 }
 
 // ResolveKubernetesFingerprint resolves the machine identity inside a Kubernetes cluster.

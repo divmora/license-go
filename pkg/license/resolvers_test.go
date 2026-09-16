@@ -2,6 +2,8 @@ package license
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -252,6 +254,209 @@ func TestKubernetesResolver_NotInK8s(t *testing.T) {
 	_, err := resolver.Resolve(context.Background())
 	if err == nil {
 		t.Fatal("expected error when outside kubernetes, got nil")
+	}
+}
+
+func TestKubernetesResolver_RBACRestricted_UsesClusterCA(t *testing.T) {
+	tmpDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmpDir, "namespace"), []byte("production"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Mock ServiceAccount token JWT with issuer claim
+	// Header: {"alg":"RS256","typ":"JWT"} -> eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9
+	// Payload: {"iss":"https://oidc.eks.us-east-1.amazonaws.com/id/CLUSTER123","sub":"system:serviceaccount:production:default"}
+	// Base64 payload: eyJpc3MiOiJodHRwczovL29pZGMuZWtzLnVzLWVhc3QtMS5hbWF6b25hd3MuY29tL2lkL0NMVVNURVIxMjMiLCJzdWIiOiJzeXN0ZW06c2VydmljZWFjY291bnQ6cHJvZHVjdGlvbjpkZWZhdWx0In0
+	jwtToken := "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJodHRwczovL29pZGMuZWtzLnVzLWVhc3QtMS5hbWF6b25hd3MuY29tL2lkL0NMVVNURVIxMjMiLCJzdWIiOiJzeXN0ZW06c2VydmljZWFjY291bnQ6cHJvZHVjdGlvbjpkZWZhdWx0In0.mock-signature"
+	if err := os.WriteFile(filepath.Join(tmpDir, "token"), []byte(jwtToken), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	caCertContent := []byte("-----BEGIN CERTIFICATE-----\nMIICMockClusterRootCertificateAuthorityData1234567890==\n-----END CERTIFICATE-----\n")
+	if err := os.WriteFile(filepath.Join(tmpDir, "ca.crt"), caCertContent, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// API server returns 403 Forbidden (standard in-cluster ServiceAccount RBAC restriction)
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"kind":    "Status",
+			"status":  "Failure",
+			"message": "namespaces \"kube-system\" is forbidden: User cannot get resource namespaces in API group \"\" in the namespace \"kube-system\"",
+			"code":    403,
+		})
+	}))
+	defer apiServer.Close()
+
+	resolver := NewKubernetesResolver(
+		WithKubernetesServiceAccountDir(tmpDir),
+		WithKubernetesAPIBaseURL(apiServer.URL),
+	)
+
+	fp, err := resolver.Resolve(context.Background())
+	if err != nil {
+		t.Fatalf("KubernetesResolver.Resolve() failed on RBAC 403 with ca.crt: %v", err)
+	}
+
+	// Must NOT fall back to predictable "ns:production"
+	if fp.Components["cluster_uid"] == "ns:production" {
+		t.Fatal("vulnerability detected: cluster_uid fell back to predictable 'ns:production'")
+	}
+
+	// Must anchor to cluster CA hash
+	expectedCAHashSum := sha256.Sum256(caCertContent)
+	expectedCAHash := hex.EncodeToString(expectedCAHashSum[:])
+
+	if fp.Components["cluster_ca_hash"] != expectedCAHash {
+		t.Errorf("expected cluster_ca_hash %q, got %q", expectedCAHash, fp.Components["cluster_ca_hash"])
+	}
+	expectedClusterUID := "ca:" + expectedCAHash[:16]
+	if fp.Components["cluster_uid"] != expectedClusterUID {
+		t.Errorf("expected cluster_uid %q, got %q", expectedClusterUID, fp.Components["cluster_uid"])
+	}
+	if fp.Components["token_issuer"] != "https://oidc.eks.us-east-1.amazonaws.com/id/CLUSTER123" {
+		t.Errorf("expected token_issuer to be extracted, got %q", fp.Components["token_issuer"])
+	}
+
+	// Matches validation
+	if !fp.Matches(expectedClusterUID) {
+		t.Errorf("expected match against %q", expectedClusterUID)
+	}
+	if !fp.Matches(expectedCAHash) {
+		t.Errorf("expected match against full CA hash %q", expectedCAHash)
+	}
+	if !fp.Matches("ca:" + expectedCAHash) {
+		t.Errorf("expected match against 'ca:' + full CA hash")
+	}
+	if !fp.Matches(fp.Primary) {
+		t.Errorf("expected match against primary fingerprint %q", fp.Primary)
+	}
+}
+
+func TestKubernetesResolver_MultiClusterCollisionDefense(t *testing.T) {
+	// Simulate Cluster A and Cluster B both running pods in namespace "production"
+	// with identical pod name on linux/amd64, but different cluster CA certificates.
+	t.Setenv("POD_NAME", "api-deployment-789f")
+	t.Setenv("NODE_NAME", "worker-node-1")
+
+	dirClusterA := t.TempDir()
+	_ = os.WriteFile(filepath.Join(dirClusterA, "namespace"), []byte("production"), 0600)
+	caA := []byte("-----BEGIN CERTIFICATE-----\nClusterARootCertificateAuthority\n-----END CERTIFICATE-----")
+	_ = os.WriteFile(filepath.Join(dirClusterA, "ca.crt"), caA, 0600)
+
+	dirClusterB := t.TempDir()
+	_ = os.WriteFile(filepath.Join(dirClusterB, "namespace"), []byte("production"), 0600)
+	caB := []byte("-----BEGIN CERTIFICATE-----\nClusterBRootCertificateAuthorityDifferentKeys\n-----END CERTIFICATE-----")
+	_ = os.WriteFile(filepath.Join(dirClusterB, "ca.crt"), caB, 0600)
+
+	// In both clusters, API returns 403 Forbidden
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer apiServer.Close()
+
+	resA := NewKubernetesResolver(
+		WithKubernetesServiceAccountDir(dirClusterA),
+		WithKubernetesAPIBaseURL(apiServer.URL),
+	)
+	resB := NewKubernetesResolver(
+		WithKubernetesServiceAccountDir(dirClusterB),
+		WithKubernetesAPIBaseURL(apiServer.URL),
+	)
+
+	fpA, errA := resA.Resolve(context.Background())
+	if errA != nil {
+		t.Fatalf("resA.Resolve failed: %v", errA)
+	}
+
+	fpB, errB := resB.Resolve(context.Background())
+	if errB != nil {
+		t.Fatalf("resB.Resolve failed: %v", errB)
+	}
+
+	// The fingerprints MUST be completely distinct!
+	if fpA.Primary == fpB.Primary {
+		t.Fatalf("collision disaster: Cluster A and Cluster B produced identical Primary fingerprint: %s", fpA.Primary)
+	}
+	if fpA.CanonicalDigest == fpB.CanonicalDigest {
+		t.Fatalf("collision disaster: Cluster A and Cluster B produced identical CanonicalDigest: %s", fpA.CanonicalDigest)
+	}
+	if fpA.ShortDigest == fpB.ShortDigest {
+		t.Fatalf("collision disaster: Cluster A and Cluster B produced identical ShortDigest: %s", fpA.ShortDigest)
+	}
+	if fpA.Components["cluster_uid"] == fpB.Components["cluster_uid"] {
+		t.Fatalf("collision: cluster_uids matched: %s", fpA.Components["cluster_uid"])
+	}
+
+	// Cross-cluster lock verification
+	if fpB.Matches(fpA.Primary) {
+		t.Fatal("Cluster B falsely matched Cluster A primary fingerprint")
+	}
+	if fpB.Matches(fpA.Components["cluster_uid"]) {
+		t.Fatal("Cluster B falsely matched Cluster A cluster_uid")
+	}
+}
+
+func TestKubernetesResolver_MissingCAAndAPI_FailsClosed(t *testing.T) {
+	tmpDir := t.TempDir()
+	_ = os.WriteFile(filepath.Join(tmpDir, "namespace"), []byte("production"), 0600)
+	// ca.crt is intentionally absent
+	// token is intentionally absent
+
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer apiServer.Close()
+
+	// 1. By default, must fail closed rather than generating a universal collision
+	resFail := NewKubernetesResolver(
+		WithKubernetesServiceAccountDir(tmpDir),
+		WithKubernetesAPIBaseURL(apiServer.URL),
+	)
+	_, err := resFail.Resolve(context.Background())
+	if err == nil {
+		t.Fatal("expected Resolve() to fail closed when API returns 403 and ca.crt is absent, got nil")
+	}
+	if !strings.Contains(err.Error(), "unable to establish unique cluster identity") {
+		t.Errorf("expected error to mention 'unable to establish unique cluster identity', got: %v", err)
+	}
+
+	// 2. Opt-in: WithAllowInsecureNamespaceClusterID(true) allows insecure fallback
+	resOptIn := NewKubernetesResolver(
+		WithKubernetesServiceAccountDir(tmpDir),
+		WithKubernetesAPIBaseURL(apiServer.URL),
+		WithAllowInsecureNamespaceClusterID(true),
+	)
+	fpOptIn, err := resOptIn.Resolve(context.Background())
+	if err != nil {
+		t.Fatalf("expected opt-in to succeed, got: %v", err)
+	}
+	if fpOptIn.Components["cluster_uid"] != "ns:production" {
+		t.Errorf("expected opt-in cluster_uid 'ns:production', got %q", fpOptIn.Components["cluster_uid"])
+	}
+}
+
+func TestKubernetesResolver_ExplicitClusterIDPrecedence(t *testing.T) {
+	tmpDir := t.TempDir()
+	_ = os.WriteFile(filepath.Join(tmpDir, "namespace"), []byte("prod"), 0600)
+	_ = os.WriteFile(filepath.Join(tmpDir, "ca.crt"), []byte("ca-content"), 0600)
+
+	res := NewKubernetesResolver(
+		WithKubernetesServiceAccountDir(tmpDir),
+		WithKubernetesClusterID("cluster-custom-enterprise-id"),
+	)
+	fp, err := res.Resolve(context.Background())
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+	if fp.Components["cluster_uid"] != "cluster-custom-enterprise-id" {
+		t.Errorf("expected cluster_uid 'cluster-custom-enterprise-id', got %q", fp.Components["cluster_uid"])
+	}
+	// CA hash is still captured as secondary metadata
+	if fp.Components["cluster_ca_hash"] == "" {
+		t.Error("expected cluster_ca_hash to be populated in components")
 	}
 }
 

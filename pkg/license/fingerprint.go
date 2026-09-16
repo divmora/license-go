@@ -86,9 +86,9 @@ func (f *MachineFingerprint) Matches(claimed string) bool {
 		return true
 	}
 
-	// 2. Prefix-stripped match (strip "fp:host:", "fp:aws:", "fp:lambda:", "fp:k8s:", "fp:generic:", "fp:", "sha256:")
+	// 2. Prefix-stripped match (strip "fp:host:", "fp:aws:", "fp:lambda:", "fp:k8s:", "fp:generic:", "fp:", "sha256:", "ca:")
 	clean := claimed
-	for _, prefix := range []string{"fp:host:", "fp:aws:", "fp:lambda:", "fp:k8s:", "fp:generic:", "fp:", "sha256:"} {
+	for _, prefix := range []string{"fp:host:", "fp:aws:", "fp:lambda:", "fp:k8s:", "fp:generic:", "fp:", "sha256:", "ca:"} {
 		if strings.HasPrefix(strings.ToLower(clean), prefix) {
 			clean = clean[len(prefix):]
 			break
@@ -104,9 +104,12 @@ func (f *MachineFingerprint) Matches(claimed string) bool {
 		if val == "" {
 			continue
 		}
-		// Match against system_uuid, machine_id, cluster_uid, instance_id, function_name, function_arn
-		if k == "system_uuid" || k == "machine_id" || k == "cluster_uid" || k == "instance_id" || k == "function_name" || k == "function_arn" {
+		// Match against system_uuid, machine_id, cluster_uid, instance_id, function_name, function_arn, cluster_ca_hash
+		if k == "system_uuid" || k == "machine_id" || k == "cluster_uid" || k == "instance_id" || k == "function_name" || k == "function_arn" || k == "cluster_ca_hash" {
 			if strings.EqualFold(claimed, val) || strings.EqualFold(clean, val) {
+				return true
+			}
+			if strings.HasPrefix(strings.ToLower(val), "ca:") && strings.EqualFold(clean, val[3:]) {
 				return true
 			}
 		}
@@ -231,6 +234,9 @@ func computeCanonicalDigest(platform Platform, components map[string]string) (st
 		}
 		if ns := components["namespace"]; ns != "" {
 			parts = append(parts, "namespace:"+ns)
+		}
+		if ca := components["cluster_ca_hash"]; ca != "" {
+			parts = append(parts, "ca:"+ca)
 		}
 	default:
 		// High-stability hardware identifiers take priority
