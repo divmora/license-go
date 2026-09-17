@@ -1,5 +1,34 @@
 # Changelog
 
+## [1.0.0](https://github.com/divmora/license-go/compare/v0.7.0...v1.0.0) (2026-09-17)
+
+
+### ⚠ BREAKING CHANGES
+
+* decouple license issuance and encapsulate internal subsystems
+
+### Features
+
+* **claims, bsl:** runtime schema validation, simulation BSL grant override, and performance benchmarks ([c6363bf](https://github.com/divmora/license-go/commit/c6363bfcd6e46ecdbb9dfef5b8eaa93336606f20))
+* **cli:** introduce domain-grouped command routing with backward-compatible shortcuts ([52db767](https://github.com/divmora/license-go/commit/52db767cca46261025ae01cbbed1589defd295ac))
+* **provenance:** harden release attestation and add bi-directional build date skew ([408ab24](https://github.com/divmora/license-go/commit/408ab24d44a47b744c8c1a5161608f15dd4c7ba5))
+* **security:** separate keyring maps, add fail-closed scope, and harden warn-only policy ([7002a6e](https://github.com/divmora/license-go/commit/7002a6e74a970c9aa206627fb2e1d76a71249c2d))
+
+
+### Bug Fixes
+
+* **security:** constant-time fingerprint, 128-bit key fingerprint, version segment wildcards, and parser hardening ([7901f65](https://github.com/divmora/license-go/commit/7901f65c265a3eba40540dd231ebc73ed386e70c))
+* **security:** prevent symlink substitution, degraded downgrade attacks, and env spoofing ([#30](https://github.com/divmora/license-go/issues/30), [#31](https://github.com/divmora/license-go/issues/31), [#34](https://github.com/divmora/license-go/issues/34)) ([07aa117](https://github.com/divmora/license-go/commit/07aa1175d5f8eea379702061b564e189baf1df7c))
+* **security:** reconcile Manager BSL conversion and expiration with clock defense ([#27](https://github.com/divmora/license-go/issues/27), [#28](https://github.com/divmora/license-go/issues/28), [#29](https://github.com/divmora/license-go/issues/29)) ([1fef733](https://github.com/divmora/license-go/commit/1fef73321f4dc9f66671649b18ce4a170c664089))
+* **validator:** align clock skew tolerance with StatusAt lifecycle state reporting ([#18](https://github.com/divmora/license-go/issues/18)) ([63792bc](https://github.com/divmora/license-go/commit/63792bca7ccd39f33e2b26ca999cac5d872cea7e))
+* **validator:** enforce claims.Environment when validator currentEnvironment is empty ([#16](https://github.com/divmora/license-go/issues/16)) ([88fdbfa](https://github.com/divmora/license-go/commit/88fdbfafca14853da28d2688a584a6ee5f96bd6d))
+* **validator:** reject offline backward clock tampering prior to binary build date ([#17](https://github.com/divmora/license-go/issues/17)) ([d4ff4e4](https://github.com/divmora/license-go/commit/d4ff4e47d74da1887b8071f7381a8e1422ba5061))
+
+
+### Code Refactoring
+
+* decouple license issuance and encapsulate internal subsystems ([5c01ad6](https://github.com/divmora/license-go/commit/5c01ad6d1accef67a10c6d94de3bad42e950b606))
+
 ## [0.7.0](https://github.com/divmora/license-go/compare/v0.6.0...v0.7.0) (2026-09-16)
 
 
