@@ -46,8 +46,30 @@ type BSLUsageRequest struct {
 	// Time is the reference evaluation timestamp. If zero, current time is used.
 	Time time.Time `json:"time,omitempty"`
 
+	// DryRun indicates execution in non-destructive simulation or dry-run mode (e.g. CLI --dry-run).
+	DryRun bool `json:"dry_run,omitempty"`
+
+	// Simulation indicates execution in testing or simulation mode.
+	Simulation bool `json:"simulation,omitempty"`
+
 	// Metadata holds optional arbitrary operational context.
 	Metadata map[string]string `json:"metadata,omitempty"`
+}
+
+// IsDryRun reports whether the request represents a non-destructive dry-run or simulation mode,
+// either via the DryRun/Simulation boolean fields or via metadata (e.g. "dry_run": "true", "simulation": "true").
+func (req BSLUsageRequest) IsDryRun() bool {
+	if req.DryRun || req.Simulation {
+		return true
+	}
+	if req.Metadata != nil {
+		for _, k := range []string{"dry_run", "simulation", "dry-run", "dryrun"} {
+			if strings.EqualFold(req.Metadata[k], "true") || strings.EqualFold(req.Metadata[k], "1") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // BSLGrantEvaluation records the detailed evaluation outcome for a single BSLAdditionalUseGrant.
@@ -142,9 +164,28 @@ func (g *BSLAdditionalUseGrant) Evaluate(req BSLUsageRequest) BSLGrantEvaluation
 	}
 
 	reqEnv := strings.TrimSpace(req.Environment)
+	isDryRun := req.IsDryRun()
 
-	// 1. Environment exclusions
-	if reqEnv != "" && len(g.ExcludedEnvironments) > 0 {
+	// 1. Custom MatchFunc priority evaluation
+	// Evaluated before environment checks to allow custom predicates or simulation metadata
+	// to bypass environment blacklists (e.g. non-destructive dry-run against production fleets).
+	matchFuncEvaluated := false
+	matchFuncAllowed := false
+	matchFuncReason := ""
+	if g.MatchFunc != nil {
+		matchFuncEvaluated = true
+		matchFuncAllowed, matchFuncReason = g.MatchFunc(req)
+		if !matchFuncAllowed && matchFuncReason != "" {
+			return BSLGrantEvaluation{
+				GrantName: grantName,
+				Matched:   false,
+				Reason:    matchFuncReason,
+			}
+		}
+	}
+
+	// 2. Environment exclusions (bypassed if request is dry-run/simulation or explicitly authorized by MatchFunc)
+	if !isDryRun && !matchFuncAllowed && reqEnv != "" && len(g.ExcludedEnvironments) > 0 {
 		for _, exc := range g.ExcludedEnvironments {
 			if strings.EqualFold(strings.TrimSpace(exc), reqEnv) {
 				return BSLGrantEvaluation{
@@ -156,8 +197,8 @@ func (g *BSLAdditionalUseGrant) Evaluate(req BSLUsageRequest) BSLGrantEvaluation
 		}
 	}
 
-	// 2. Allowed environments check
-	if len(g.AllowedEnvironments) > 0 && !containsCaseInsensitive(g.AllowedEnvironments, "*") {
+	// 3. Allowed environments check (bypassed if request is dry-run/simulation or explicitly authorized by MatchFunc)
+	if !isDryRun && !matchFuncAllowed && len(g.AllowedEnvironments) > 0 && !containsCaseInsensitive(g.AllowedEnvironments, "*") {
 		if reqEnv == "" {
 			return BSLGrantEvaluation{
 				GrantName: grantName,
@@ -174,7 +215,7 @@ func (g *BSLAdditionalUseGrant) Evaluate(req BSLUsageRequest) BSLGrantEvaluation
 		}
 	}
 
-	// 3. Excluded features check (commercial-only features)
+	// 4. Excluded features check (commercial-only features)
 	if len(g.ExcludedFeatures) > 0 && len(req.Features) > 0 {
 		var disallowed []string
 		for _, feat := range req.Features {
@@ -197,7 +238,7 @@ func (g *BSLAdditionalUseGrant) Evaluate(req BSLUsageRequest) BSLGrantEvaluation
 		}
 	}
 
-	// 4. Allowed features check
+	// 5. Allowed features check
 	if len(g.AllowedFeatures) > 0 && !containsCaseInsensitive(g.AllowedFeatures, "*") && !containsCaseInsensitive(g.AllowedFeatures, "all") && len(req.Features) > 0 {
 		var unentitled []string
 		for _, feat := range req.Features {
@@ -220,7 +261,7 @@ func (g *BSLAdditionalUseGrant) Evaluate(req BSLUsageRequest) BSLGrantEvaluation
 		}
 	}
 
-	// 5. Quota limits check
+	// 6. Quota limits check
 	if len(g.Limits) > 0 && len(req.Usage) > 0 {
 		exceeded := make(map[string]int64)
 		var limitReasons []string
@@ -245,25 +286,33 @@ func (g *BSLAdditionalUseGrant) Evaluate(req BSLUsageRequest) BSLGrantEvaluation
 		}
 	}
 
-	// 6. Custom MatchFunc
-	if g.MatchFunc != nil {
-		allowed, matchReason := g.MatchFunc(req)
-		if !allowed {
-			if matchReason == "" {
-				matchReason = fmt.Sprintf("custom predicate for grant %q rejected the usage request", grantName)
+	// 7. Final MatchFunc check if it returned false without an explicit reason
+	if matchFuncEvaluated && !matchFuncAllowed {
+		hasStandardCriteria := len(g.AllowedEnvironments) > 0 || len(g.Limits) > 0 || len(g.AllowedFeatures) > 0
+		if !hasStandardCriteria || (len(g.AllowedEnvironments) > 0 && !containsCaseInsensitive(g.AllowedEnvironments, reqEnv)) {
+			reason := matchFuncReason
+			if reason == "" {
+				reason = fmt.Sprintf("custom predicate for grant %q rejected the usage request", grantName)
 			}
 			return BSLGrantEvaluation{
 				GrantName: grantName,
 				Matched:   false,
-				Reason:    matchReason,
+				Reason:    reason,
 			}
 		}
+	}
+
+	reason := fmt.Sprintf("usage satisfies terms of grant %q", grantName)
+	if matchFuncReason != "" {
+		reason = matchFuncReason
+	} else if isDryRun {
+		reason = fmt.Sprintf("execution in non-destructive dry-run/simulation mode authorized under grant %q", grantName)
 	}
 
 	return BSLGrantEvaluation{
 		GrantName: grantName,
 		Matched:   true,
-		Reason:    fmt.Sprintf("usage satisfies terms of grant %q", grantName),
+		Reason:    reason,
 	}
 }
 

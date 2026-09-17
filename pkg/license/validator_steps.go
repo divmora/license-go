@@ -3,7 +3,6 @@ package license
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -128,10 +127,18 @@ func (v *Validator) verifyClaimsWithDetails(payloadJSON []byte, now time.Time) (
 		}
 	}
 
-	// 2. Decode claims
+	// 2. Validate and decode claims
+	if err := ValidateClaimsPayloadJSON(payloadJSON); err != nil {
+		return nil, nil, false, err
+	}
+
 	var claims Claims
 	if err := json.Unmarshal(payloadJSON, &claims); err != nil {
 		return nil, nil, false, fmt.Errorf("%w: failed to parse claims json: %v", ErrInvalidLicenseFormat, err)
+	}
+
+	if err := claims.ValidateClaimsSchema(); err != nil {
+		return nil, nil, false, err
 	}
 
 	// 3. Product match check
@@ -566,13 +573,17 @@ func Inspect(rawLicense string) (*Claims, error) {
 		return nil, err
 	}
 
+	if err := ValidateClaimsPayloadJSON(payloadJSON); err != nil {
+		return nil, err
+	}
+
 	var claims Claims
 	if err := json.Unmarshal(payloadJSON, &claims); err != nil {
 		return nil, fmt.Errorf("%w: failed to parse claims json: %v", ErrInvalidLicenseFormat, err)
 	}
 
-	if claims.Customer.Name == "" || claims.Product == "" {
-		return nil, errors.New("license: malformed claims payload missing required fields")
+	if err := claims.ValidateClaimsSchema(); err != nil {
+		return nil, err
 	}
 
 	return &claims, nil

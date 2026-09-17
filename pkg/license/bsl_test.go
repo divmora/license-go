@@ -585,3 +585,128 @@ func TestValidator_BSLAdditionalUseGrant_Integration(t *testing.T) {
 		t.Errorf("expected grant 'Community Free Tier', got %s", entResult.MatchingGrant)
 	}
 }
+
+func TestBSLAdditionalUseGrant_DryRunAndSimulation(t *testing.T) {
+	t.Parallel()
+
+	grant := license.NewNonProductionGrant("Non-Production Exemption")
+
+	// 1. Production request without dry-run -> Rejected by ExcludedEnvironments
+	evalProd := grant.Evaluate(license.BSLUsageRequest{
+		Environment: "production",
+	})
+	if evalProd.Matched {
+		t.Error("expected production request without dry-run to be rejected")
+	}
+
+	// 2. Production request with DryRun: true -> Authorized
+	evalDryRun := grant.Evaluate(license.BSLUsageRequest{
+		Environment: "production",
+		DryRun:      true,
+	})
+	if !evalDryRun.Matched {
+		t.Fatalf("expected DryRun: true in production to be authorized, got: %s", evalDryRun.Reason)
+	}
+	if !strings.Contains(evalDryRun.Reason, "dry-run/simulation mode") {
+		t.Errorf("expected reason to mention dry-run/simulation mode, got: %s", evalDryRun.Reason)
+	}
+
+	// 3. Production request with Simulation: true -> Authorized
+	evalSim := grant.Evaluate(license.BSLUsageRequest{
+		Environment: "production",
+		Simulation:  true,
+	})
+	if !evalSim.Matched {
+		t.Fatalf("expected Simulation: true in production to be authorized, got: %s", evalSim.Reason)
+	}
+
+	// 4. Production request with metadata["dry_run"] = "true" -> Authorized
+	evalMetaDryRun := grant.Evaluate(license.BSLUsageRequest{
+		Environment: "production",
+		Metadata:    map[string]string{"dry_run": "true"},
+	})
+	if !evalMetaDryRun.Matched {
+		t.Fatalf("expected metadata dry_run: true in production to be authorized, got: %s", evalMetaDryRun.Reason)
+	}
+
+	// 5. Production request with metadata["simulation"] = "true" -> Authorized
+	evalMetaSim := grant.Evaluate(license.BSLUsageRequest{
+		Environment: "production",
+		Metadata:    map[string]string{"simulation": "true"},
+	})
+	if !evalMetaSim.Matched {
+		t.Fatalf("expected metadata simulation: true in production to be authorized, got: %s", evalMetaSim.Reason)
+	}
+}
+
+func TestBSLAdditionalUseGrant_MatchFuncPriorityAndOverride(t *testing.T) {
+	t.Parallel()
+
+	// Consumer configures MatchFunc on NewNonProductionGrant to authorize dry-run simulation against production
+	nonProdGrant := license.NewNonProductionGrant("Non-Production & Simulation Exemption")
+	nonProdGrant.MatchFunc = func(req license.BSLUsageRequest) (bool, string) {
+		if req.Metadata != nil && req.Metadata["dry_run"] == "true" {
+			return true, "Execution is in non-destructive dry-run simulation mode"
+		}
+		return false, ""
+	}
+
+	policy := license.BSLPolicy{
+		ReleaseDate:       time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC),
+		ChangePeriodYears: 3,
+		AdditionalUseGrants: []license.BSLAdditionalUseGrant{
+			nonProdGrant,
+		},
+	}
+
+	// 1. Production with dry_run metadata -> MatchFunc authorizes, overriding ExcludedEnvironments
+	resDryRunProd := policy.EvaluateEntitlement(license.BSLUsageRequest{
+		Environment: "production",
+		Metadata:    map[string]string{"dry_run": "true"},
+		Time:        time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+	})
+	if !resDryRunProd.Authorized {
+		t.Fatalf("expected dry-run simulation against production to be authorized via MatchFunc, got: %s", resDryRunProd.Reason)
+	}
+	if !strings.Contains(resDryRunProd.Reason, "Execution is in non-destructive dry-run simulation mode") {
+		t.Errorf("expected reason to reflect MatchFunc output, got: %s", resDryRunProd.Reason)
+	}
+
+	// 2. Production WITHOUT dry_run metadata -> Rejected by ExcludedEnvironments
+	resProd := policy.EvaluateEntitlement(license.BSLUsageRequest{
+		Environment: "production",
+		Time:        time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+	})
+	if resProd.Authorized {
+		t.Fatalf("expected standard production usage to be rejected without dry-run metadata")
+	}
+
+	// 3. Staging WITHOUT dry_run metadata -> Authorized under standard AllowedEnvironments
+	resStaging := policy.EvaluateEntitlement(license.BSLUsageRequest{
+		Environment: "staging",
+		Time:        time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+	})
+	if !resStaging.Authorized {
+		t.Fatalf("expected staging to be authorized under AllowedEnvironments: %s", resStaging.Reason)
+	}
+
+	// 4. Custom MatchFunc with explicit rejection reason
+	rejectingGrant := license.NewNonProductionGrant("Strict Security Grant")
+	rejectingGrant.MatchFunc = func(req license.BSLUsageRequest) (bool, string) {
+		if req.Metadata != nil && req.Metadata["compromised"] == "true" {
+			return false, "host machine failed security compliance check"
+		}
+		return false, ""
+	}
+
+	evalCompromised := rejectingGrant.Evaluate(license.BSLUsageRequest{
+		Environment: "staging",
+		Metadata:    map[string]string{"compromised": "true"},
+	})
+	if evalCompromised.Matched {
+		t.Error("expected compromised host to be rejected")
+	}
+	if !strings.Contains(evalCompromised.Reason, "host machine failed security compliance check") {
+		t.Errorf("expected explicit rejection reason, got: %s", evalCompromised.Reason)
+	}
+}

@@ -90,6 +90,11 @@ func (s *Signer) Sign(claims Claims) (string, error) {
 		claims.ID = id
 	}
 
+	// Default Plan if not provided
+	if claims.Plan == "" {
+		claims.Plan = "standard"
+	}
+
 	// Default KeyID if configured on signer
 	if claims.KeyID == "" && s.keyID != "" {
 		claims.KeyID = s.keyID
@@ -98,6 +103,11 @@ func (s *Signer) Sign(claims Claims) (string, error) {
 	// Default IssuedAt if not provided
 	if claims.IssuedAt.IsZero() {
 		claims.IssuedAt = time.Now().UTC()
+	}
+
+	// Validate claims schema before signing
+	if err := claims.ValidateClaimsSchema(); err != nil {
+		return "", err
 	}
 
 	payloadJSON, err := json.Marshal(claims)

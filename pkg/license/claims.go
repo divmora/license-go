@@ -2,7 +2,9 @@ package license
 
 import (
 	"crypto/subtle"
+	"encoding/json"
 	"fmt"
+	"net/mail"
 	"path"
 	"strconv"
 	"strings"
@@ -165,6 +167,115 @@ type Claims struct {
 
 	// Metadata contains arbitrary key-value custom properties.
 	Metadata map[string]string `json:"metadata,omitempty"`
+}
+
+// isValidEmail validates an email address string against standard email format requirements.
+func isValidEmail(email string) bool {
+	email = strings.TrimSpace(email)
+	if email == "" {
+		return false
+	}
+	addr, err := mail.ParseAddress(email)
+	if err != nil || addr.Address != email {
+		return false
+	}
+	parts := strings.Split(addr.Address, "@")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return false
+	}
+	domainParts := strings.Split(parts[1], ".")
+	if len(domainParts) < 2 {
+		return false
+	}
+	for _, p := range domainParts {
+		if p == "" {
+			return false
+		}
+	}
+	return true
+}
+
+// ValidateClaimsSchema validates the Claims struct against the DIV1 claims schema constraints
+// specified in SPEC.md §4.1.
+// Returns a typed error wrapping ErrInvalidLicenseFormat on violation.
+func (c *Claims) ValidateClaimsSchema() error {
+	if c.ID == "" {
+		return fmt.Errorf("%w: claims.id is required", ErrInvalidLicenseFormat)
+	}
+	if c.Customer.Name == "" {
+		return fmt.Errorf("%w: claims.customer.name is required", ErrInvalidLicenseFormat)
+	}
+	if c.Product == "" {
+		return fmt.Errorf("%w: claims.product is required", ErrInvalidLicenseFormat)
+	}
+	if c.Plan == "" {
+		return fmt.Errorf("%w: claims.plan is required", ErrInvalidLicenseFormat)
+	}
+	if c.IssuedAt.IsZero() {
+		return fmt.Errorf("%w: claims.issued_at is required", ErrInvalidLicenseFormat)
+	}
+	if c.Customer.Email != "" && !isValidEmail(c.Customer.Email) {
+		return fmt.Errorf("%w: claims.customer.email format is invalid: %q", ErrInvalidLicenseFormat, c.Customer.Email)
+	}
+	return nil
+}
+
+// ValidateClaimsPayloadJSON validates the raw JSON claims bytes against the DIV1 JSON schema constraints
+// specified in SPEC.md §4.1.
+// Validates required fields, object structures, email format, and limit integer type constraints.
+// Returns a typed error wrapping ErrInvalidLicenseFormat on violation.
+func ValidateClaimsPayloadJSON(data []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return fmt.Errorf("%w: failed to parse claims JSON: %v", ErrInvalidLicenseFormat, err)
+	}
+
+	requiredFields := []string{"id", "customer", "product", "plan", "issued_at"}
+	for _, req := range requiredFields {
+		rawVal, exists := raw[req]
+		if !exists || len(rawVal) == 0 || string(rawVal) == "null" || string(rawVal) == `""` {
+			return fmt.Errorf("%w: claims.%s is required", ErrInvalidLicenseFormat, req)
+		}
+	}
+
+	// Validate customer object
+	var custRaw map[string]json.RawMessage
+	if err := json.Unmarshal(raw["customer"], &custRaw); err != nil {
+		return fmt.Errorf("%w: claims.customer must be an object: %v", ErrInvalidLicenseFormat, err)
+	}
+	if nameRaw, ok := custRaw["name"]; !ok || len(nameRaw) == 0 || string(nameRaw) == "null" || string(nameRaw) == `""` {
+		return fmt.Errorf("%w: claims.customer.name is required", ErrInvalidLicenseFormat)
+	}
+
+	// Validate customer.email format if provided
+	if emailRaw, ok := custRaw["email"]; ok && len(emailRaw) > 0 && string(emailRaw) != "null" {
+		var emailStr string
+		if err := json.Unmarshal(emailRaw, &emailStr); err == nil && emailStr != "" {
+			if !isValidEmail(emailStr) {
+				return fmt.Errorf("%w: claims.customer.email format is invalid: %q", ErrInvalidLicenseFormat, emailStr)
+			}
+		}
+	}
+
+	// Validate limits types (must be integers, reject floats like 1.5)
+	if limitsRaw, ok := raw["limits"]; ok && len(limitsRaw) > 0 && string(limitsRaw) != "null" {
+		var limMap map[string]interface{}
+		if err := json.Unmarshal(limitsRaw, &limMap); err != nil {
+			return fmt.Errorf("%w: claims.limits must be a map of integer values: %v", ErrInvalidLicenseFormat, err)
+		}
+		for k, val := range limMap {
+			switch v := val.(type) {
+			case float64:
+				if v != float64(int64(v)) {
+					return fmt.Errorf("%w: claims.limits[%q] must be an integer, got float %v", ErrInvalidLicenseFormat, k, v)
+				}
+			default:
+				return fmt.Errorf("%w: claims.limits[%q] must be an integer", ErrInvalidLicenseFormat, k)
+			}
+		}
+	}
+
+	return nil
 }
 
 // IsPerpetual reports whether the license has no expiration date.

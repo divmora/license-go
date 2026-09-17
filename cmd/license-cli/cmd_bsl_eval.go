@@ -27,6 +27,8 @@ func runBSLEval(args []string) error {
 	exemptEnvsFlag := fs.String("exempt-envs", "", "Comma-separated non-production exempt environments (default: standard non-prod envs; 'none' to disable)")
 	excludedFeatsFlag := fs.String("excluded-features", "", "Features strictly excluded from free tier / requiring commercial license (e.g. 'sso,audit-logs')")
 	timeFlag := fs.String("time", "", "Reference evaluation timestamp (default: current time)")
+	dryRunFlag := fs.Bool("dry-run", false, "Execution in non-destructive dry-run / simulation mode")
+	simFlag := fs.Bool("simulation", false, "Execution in testing / simulation mode")
 	jsonOutput := fs.Bool("json", false, "Output evaluation result in JSON format")
 
 	if err := fs.Parse(args); err != nil {
@@ -162,6 +164,8 @@ func runBSLEval(args []string) error {
 		Usage:       usage,
 		Features:    features,
 		Time:        evalTime,
+		DryRun:      *dryRunFlag,
+		Simulation:  *simFlag,
 	}
 
 	result := policy.EvaluateEntitlement(req)
