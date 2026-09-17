@@ -17,7 +17,10 @@ license-go/
 │       ├── keyring.go          # KeyRing multi-key rotation, bundle management & revocation
 │       ├── bsl.go              # BSL 1.1 Change Date, Apache 2.0 conversion & clock defense
 │       ├── signer.go           # License generation & signing engine (private key)
-│       ├── validator.go        # Client-side verification engine (public key)
+│       ├── validator.go              # Validator struct, options, VerificationResult & accessors
+│       ├── validator_constructors.go # Constructor variants (NewValidator*) & key resolution
+│       ├── validator_clock.go        # Authoritative time, clock skew & tampering defense
+│       ├── validator_steps.go        # 10-step pipeline orchestration (Verify*, claims, scope)
 │       ├── provenance.go       # Cryptographic release attestation & binary provenance engine
 │       ├── status_formatter.go # Standardized CLI status card & quota utilization formatter
 │       ├── manager.go          # Daemon background monitor, file watcher, expiry alerts
