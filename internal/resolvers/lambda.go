@@ -84,17 +84,47 @@ func (r *AWSLambdaResolver) Platform() Platform {
 	return PlatformAWSLambda
 }
 
+func (r *AWSLambdaResolver) hasExplicitOptions() bool {
+	return r.functionName != "" || r.region != "" || r.accountID != "" ||
+		r.functionARN != "" || r.memorySizeMB != "" || r.runtimeEnv != ""
+}
+
+func isLambdaRuntime() bool {
+	fnName := strings.TrimSpace(os.Getenv("AWS_LAMBDA_FUNCTION_NAME"))
+	arn := strings.TrimSpace(os.Getenv("AWS_LAMBDA_FUNCTION_ARN"))
+	if fnName == "" && arn == "" {
+		return false
+	}
+
+	taskRoot := strings.TrimSpace(os.Getenv("LAMBDA_TASK_ROOT"))
+	runtimeAPI := strings.TrimSpace(os.Getenv("AWS_LAMBDA_RUNTIME_API"))
+
+	if taskRoot == "" && runtimeAPI == "" {
+		return false
+	}
+
+	if runtime.GOOS == "linux" && taskRoot != "" && runtimeAPI == "" {
+		if _, err := os.Stat(taskRoot); err != nil {
+			if _, err2 := os.Stat("/var/task"); err2 != nil {
+				if _, err3 := os.Stat("/var/runtime"); err3 != nil {
+					return false
+				}
+			}
+		}
+	}
+
+	return true
+}
+
 // Resolve reads AWS Lambda environment variables and returns a deterministic MachineFingerprint.
 func (r *AWSLambdaResolver) Resolve(ctx context.Context) (*MachineFingerprint, error) {
+	if !r.hasExplicitOptions() && !isLambdaRuntime() {
+		return nil, errors.New("aws-lambda: not running inside an aws lambda environment")
+	}
+
 	fnName := r.functionName
 	if fnName == "" {
 		fnName = strings.TrimSpace(os.Getenv("AWS_LAMBDA_FUNCTION_NAME"))
-	}
-	hasTaskRoot := strings.TrimSpace(os.Getenv("LAMBDA_TASK_ROOT")) != ""
-	hasRuntimeAPI := strings.TrimSpace(os.Getenv("AWS_LAMBDA_RUNTIME_API")) != ""
-
-	if fnName == "" && !hasTaskRoot && !hasRuntimeAPI {
-		return nil, errors.New("aws-lambda: not running inside an aws lambda environment")
 	}
 
 	arn := r.functionARN

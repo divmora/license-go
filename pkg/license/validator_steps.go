@@ -206,7 +206,7 @@ func (v *Validator) verifyClaimsWithDetails(payloadJSON []byte, now time.Time) (
 	}
 
 	// 7. Scope constraints check
-	if err := v.checkScope(&claims); err != nil {
+	if err := v.checkScope(&claims, resolvedFP); err != nil {
 		return nil, resolvedFP, fingerprintMatched, err
 	}
 
@@ -230,7 +230,7 @@ func (v *Validator) verifyClaimsWithDetails(payloadJSON []byte, now time.Time) (
 	return &claims, resolvedFP, fingerprintMatched, nil
 }
 
-func (v *Validator) checkScope(claims *Claims) error {
+func (v *Validator) checkScope(claims *Claims, resolvedFP *MachineFingerprint) error {
 	// 0. Enforce required scope dimensions if configured
 	if len(v.requireScopeDimensions) > 0 {
 		for _, dim := range v.requireScopeDimensions {
@@ -266,8 +266,8 @@ func (v *Validator) checkScope(claims *Claims) error {
 		// 2. Accounts
 		if len(claims.Scope.Accounts) > 0 {
 			targetAccount := v.currentAccount
-			if targetAccount == "" {
-				targetAccount = os.Getenv("AWS_ACCOUNT_ID")
+			if targetAccount == "" && resolvedFP != nil && (resolvedFP.Platform == PlatformAWSLambda || resolvedFP.Platform == PlatformAWSEC2) {
+				targetAccount = resolvedFP.Components["account_id"]
 			}
 			if targetAccount == "" || !claims.IsAccountAllowed(targetAccount) {
 				return &ScopeMismatchError{Dimension: "accounts", Allowed: claims.Scope.Accounts, Target: targetAccount}
@@ -277,8 +277,8 @@ func (v *Validator) checkScope(claims *Claims) error {
 		// 3. Regions
 		if len(claims.Scope.Regions) > 0 {
 			targetRegion := v.currentRegion
-			if targetRegion == "" {
-				targetRegion = resolveRegionFromProcess()
+			if targetRegion == "" && resolvedFP != nil && (resolvedFP.Platform == PlatformAWSLambda || resolvedFP.Platform == PlatformAWSEC2) {
+				targetRegion = resolvedFP.Components["region"]
 			}
 			if targetRegion == "" || !claims.IsRegionAllowed(targetRegion) {
 				return &ScopeMismatchError{Dimension: "regions", Allowed: claims.Scope.Regions, Target: targetRegion}
@@ -329,15 +329,6 @@ func (v *Validator) checkScope(claims *Claims) error {
 
 func resolveEnvFromProcess() string {
 	return helpers.ResolveEnvFromProcess()
-}
-
-func resolveRegionFromProcess() string {
-	for _, k := range []string{"AWS_REGION", "AWS_DEFAULT_REGION"} {
-		if val := strings.TrimSpace(os.Getenv(k)); val != "" {
-			return val
-		}
-	}
-	return ""
 }
 
 // VerifyWithResult validates the license and returns a detailed VerificationResult exposing grace period dynamics.

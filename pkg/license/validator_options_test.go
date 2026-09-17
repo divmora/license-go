@@ -112,25 +112,17 @@ func TestValidator_FileOperationsAndRegionEnv(t *testing.T) {
 		}
 	}
 
-	// 2. resolveRegionFromProcess via AWS_REGION
-	t.Setenv("AWS_REGION", "us-west-2")
-	valRegion, err := NewValidator(pub, WithProduct("gitlab-fleet-governor"))
+	// 2. WithCurrentRegion configuration
+	valRegion, err := NewValidator(pub, WithProduct("gitlab-fleet-governor"), WithCurrentRegion("us-west-2"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	verified, err := valRegion.VerifyFromFile(licPath)
 	if err != nil {
-		t.Fatalf("VerifyFromFile with AWS_REGION failed: %v", err)
+		t.Fatalf("VerifyFromFile with WithCurrentRegion failed: %v", err)
 	}
 	if verified.Customer.Name != "Acme Corp" {
 		t.Errorf("customer mismatch: got %s", verified.Customer.Name)
-	}
-
-	// Fallback to AWS_DEFAULT_REGION
-	t.Setenv("AWS_REGION", "")
-	t.Setenv("AWS_DEFAULT_REGION", "us-west-2")
-	if _, err := valRegion.VerifyFromFile(licPath); err != nil {
-		t.Fatalf("VerifyFromFile with AWS_DEFAULT_REGION failed: %v", err)
 	}
 
 	// Missing file
@@ -180,6 +172,7 @@ func TestValidator_FileOperationsAndRegionEnv(t *testing.T) {
 	valProv, err := NewValidator(pub,
 		WithProduct("gitlab-fleet-governor"),
 		WithCurrentVersion("v1.0.0"),
+		WithCurrentRegion("us-west-2"),
 		WithReleaseAttestationFile(relPath),
 		WithBinaryPath(binPath),
 	)
