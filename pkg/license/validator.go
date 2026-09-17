@@ -1091,6 +1091,9 @@ type VerificationResult struct {
 	// ClockSkew is the measured difference between local system clock and authoritative server time.
 	ClockSkew time.Duration
 
+	// ClockSkewTolerance is the configured tolerance duration for clock drift.
+	ClockSkewTolerance time.Duration
+
 	// EvaluationTime records the exact timestamp (local or authoritative) used for evaluation.
 	EvaluationTime time.Time
 
@@ -1158,7 +1161,11 @@ func (r *VerificationResult) StatusMessage() string {
 		return fmt.Sprintf("Operating in grace period (%d grace days remaining until %s, expired on %s)", graceDays, cutoffStr, expiresStr)
 	}
 
-	return r.Claims.StatusMessageAt(evalTime)
+	skewTol := r.ClockSkewTolerance
+	if skewTol == 0 && r.ClockSkew > 0 {
+		skewTol = r.ClockSkew
+	}
+	return r.Claims.StatusMessageAt(evalTime, skewTol)
 }
 
 // VerifyWithResult validates the license and returns a detailed VerificationResult exposing grace period dynamics.
@@ -1215,6 +1222,7 @@ func (v *Validator) VerifyWithResultAt(rawLicense string, now time.Time) (*Verif
 				ServerTimeAttested: v.serverTimeAttested || !v.authoritativeTime.IsZero(),
 				ServerTime:         v.authoritativeTime.UTC(),
 				ClockSkew:          skew,
+				ClockSkewTolerance: v.clockSkew,
 				EvaluationTime:     evalTime,
 				Provenance:         prov,
 			}, nil
@@ -1234,6 +1242,7 @@ func (v *Validator) VerifyWithResultAt(rawLicense string, now time.Time) (*Verif
 				ServerTimeAttested: v.serverTimeAttested || !v.authoritativeTime.IsZero(),
 				ServerTime:         v.authoritativeTime.UTC(),
 				ClockSkew:          skew,
+				ClockSkewTolerance: v.clockSkew,
 				EvaluationTime:     evalTime,
 				Provenance:         prov,
 			}, nil
@@ -1256,6 +1265,7 @@ func (v *Validator) VerifyWithResultAt(rawLicense string, now time.Time) (*Verif
 			ServerTimeAttested: v.serverTimeAttested || !v.authoritativeTime.IsZero(),
 			ServerTime:         v.authoritativeTime.UTC(),
 			ClockSkew:          skew,
+			ClockSkewTolerance: v.clockSkew,
 			EvaluationTime:     evalTime,
 			Provenance:         prov,
 		}, nil
@@ -1291,6 +1301,7 @@ func (v *Validator) VerifyWithResultAt(rawLicense string, now time.Time) (*Verif
 					ServerTimeAttested: v.serverTimeAttested || !v.authoritativeTime.IsZero(),
 					ServerTime:         v.authoritativeTime.UTC(),
 					ClockSkew:          skew,
+					ClockSkewTolerance: v.clockSkew,
 					EvaluationTime:     evalTime,
 					Provenance:         prov,
 				}, nil
@@ -1333,14 +1344,37 @@ func (v *Validator) VerifyWithResultAt(rawLicense string, now time.Time) (*Verif
 		return nil, err
 	}
 
+	effectiveGrace := v.gracePeriod
+	if claims.GracePeriodDays > 0 {
+		claimGrace := time.Duration(claims.GracePeriodDays) * 24 * time.Hour
+		if claimGrace > effectiveGrace {
+			effectiveGrace = claimGrace
+		}
+	}
+	effectiveExpiry := claims.EffectiveExpiration()
+	if effectiveGrace > 0 && (claims.GracePeriodDays == 0 || effectiveGrace > time.Duration(claims.GracePeriodDays)*24*time.Hour) {
+		effectiveExpiry = claims.ExpiresAt.Add(effectiveGrace)
+	}
+
+	status := claims.StatusWithTolerance(evalTime, v.clockSkew, effectiveGrace)
+	inGracePeriod := (status == StatusGracePeriod)
+
+	graceDaysRemaining := 0
+	if inGracePeriod {
+		cutoff := claims.ExpiresAt.Add(effectiveGrace).Add(v.clockSkew)
+		if diff := cutoff.Sub(evalTime); diff > 0 {
+			graceDaysRemaining = int(diff.Hours() / 24)
+		}
+	}
+
 	return &VerificationResult{
 		Claims:              claims,
-		Status:              claims.StatusAt(evalTime),
+		Status:              status,
 		VerifiedByKeyID:     matchedKey.ID,
 		VerifiedByKeyStatus: matchedKey.Status,
-		InGracePeriod:       claims.IsInGracePeriodAt(evalTime),
-		GraceDaysRemaining:  claims.GraceDaysRemainingAt(evalTime),
-		EffectiveExpiry:     claims.EffectiveExpiration(),
+		InGracePeriod:       inGracePeriod,
+		GraceDaysRemaining:  graceDaysRemaining,
+		EffectiveExpiry:     effectiveExpiry,
 		BSLConverted:        false,
 		EffectiveLicense:    effectiveLic,
 		ChangeDate:          changeDate,
@@ -1348,6 +1382,7 @@ func (v *Validator) VerifyWithResultAt(rawLicense string, now time.Time) (*Verif
 		ServerTimeAttested:  v.serverTimeAttested || !v.authoritativeTime.IsZero(),
 		ServerTime:          v.authoritativeTime.UTC(),
 		ClockSkew:           skew,
+		ClockSkewTolerance:  v.clockSkew,
 		EvaluationTime:      evalTime,
 		Provenance:          prov,
 		ResolvedFingerprint: resolvedFP,

@@ -751,3 +751,188 @@ func TestClaims_FeatureSlashIsolation(t *testing.T) {
 		t.Error("expected 'sec/**/report' to NOT match 'other/sec/report'")
 	}
 }
+
+func TestValidator_ClockSkewStatusAlignment(t *testing.T) {
+	pub, priv, err := GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("GenerateKeyPair failed: %v", err)
+	}
+	signer, err := NewSigner(priv)
+	if err != nil {
+		t.Fatalf("NewSigner failed: %v", err)
+	}
+
+	baseTime := time.Date(2026, time.June, 15, 12, 0, 0, 0, time.UTC)
+	clockSkew := 5 * time.Minute
+
+	// 1. Post-expiration within clock skew (ExpiresAt + 2m with 5m skew tolerance)
+	t.Run("post-expiration within clock skew tolerance", func(t *testing.T) {
+		claims := Claims{
+			Product:   "gitlab-fleet-governor",
+			Customer:  Customer{Name: "Acme Corp"},
+			ExpiresAt: baseTime,
+		}
+		token, err := signer.Sign(claims)
+		if err != nil {
+			t.Fatalf("Sign failed: %v", err)
+		}
+
+		validator, err := NewValidator(pub,
+			WithProduct("gitlab-fleet-governor"),
+			WithClockSkew(clockSkew),
+		)
+		if err != nil {
+			t.Fatalf("NewValidator failed: %v", err)
+		}
+
+		evalTime := baseTime.Add(2 * time.Minute)
+		res, err := validator.VerifyWithResultAt(token, evalTime)
+		if err != nil {
+			t.Fatalf("expected verification to succeed within clock skew tolerance, got: %v", err)
+		}
+
+		// Status must be ACTIVE, NOT EXPIRED!
+		if res.Status != StatusActive {
+			t.Errorf("expected Status %v, got %v", StatusActive, res.Status)
+		}
+		if res.InGracePeriod {
+			t.Errorf("expected InGracePeriod to be false")
+		}
+		if !res.Claims.IsActiveAt(evalTime, clockSkew) {
+			t.Errorf("expected Claims.IsActiveAt to be true within clock skew")
+		}
+		if res.Claims.IsExpiredAt(evalTime, clockSkew) {
+			t.Errorf("expected Claims.IsExpiredAt to be false within clock skew")
+		}
+		if !strings.HasPrefix(res.StatusMessage(), "Active (less than 1 day remaining") {
+			t.Errorf("expected Active status message, got: %q", res.StatusMessage())
+		}
+	})
+
+	// 2. Pre-NotBefore within clock skew (NotBefore - 2m with 5m skew tolerance)
+	t.Run("pre-NotBefore within clock skew tolerance", func(t *testing.T) {
+		claims := Claims{
+			Product:   "gitlab-fleet-governor",
+			Customer:  Customer{Name: "Acme Corp"},
+			NotBefore: baseTime,
+			ExpiresAt: baseTime.Add(30 * 24 * time.Hour),
+		}
+		token, err := signer.Sign(claims)
+		if err != nil {
+			t.Fatalf("Sign failed: %v", err)
+		}
+
+		validator, err := NewValidator(pub,
+			WithProduct("gitlab-fleet-governor"),
+			WithClockSkew(clockSkew),
+		)
+		if err != nil {
+			t.Fatalf("NewValidator failed: %v", err)
+		}
+
+		evalTime := baseTime.Add(-2 * time.Minute)
+		res, err := validator.VerifyWithResultAt(token, evalTime)
+		if err != nil {
+			t.Fatalf("expected verification to succeed within NotBefore clock skew tolerance, got: %v", err)
+		}
+
+		if res.Status != StatusActive {
+			t.Errorf("expected Status %v, got %v", StatusActive, res.Status)
+		}
+		if !res.Claims.IsActiveAt(evalTime, clockSkew) {
+			t.Errorf("expected Claims.IsActiveAt to be true")
+		}
+		if res.Claims.StatusAt(evalTime, clockSkew) != StatusActive {
+			t.Errorf("expected Claims.StatusAt to be StatusActive with skew")
+		}
+	})
+
+	// 3. Grace period cutoff with clock skew (Grace cutoff + 2m with 5m skew tolerance)
+	t.Run("grace period cutoff with clock skew tolerance", func(t *testing.T) {
+		claims := Claims{
+			Product:         "gitlab-fleet-governor",
+			Customer:        Customer{Name: "Acme Corp"},
+			ExpiresAt:       baseTime.Add(-7 * 24 * time.Hour),
+			GracePeriodDays: 7,
+		}
+		token, err := signer.Sign(claims)
+		if err != nil {
+			t.Fatalf("Sign failed: %v", err)
+		}
+
+		validator, err := NewValidator(pub,
+			WithProduct("gitlab-fleet-governor"),
+			WithClockSkew(clockSkew),
+		)
+		if err != nil {
+			t.Fatalf("NewValidator failed: %v", err)
+		}
+
+		// baseTime is exactly the grace cutoff (ExpiresAt + 7 days)
+		evalTime := baseTime.Add(2 * time.Minute) // 2 minutes past grace cutoff, within 5m skew
+		res, err := validator.VerifyWithResultAt(token, evalTime)
+		if err != nil {
+			t.Fatalf("expected verification to succeed within grace cutoff clock skew tolerance, got: %v", err)
+		}
+
+		if res.Status != StatusGracePeriod {
+			t.Errorf("expected Status %v, got %v", StatusGracePeriod, res.Status)
+		}
+		if !res.InGracePeriod {
+			t.Errorf("expected InGracePeriod to be true")
+		}
+		if !strings.Contains(res.StatusMessage(), "Operating in grace period") {
+			t.Errorf("expected grace period status message, got: %q", res.StatusMessage())
+		}
+	})
+
+	// 4. Hard expiration exceeding clock skew (ExpiresAt + 6m with 5m skew tolerance)
+	t.Run("hard expiration beyond clock skew tolerance", func(t *testing.T) {
+		claims := Claims{
+			Product:   "gitlab-fleet-governor",
+			Customer:  Customer{Name: "Acme Corp"},
+			ExpiresAt: baseTime,
+		}
+		token, err := signer.Sign(claims)
+		if err != nil {
+			t.Fatalf("Sign failed: %v", err)
+		}
+
+		validator, err := NewValidator(pub,
+			WithProduct("gitlab-fleet-governor"),
+			WithClockSkew(clockSkew),
+		)
+		if err != nil {
+			t.Fatalf("NewValidator failed: %v", err)
+		}
+
+		evalTime := baseTime.Add(6 * time.Minute)
+		_, err = validator.VerifyWithResultAt(token, evalTime)
+		if !errors.Is(err, ErrExpired) {
+			t.Fatalf("expected ErrExpired when exceeding clock skew, got: %v", err)
+		}
+
+		// With WithAllowExpired(true)
+		valAllow, _ := NewValidator(pub,
+			WithProduct("gitlab-fleet-governor"),
+			WithClockSkew(clockSkew),
+			WithAllowExpired(true),
+		)
+		resExpired, err := valAllow.VerifyWithResultAt(token, evalTime)
+		if err != nil {
+			t.Fatalf("expected WithAllowExpired to succeed, got: %v", err)
+		}
+		if resExpired.Status != StatusExpired {
+			t.Errorf("expected StatusExpired, got %v", resExpired.Status)
+		}
+		if resExpired.Claims.IsActiveAt(evalTime, clockSkew) {
+			t.Errorf("expected Claims.IsActiveAt to be false beyond clock skew")
+		}
+		if !resExpired.Claims.IsExpiredAt(evalTime, clockSkew) {
+			t.Errorf("expected Claims.IsExpiredAt to be true beyond clock skew")
+		}
+		if !strings.HasPrefix(resExpired.StatusMessage(), "License expired on") {
+			t.Errorf("expected expired status message, got: %q", resExpired.StatusMessage())
+		}
+	})
+}

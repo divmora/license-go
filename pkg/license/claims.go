@@ -190,13 +190,19 @@ func (c *Claims) IsInGracePeriod() bool {
 	return c.IsInGracePeriodAt(time.Now())
 }
 
-// IsInGracePeriodAt reports whether the license is in grace period at reference time t.
-func (c *Claims) IsInGracePeriodAt(t time.Time) bool {
+// IsInGracePeriodAt reports whether the license is in grace period at reference time t,
+// optionally accounting for clock skew tolerance.
+func (c *Claims) IsInGracePeriodAt(t time.Time, skew ...time.Duration) bool {
 	if c.IsPerpetual() || c.GracePeriodDays <= 0 {
 		return false
 	}
-	cutoff := c.EffectiveExpiration()
-	return t.After(c.ExpiresAt) && (t.Before(cutoff) || t.Equal(cutoff))
+	var clockSkew time.Duration
+	if len(skew) > 0 && skew[0] > 0 {
+		clockSkew = skew[0]
+	}
+	effectiveExpiresAt := c.ExpiresAt.Add(clockSkew)
+	cutoff := c.EffectiveExpiration().Add(clockSkew)
+	return t.After(effectiveExpiresAt) && (t.Before(cutoff) || t.Equal(cutoff))
 }
 
 // GraceDaysRemaining returns the number of full grace period days remaining if the license
@@ -205,12 +211,17 @@ func (c *Claims) GraceDaysRemaining() int {
 	return c.GraceDaysRemainingAt(time.Now())
 }
 
-// GraceDaysRemainingAt returns the number of full grace period days remaining at reference time t.
-func (c *Claims) GraceDaysRemainingAt(t time.Time) int {
-	if !c.IsInGracePeriodAt(t) {
+// GraceDaysRemainingAt returns the number of full grace period days remaining at reference time t,
+// optionally accounting for clock skew tolerance.
+func (c *Claims) GraceDaysRemainingAt(t time.Time, skew ...time.Duration) int {
+	if !c.IsInGracePeriodAt(t, skew...) {
 		return 0
 	}
-	diff := c.EffectiveExpiration().Sub(t)
+	var clockSkew time.Duration
+	if len(skew) > 0 && skew[0] > 0 {
+		clockSkew = skew[0]
+	}
+	diff := c.EffectiveExpiration().Add(clockSkew).Sub(t)
 	if diff <= 0 {
 		return 0
 	}
@@ -223,12 +234,17 @@ func (c *Claims) IsExpired() bool {
 	return c.IsExpiredAt(time.Now())
 }
 
-// IsExpiredAt reports whether the license has passed its initial expiration date at time t.
-func (c *Claims) IsExpiredAt(t time.Time) bool {
+// IsExpiredAt reports whether the license has passed its initial expiration date at time t,
+// optionally accounting for clock skew tolerance.
+func (c *Claims) IsExpiredAt(t time.Time, skew ...time.Duration) bool {
 	if c.IsPerpetual() {
 		return false
 	}
-	return t.After(c.ExpiresAt)
+	var clockSkew time.Duration
+	if len(skew) > 0 && skew[0] > 0 {
+		clockSkew = skew[0]
+	}
+	return t.After(c.ExpiresAt.Add(clockSkew))
 }
 
 // IsActive reports whether the license is currently operational (valid NotBefore and before EffectiveExpiration).
@@ -236,15 +252,23 @@ func (c *Claims) IsActive() bool {
 	return c.IsActiveAt(time.Now())
 }
 
-// IsActiveAt reports whether the license is operational at time t.
-func (c *Claims) IsActiveAt(t time.Time) bool {
-	if !c.NotBefore.IsZero() && t.Before(c.NotBefore) {
-		return false
+// IsActiveAt reports whether the license is operational at time t,
+// optionally accounting for clock skew tolerance.
+func (c *Claims) IsActiveAt(t time.Time, skew ...time.Duration) bool {
+	var clockSkew time.Duration
+	if len(skew) > 0 && skew[0] > 0 {
+		clockSkew = skew[0]
+	}
+	if !c.NotBefore.IsZero() {
+		effectiveNotBefore := c.NotBefore.Add(-clockSkew)
+		if t.Before(effectiveNotBefore) {
+			return false
+		}
 	}
 	if c.IsPerpetual() {
 		return true
 	}
-	return !c.IsExpiredAt(t) || c.IsInGracePeriodAt(t)
+	return !c.IsExpiredAt(t, clockSkew) || c.IsInGracePeriodAt(t, clockSkew)
 }
 
 // Status represents the operational lifecycle state of a license.
@@ -266,21 +290,50 @@ func (c *Claims) Status() Status {
 	return c.StatusAt(time.Now())
 }
 
-// StatusAt returns the operational lifecycle Status of the license at reference time t.
-func (c *Claims) StatusAt(t time.Time) Status {
-	if !c.NotBefore.IsZero() && t.Before(c.NotBefore) {
-		return StatusNotYetValid
+// StatusWithTolerance returns the operational lifecycle Status of the license at reference time t,
+// incorporating clock skew tolerance and validator-level extra grace period.
+func (c *Claims) StatusWithTolerance(t time.Time, clockSkew time.Duration, extraGrace time.Duration) Status {
+	if !c.NotBefore.IsZero() {
+		effectiveNotBefore := c.NotBefore.Add(-clockSkew)
+		if t.Before(effectiveNotBefore) {
+			return StatusNotYetValid
+		}
 	}
 	if c.IsPerpetual() {
 		return StatusActive
 	}
-	if c.IsInGracePeriodAt(t) {
-		return StatusGracePeriod
+
+	effectiveGrace := extraGrace
+	if c.GracePeriodDays > 0 {
+		claimGrace := time.Duration(c.GracePeriodDays) * 24 * time.Hour
+		if claimGrace > effectiveGrace {
+			effectiveGrace = claimGrace
+		}
 	}
-	if t.After(c.EffectiveExpiration()) {
+
+	if effectiveGrace > 0 {
+		effectiveExpiresAt := c.ExpiresAt.Add(clockSkew)
+		cutoff := c.ExpiresAt.Add(effectiveGrace).Add(clockSkew)
+		if t.After(effectiveExpiresAt) && (t.Before(cutoff) || t.Equal(cutoff)) {
+			return StatusGracePeriod
+		}
+	}
+
+	effectiveExpiry := c.ExpiresAt.Add(clockSkew).Add(effectiveGrace)
+	if t.After(effectiveExpiry) {
 		return StatusExpired
 	}
 	return StatusActive
+}
+
+// StatusAt returns the operational lifecycle Status of the license at reference time t,
+// optionally accounting for clock skew tolerance.
+func (c *Claims) StatusAt(t time.Time, skew ...time.Duration) Status {
+	var clockSkew time.Duration
+	if len(skew) > 0 && skew[0] > 0 {
+		clockSkew = skew[0]
+	}
+	return c.StatusWithTolerance(t, clockSkew, 0)
 }
 
 // DaysRemaining returns the number of full days remaining before expiration.
@@ -309,25 +362,33 @@ func (c *Claims) StatusMessage() string {
 	return c.StatusMessageAt(time.Now())
 }
 
-// StatusMessageAt returns a standardized human-readable description of the license status at reference time t.
+// StatusMessageAt returns a standardized human-readable description of the license status at reference time t,
+// optionally accounting for clock skew tolerance.
 // Descriptions cover:
 //   - Perpetual licenses: "Perpetual license (does not expire)"
 //   - Future NotBefore: "License is not yet valid (valid starting <NotBefore>)"
 //   - Grace period: "Operating in grace period (<N> grace days remaining until <cutoff>, expired on <ExpiresAt>)"
 //   - Expired: "License expired on <ExpiresAt>" or "License expired on <ExpiresAt> (grace period ended <cutoff>)"
 //   - Active: "Active (<N> days remaining, expires <ExpiresAt>)" (or "Active (1 day remaining, ...)" or "Active (less than 1 day remaining, ...)")
-func (c *Claims) StatusMessageAt(t time.Time) string {
+func (c *Claims) StatusMessageAt(t time.Time, skew ...time.Duration) string {
 	if c == nil {
 		return "No license claims"
+	}
+	var clockSkew time.Duration
+	if len(skew) > 0 && skew[0] > 0 {
+		clockSkew = skew[0]
 	}
 	if c.IsPerpetual() {
 		return "Perpetual license (does not expire)"
 	}
-	if !c.NotBefore.IsZero() && t.Before(c.NotBefore) {
-		return fmt.Sprintf("License is not yet valid (valid starting %s)", c.NotBefore.Format(time.RFC3339))
+	if !c.NotBefore.IsZero() {
+		effectiveNotBefore := c.NotBefore.Add(-clockSkew)
+		if t.Before(effectiveNotBefore) {
+			return fmt.Sprintf("License is not yet valid (valid starting %s)", c.NotBefore.Format(time.RFC3339))
+		}
 	}
-	if c.IsInGracePeriodAt(t) {
-		graceDays := c.GraceDaysRemainingAt(t)
+	if c.IsInGracePeriodAt(t, clockSkew) {
+		graceDays := c.GraceDaysRemainingAt(t, clockSkew)
 		cutoffStr := c.EffectiveExpiration().Format(time.RFC3339)
 		expiresStr := c.ExpiresAt.Format(time.RFC3339)
 		if graceDays == 1 {
@@ -338,7 +399,7 @@ func (c *Claims) StatusMessageAt(t time.Time) string {
 		}
 		return fmt.Sprintf("Operating in grace period (%d grace days remaining until %s, expired on %s)", graceDays, cutoffStr, expiresStr)
 	}
-	if c.IsExpiredAt(t) {
+	if c.IsExpiredAt(t, clockSkew) {
 		expiresStr := c.ExpiresAt.Format(time.RFC3339)
 		if c.GracePeriodDays > 0 {
 			cutoffStr := c.EffectiveExpiration().Format(time.RFC3339)
