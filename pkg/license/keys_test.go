@@ -2,6 +2,10 @@ package license
 
 import (
 	"crypto/ed25519"
+	"crypto/x509"
+	"encoding/base64"
+	"encoding/pem"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -173,5 +177,75 @@ func TestKeyRing_FingerprintCompatibilityLookup(t *testing.T) {
 	foundByFP64, ok := kr.FindKeyByFingerprint(fp64)
 	if !ok || foundByFP64 != entry {
 		t.Errorf("failed to find key by FindKeyByFingerprint with 64-bit %s", fp64)
+	}
+}
+
+func TestKeys_ParsePublicKeyFromBase64Variants(t *testing.T) {
+	pub, _, err := GenerateKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. StdEncoding raw 32 bytes
+	b64Std := base64.StdEncoding.EncodeToString(pub)
+	parsed1, err := ParsePublicKeyFromBase64(b64Std)
+	if err != nil || !parsed1.Equal(pub) {
+		t.Fatalf("ParsePublicKeyFromBase64(b64Std) error=%v, parsed=%v", err, parsed1)
+	}
+
+	// 2. RawURLEncoding raw 32 bytes
+	b64URL := base64.RawURLEncoding.EncodeToString(pub)
+	parsed2, err := ParsePublicKeyFromBase64(b64URL)
+	if err != nil || !parsed2.Equal(pub) {
+		t.Fatalf("ParsePublicKeyFromBase64(b64URL) error=%v, parsed=%v", err, parsed2)
+	}
+
+	// 3. PKIX DER base64
+	derBytes, err := x509.MarshalPKIXPublicKey(pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b64DER := base64.StdEncoding.EncodeToString(derBytes)
+	parsed3, err := ParsePublicKeyFromBase64(b64DER)
+	if err != nil || !parsed3.Equal(pub) {
+		t.Fatalf("ParsePublicKeyFromBase64(b64DER) error=%v, parsed=%v", err, parsed3)
+	}
+
+	// 4. Invalid base64
+	if _, err := ParsePublicKeyFromBase64("!@#$%^&*"); err == nil {
+		t.Error("expected error for invalid base64, got nil")
+	}
+
+	// 5. Invalid DER content
+	if _, err := ParsePublicKeyFromBase64(base64.StdEncoding.EncodeToString([]byte("not a valid der format of any kind"))); err == nil {
+		t.Error("expected error for invalid der, got nil")
+	}
+}
+
+func TestKeys_PEMErrorBranches(t *testing.T) {
+	// 1. EncodePublicKeyToPEM with nil
+	if _, err := EncodePublicKeyToPEM(nil); !errors.Is(err, ErrMissingPublicKey) {
+		t.Errorf("expected ErrMissingPublicKey, got %v", err)
+	}
+
+	// 2. ParsePublicKeyFromPEM with non-PEM
+	if _, err := ParsePublicKeyFromPEM([]byte("not a pem")); err == nil {
+		t.Error("expected error for invalid PEM bytes")
+	}
+
+	// 3. ParsePublicKeyFromPEM with invalid PKIX DER block
+	block := &pem.Block{Type: PEMTypePublicKey, Bytes: []byte("invalid-pkix-bytes")}
+	if _, err := ParsePublicKeyFromPEM(pem.EncodeToMemory(block)); err == nil {
+		t.Error("expected error for invalid PKIX DER")
+	}
+
+	// 4. EncodePublicKeysToPEM with empty slice
+	if _, err := EncodePublicKeysToPEM([]ed25519.PublicKey{}); err == nil {
+		t.Error("expected error for empty public keys slice")
+	}
+
+	// 5. EncodePublicKeysToPEM with slice containing nil key
+	if _, err := EncodePublicKeysToPEM([]ed25519.PublicKey{nil}); err == nil {
+		t.Error("expected error for nil key in EncodePublicKeysToPEM")
 	}
 }

@@ -64,6 +64,18 @@ func TestParseCustomScope(t *testing.T) {
 				"dc":   {"dc-1", "dc-2"},
 			},
 		},
+		{
+			name:  "invalid entries and empty key skipped",
+			input: "tier=platinum;invalid;=value;   ",
+			expected: map[string][]string{
+				"tier": {"platinum"},
+			},
+		},
+		{
+			name:     "all invalid returns nil",
+			input:    "invalid_entry_no_equals",
+			expected: nil,
+		},
 	}
 
 	for _, tt := range tests {
@@ -73,6 +85,20 @@ func TestParseCustomScope(t *testing.T) {
 				t.Errorf("parseCustomScope(%q) = %+v, want %+v", tt.input, actual, tt.expected)
 			}
 		})
+	}
+}
+
+func TestParseMetadata(t *testing.T) {
+	if m := parseMetadata(""); len(m) != 0 {
+		t.Errorf("expected empty map for empty string, got %v", m)
+	}
+
+	m := parseMetadata("k1=v1,k2=v2,invalid,=val,  ")
+	if m["k1"] != "v1" || m["k2"] != "v2" {
+		t.Errorf("expected k1=v1 and k2=v2, got %v", m)
+	}
+	if len(m) != 2 {
+		t.Errorf("expected length 2, got %d", len(m))
 	}
 }
 
@@ -762,4 +788,534 @@ func TestCLI_DomainGroupedRouting(t *testing.T) {
 	if err := runCLI([]string{"license", "unknown-sub"}); err == nil {
 		t.Errorf("expected error for unknown license subcommand")
 	}
+	if err := runCLI([]string{"release", "unknown-sub"}); err == nil {
+		t.Errorf("expected error for unknown release subcommand")
+	}
+	if err := runCLI([]string{"key", "unknown-sub"}); err == nil {
+		t.Errorf("expected error for unknown key subcommand")
+	}
+	if err := runCLI([]string{"bsl", "unknown-sub"}); err == nil {
+		t.Errorf("expected error for unknown bsl subcommand")
+	}
+}
+
+func TestCLI_FingerprintSubcommand(t *testing.T) {
+	// 1. Default fingerprint output
+	if err := runFingerprint([]string{}); err != nil {
+		t.Fatalf("runFingerprint failed: %v", err)
+	}
+
+	// 2. JSON fingerprint output
+	if err := runFingerprint([]string{"-json"}); err != nil {
+		t.Fatalf("runFingerprint with -json failed: %v", err)
+	}
+
+	// 3. Specific platform: host
+	if err := runFingerprint([]string{"-platform", "host"}); err != nil {
+		t.Fatalf("runFingerprint with -platform host failed: %v", err)
+	}
+
+	// 4. Invalid platform returns error
+	if err := runFingerprint([]string{"-platform", "nonexistent"}); err == nil {
+		t.Error("expected error for invalid platform, got nil")
+	}
+
+	// 5. Via runCLI dispatcher
+	if err := runCLI([]string{"fingerprint"}); err != nil {
+		t.Fatalf("runCLI fingerprint failed: %v", err)
+	}
+	if err := runCLI([]string{"fingerprint", "-json"}); err != nil {
+		t.Fatalf("runCLI fingerprint -json failed: %v", err)
+	}
+}
+
+func TestCLI_RequestSubcommand(t *testing.T) {
+	tmpDir := t.TempDir()
+	reqPath := filepath.Join(tmpDir, "test.divreq")
+	privKeyPath := filepath.Join(tmpDir, "priv.pem")
+	pubKeyPath := filepath.Join(tmpDir, "pub.pem")
+	licPath := filepath.Join(tmpDir, "fulfilled.key")
+
+	// Keygen first
+	if err := runKeygen([]string{"-out-dir", tmpDir, "-priv-name", "priv.pem", "-pub-name", "pub.pem"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Missing customer
+	if err := runRequest([]string{"-product", "gitlab-fleet-governor"}); err == nil {
+		t.Error("expected error for missing customer")
+	}
+
+	// 2. Missing product
+	if err := runRequest([]string{"-customer", "Acme"}); err == nil {
+		t.Error("expected error for missing product")
+	}
+
+	// 3. Unknown platform
+	if err := runRequest([]string{"-customer", "Acme", "-product", "test", "-platform", "invalid"}); err == nil {
+		t.Error("expected error for invalid platform")
+	}
+
+	// 4. Valid request generated to file
+	err := runRequest([]string{
+		"-customer", "Acme Corporation",
+		"-product", "gitlab-fleet-governor",
+		"-plan", "enterprise",
+		"-features", "sso,audit-logs",
+		"-limits", "max_nodes=10,max_runners=50",
+		"-notes", "air-gapped datacenter node",
+		"-platform", "host",
+		"-out", reqPath,
+	})
+	if err != nil {
+		t.Fatalf("runRequest failed: %v", err)
+	}
+
+	// 5. Valid request stdout with JSON
+	if err := runRequest([]string{"-customer", "Acme", "-product", "test", "-json"}); err != nil {
+		t.Fatalf("runRequest with -json failed: %v", err)
+	}
+
+	// 6. Fulfill the request using 'license issue -request'
+	err = runIssue([]string{
+		"-request", reqPath,
+		"-private-key", privKeyPath,
+		"-valid-days", "365",
+		"-out", licPath,
+	})
+	if err != nil {
+		t.Fatalf("runIssue fulfilling request failed: %v", err)
+	}
+
+	// 7. Verify the issued license matches the requested fingerprint and attributes
+	err = runVerify([]string{
+		"-public-key", pubKeyPath,
+		"-license", licPath,
+		"-product", "gitlab-fleet-governor",
+	})
+	if err != nil {
+		t.Fatalf("runVerify for license fulfilled from request failed: %v", err)
+	}
+
+	// 8. runCLI license request
+	if err := runCLI([]string{"license", "request", "-customer", "Acme", "-product", "test"}); err != nil {
+		t.Fatalf("runCLI license request failed: %v", err)
+	}
+	if err := runCLI([]string{"request", "-customer", "Acme", "-product", "test"}); err != nil {
+		t.Fatalf("runCLI shortcut request failed: %v", err)
+	}
+}
+
+func TestCLI_DispatchersAndErrorPaths(t *testing.T) {
+	// 1. Empty args
+	if err := runCLI([]string{}); err != nil {
+		t.Errorf("expected nil for empty args, got %v", err)
+	}
+
+	// 2. Global help commands
+	for _, h := range []string{"help", "-h", "--help", "-help"} {
+		if err := runCLI([]string{h}); err != nil {
+			t.Errorf("expected nil for %s, got %v", h, err)
+		}
+	}
+
+	// 3. Unknown top-level command
+	if err := runCLI([]string{"unknown-cmd"}); err == nil {
+		t.Error("expected error for unknown-cmd, got nil")
+	}
+
+	// 4. Domain group help and unknown subcommands
+	groups := []string{"license", "lic", "release", "rel", "key", "keys", "bsl"}
+	for _, g := range groups {
+		// Group with no subargs -> prints usage and returns nil
+		if err := runCLI([]string{g}); err != nil {
+			t.Errorf("expected nil for empty group %s, got %v", g, err)
+		}
+		// Group with help -> returns nil
+		if err := runCLI([]string{g, "help"}); err != nil {
+			t.Errorf("expected nil for %s help, got %v", g, err)
+		}
+		// Group with unknown subcommand -> returns error
+		if err := runCLI([]string{g, "unknown-sub"}); err == nil {
+			t.Errorf("expected error for %s unknown-sub, got nil", g)
+		}
+	}
+
+	// 5. SignRelease error branches
+	if err := runSignRelease([]string{}); err == nil {
+		t.Error("expected error for runSignRelease with no flags")
+	}
+	if err := runSignRelease([]string{"-private-key", "some-key"}); err == nil {
+		t.Error("expected error for runSignRelease missing product")
+	}
+	if err := runSignRelease([]string{"-private-key", "some-key", "-product", "test"}); err == nil {
+		t.Error("expected error for runSignRelease missing version")
+	}
+
+	// 6. InspectRelease error branches
+	if err := runInspectRelease([]string{}); err == nil {
+		t.Error("expected error for runInspectRelease with no attestation")
+	}
+
+	// 7. Keygen error handling with invalid output directory
+	if err := runKeygen([]string{"-out-dir", "/dev/null/impossible"}); err == nil {
+		t.Error("expected error for runKeygen with invalid dir")
+	}
+}
+
+func TestCLI_ShortcutsAndGroupCommands(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Direct shortcuts
+	shortcuts := [][]string{
+		{"fingerprint"},
+		{"issue"},
+		{"verify"},
+		{"inspect"},
+		{"status"},
+		{"request"},
+		{"keygen", "-out-dir", tmpDir},
+		{"keyring"},
+		{"sign-release"},
+		{"verify-release"},
+		{"inspect-release"},
+		{"bsl-eval"},
+	}
+	for _, sc := range shortcuts {
+		_ = runCLI(sc)
+	}
+
+	// Group dispatchers
+	groupCmds := [][]string{
+		{"license", "issue"},
+		{"license", "verify"},
+		{"license", "inspect"},
+		{"license", "status"},
+		{"license", "request"},
+		{"release", "sign"},
+		{"release", "sign-release"},
+		{"release", "verify"},
+		{"release", "verify-release"},
+		{"release", "inspect"},
+		{"release", "inspect-release"},
+		{"key", "gen", "-out-dir", tmpDir},
+		{"key", "generate", "-out-dir", tmpDir},
+		{"key", "keygen", "-out-dir", tmpDir},
+		{"key", "inspect"},
+		{"key", "ring"},
+		{"key", "keyring"},
+		{"bsl", "eval"},
+		{"bsl", "evaluate"},
+		{"bsl", "bsl-eval"},
+	}
+	for _, gc := range groupCmds {
+		_ = runCLI(gc)
+	}
+}
+
+func TestCLI_StatusDetailed(t *testing.T) {
+	tmpDir := t.TempDir()
+	pubKeyPath := filepath.Join(tmpDir, "pub.pem")
+	privKeyPath := filepath.Join(tmpDir, "priv.pem")
+	licPath := filepath.Join(tmpDir, "license.key")
+
+	if err := runKeygen([]string{"-out-dir", tmpDir, "-priv-name", "priv.pem", "-pub-name", "pub.pem"}); err != nil {
+		t.Fatalf("runKeygen failed: %v", err)
+	}
+
+	if err := runIssue([]string{
+		"-customer", "Acme Corp",
+		"-product", "gitlab-fleet-governor",
+		"-private-key", privKeyPath,
+		"-plan", "enterprise",
+		"-features", "sso,ha",
+		"-limits", "max_nodes=50,max_runners=100",
+		"-out", licPath,
+	}); err != nil {
+		t.Fatalf("runIssue failed: %v", err)
+	}
+
+	// 1. Full verification path with all options toggled
+	err := runStatus([]string{
+		"-license", licPath,
+		"-public-key", pubKeyPath,
+		"-product", "gitlab-fleet-governor",
+		"-usage", "max_nodes=10,max_runners=20",
+		"-title", "ACME SYSTEM STATUS",
+		"-compact",
+		"-no-quotas",
+		"-no-features",
+		"-no-scopes",
+		"-no-provenance",
+	})
+	if err != nil {
+		t.Fatalf("runStatus full verified failed: %v", err)
+	}
+
+	// 2. Unverified fallback inspection (no public key passed)
+	err = runStatus([]string{
+		"-license", licPath,
+		"-usage", "max_nodes=5",
+	})
+	if err != nil {
+		t.Fatalf("runStatus fallback inspection failed: %v", err)
+	}
+
+	// 3. Status with missing license
+	err = runStatus([]string{"-license", filepath.Join(tmpDir, "non_existent.key")})
+	if err == nil {
+		t.Error("expected error for non-existent license in runStatus")
+	}
+}
+
+func TestCLI_SignAndInspectReleaseComprehensive(t *testing.T) {
+	tmpDir := t.TempDir()
+	pubKeyPath := filepath.Join(tmpDir, "pub.pem")
+	privKeyPath := filepath.Join(tmpDir, "priv.pem")
+	relPath := filepath.Join(tmpDir, "release.sig")
+	relCompactPath := filepath.Join(tmpDir, "release.compact")
+
+	if err := runKeygen([]string{"-out-dir", tmpDir, "-priv-name", "priv.pem", "-pub-name", "pub.pem"}); err != nil {
+		t.Fatalf("runKeygen failed: %v", err)
+	}
+
+	// 1. Error: missing private key file
+	if err := runSignRelease([]string{"-private-key", filepath.Join(tmpDir, "missing.pem"), "-product", "test", "-version", "v1.0.0"}); err == nil {
+		t.Error("expected error for missing private key file")
+	}
+
+	// 2. Error: invalid build-date
+	if err := runSignRelease([]string{"-private-key", privKeyPath, "-product", "test", "-version", "v1.0.0", "-build-date", "invalid"}); err == nil {
+		t.Error("expected error for invalid build date")
+	}
+
+	// 3. Error: invalid release-date
+	if err := runSignRelease([]string{"-private-key", privKeyPath, "-product", "test", "-version", "v1.0.0", "-release-date", "invalid"}); err == nil {
+		t.Error("expected error for invalid release date")
+	}
+
+	// 4. Error: missing binary
+	if err := runSignRelease([]string{"-private-key", privKeyPath, "-product", "test", "-version", "v1.0.0", "-binary", filepath.Join(tmpDir, "nonexistent")}); err == nil {
+		t.Error("expected error for missing binary path")
+	}
+
+	// 5. Successful sign-release with file output and dates
+	err := runSignRelease([]string{
+		"-private-key", privKeyPath,
+		"-product", "gitlab-fleet-governor",
+		"-version", "v1.0.0",
+		"-build-date", "2026-01-01",
+		"-release-date", "2026-01-01",
+		"-digest", "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+		"-key-id", "rel-key-1",
+		"-meta", "ci=github-actions,builder=docker",
+		"-out", relPath,
+	})
+	if err != nil {
+		t.Fatalf("runSignRelease failed: %v", err)
+	}
+
+	// 6. Successful sign-release compact to file
+	err = runSignRelease([]string{
+		"-private-key", privKeyPath,
+		"-product", "gitlab-fleet-governor",
+		"-version", "v1.0.0",
+		"-armored=false",
+		"-out", relCompactPath,
+	})
+	if err != nil {
+		t.Fatalf("runSignRelease compact failed: %v", err)
+	}
+
+	// 7. Successful inspect-release with -attestation and -json
+	if err := runInspectRelease([]string{"-attestation", relPath, "-json"}); err != nil {
+		t.Fatalf("runInspectRelease with -json failed: %v", err)
+	}
+
+	// 8. Successful inspect-release with positional argument
+	if err := runInspectRelease([]string{relPath}); err != nil {
+		t.Fatalf("runInspectRelease positional failed: %v", err)
+	}
+
+	// 9. Inspect-release with invalid token
+	if err := runInspectRelease([]string{"-attestation", "invalid-token"}); err == nil {
+		t.Error("expected error for invalid release token in inspect")
+	}
+
+	// 10. Verify release
+	if err := runVerifyRelease([]string{"-attestation", relPath, "-public-key", pubKeyPath, "-product", "gitlab-fleet-governor", "-version", "v1.0.0"}); err != nil {
+		t.Fatalf("runVerifyRelease failed: %v", err)
+	}
+}
+
+func TestCLI_VerifyEdgeCases(t *testing.T) {
+	tmpDir := t.TempDir()
+	// Invalid public key format
+	if err := runVerify([]string{"-public-key", "invalid-key-data", "-license", "token"}); err == nil {
+		t.Error("expected error for invalid public key data in runVerify")
+	}
+
+	// Missing public key when no env set
+	t.Setenv("DIVMORA_PUBLIC_KEY", "")
+	t.Setenv("DIVMORA_PUBLIC_KEYS_PEM", "")
+	t.Setenv("DIVMORA_PUBLIC_KEY_FILE", filepath.Join(tmpDir, "missing.pem"))
+	if err := runVerify([]string{"-license", "token"}); err == nil {
+		t.Error("expected error for missing public key in runVerify")
+	}
+}
+
+func TestCLI_VerifyReleaseEdgeCases(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// 1. Missing attestation
+	if err := runVerifyRelease([]string{}); err == nil {
+		t.Error("expected error for missing attestation in runVerifyRelease")
+	}
+
+	// 2. Invalid public key format
+	if err := runVerifyRelease([]string{"-attestation", "token", "-public-key", "invalid-key"}); err == nil {
+		t.Error("expected error for invalid public key in runVerifyRelease")
+	}
+
+	// 3. Missing public key when no env set
+	t.Setenv("DIVMORA_PUBLIC_KEY", "")
+	t.Setenv("DIVMORA_PUBLIC_KEYS_PEM", "")
+	t.Setenv("DIVMORA_PUBLIC_KEY_FILE", filepath.Join(tmpDir, "missing.pem"))
+	if err := runVerifyRelease([]string{"-attestation", "token"}); err == nil {
+		t.Error("expected error for missing public key in runVerifyRelease")
+	}
+}
+
+func TestCLI_BSLEvalAndInspectAndFingerprintEdgeCases(t *testing.T) {
+	tmpDir := t.TempDir()
+	pubKeyPath := filepath.Join(tmpDir, "pub.pem")
+	privKeyPath := filepath.Join(tmpDir, "priv.pem")
+	licPath := filepath.Join(tmpDir, "test.lic")
+
+	_ = runKeygen([]string{"-out-dir", tmpDir, "-priv-name", "priv.pem", "-pub-name", "pub.pem"})
+	_ = runIssue([]string{
+		"-customer", "Acme",
+		"-product", "test-product",
+		"-private-key", privKeyPath,
+		"-out", licPath,
+	})
+
+	// 1. runFingerprint with -quiet, -platform host, and invalid platform
+	if err := runFingerprint([]string{"-quiet"}); err != nil {
+		t.Errorf("runFingerprint -quiet failed: %v", err)
+	}
+	if err := runFingerprint([]string{"-platform", "host"}); err != nil {
+		t.Errorf("runFingerprint -platform host failed: %v", err)
+	}
+	if err := runFingerprint([]string{"-platform", "invalid-platform"}); err == nil {
+		t.Error("expected error for invalid platform in runFingerprint")
+	}
+
+	// 2. runInspect with -json, env-loaded license, and error cases
+	if err := runInspect([]string{"-license", licPath, "-json"}); err != nil {
+		t.Errorf("runInspect with -json failed: %v", err)
+	}
+	data, _ := os.ReadFile(licPath)
+	t.Setenv("DIVMORA_LICENSE_KEY", string(data))
+	if err := runInspect([]string{}); err != nil {
+		t.Errorf("runInspect with DIVMORA_LICENSE_KEY failed: %v", err)
+	}
+	t.Setenv("DIVMORA_LICENSE_KEY", "")
+	t.Setenv("DIVMORA_LICENSE_FILE", "")
+	if err := runInspect([]string{}); err == nil {
+		t.Error("expected error for runInspect without license")
+	}
+	if err := runInspect([]string{"-license", "invalid.token"}); err == nil {
+		t.Error("expected error for runInspect with invalid token")
+	}
+
+	// 3. runBSLEval error branches and flags
+	if err := runBSLEval([]string{"-release-date", "invalid-date"}); err == nil {
+		t.Error("expected error for invalid release-date in runBSLEval")
+	}
+	if err := runBSLEval([]string{"-release-date", "2026-01-01", "-change-date", "invalid-date"}); err == nil {
+		t.Error("expected error for invalid change-date in runBSLEval")
+	}
+	if err := runBSLEval([]string{"-release-date", "2026-01-01", "-time", "invalid-time"}); err == nil {
+		t.Error("expected error for invalid time in runBSLEval")
+	}
+	// Authorized BSL evaluation
+	err := runBSLEval([]string{
+		"-release-date", "2026-01-01",
+		"-change-date", "2029-01-01",
+		"-product", "test-product",
+		"-env", "staging",
+		"-usage", "nodes=5",
+		"-features", "metrics",
+		"-free-limits", "nodes=10",
+		"-exempt-envs", "staging",
+		"-excluded-features", "sso",
+		"-dry-run",
+		"-simulation",
+		"-json",
+	})
+	if err != nil {
+		t.Errorf("runBSLEval authorized evaluation failed: %v", err)
+	}
+
+	// Unauthorized BSL evaluation returns error
+	err = runBSLEval([]string{
+		"-release-date", "2026-01-01",
+		"-product", "test-product",
+		"-env", "production",
+		"-features", "sso",
+		"-excluded-features", "sso",
+	})
+	if err == nil {
+		t.Error("expected error for unauthorized BSL evaluation")
+	}
+
+	_ = pubKeyPath
+}
+
+func TestCLI_IssueFlagsAndErrors(t *testing.T) {
+	tmpDir := t.TempDir()
+	privKeyPath := filepath.Join(tmpDir, "priv.pem")
+	pubKeyPath := filepath.Join(tmpDir, "pub.pem")
+	_ = runKeygen([]string{"-out-dir", tmpDir, "-priv-name", "priv.pem", "-pub-name", "pub.pem"})
+
+	// 1. Missing private key
+	if err := runIssue([]string{"-product", "test", "-customer", "Acme"}); err == nil {
+		t.Error("expected error for missing private key in runIssue")
+	}
+
+	// 2. Missing product
+	if err := runIssue([]string{"-private-key", privKeyPath, "-customer", "Acme"}); err == nil {
+		t.Error("expected error for missing product in runIssue")
+	}
+
+	// 3. Missing customer
+	if err := runIssue([]string{"-private-key", privKeyPath, "-product", "test"}); err == nil {
+		t.Error("expected error for missing customer in runIssue")
+	}
+
+	// 4. Invalid request file
+	if err := runIssue([]string{"-request", filepath.Join(tmpDir, "missing.divreq"), "-private-key", privKeyPath}); err == nil {
+		t.Error("expected error for missing request file in runIssue")
+	}
+
+	// 5. Invalid private key file
+	if err := runIssue([]string{"-private-key", filepath.Join(tmpDir, "missing.pem"), "-product", "test", "-customer", "Acme"}); err == nil {
+		t.Error("expected error for missing private key file in runIssue")
+	}
+
+	// 6. Compact output with maintenance-days and allowed-versions (printed to stdout)
+	err := runIssue([]string{
+		"-private-key", privKeyPath,
+		"-product", "test-prod",
+		"-customer", "Acme",
+		"-maintenance-days", "90",
+		"-allowed-versions", "1.*,2.0.*",
+		"-armored=false",
+	})
+	if err != nil {
+		t.Fatalf("runIssue compact with maintenance days failed: %v", err)
+	}
+
+	_ = pubKeyPath
 }

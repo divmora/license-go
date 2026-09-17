@@ -748,3 +748,85 @@ func TestCompositeResolver_LambdaPriority(t *testing.T) {
 		t.Errorf("expected function_name 'priority-lambda-func', got %q", fp.Components["function_name"])
 	}
 }
+
+func TestResolvers_TopLevelWrappers(t *testing.T) {
+	// 1. Generic container resolver
+	genRes := NewGenericContainerResolver()
+	if genRes == nil || genRes.Platform() != PlatformGeneric {
+		t.Error("expected GenericContainerResolver with PlatformGeneric")
+	}
+	fpGen, err := ResolveGenericContainerFingerprint()
+	if err != nil {
+		t.Fatalf("ResolveGenericContainerFingerprint failed: %v", err)
+	}
+	if fpGen.Platform != PlatformGeneric {
+		t.Errorf("expected PlatformGeneric, got %s", fpGen.Platform)
+	}
+	fpGenCtx, err := ResolveGenericContainerFingerprintWithContext(context.Background())
+	if err != nil || fpGenCtx.Platform != PlatformGeneric {
+		t.Errorf("ResolveGenericContainerFingerprintWithContext failed: %v", err)
+	}
+
+	// 2. AutoDetect resolver
+	autoRes := NewAutoDetectResolver()
+	if autoRes == nil {
+		t.Error("expected NewAutoDetectResolver to return non-nil")
+	}
+	detectedEnv := DetectEnvironment()
+	if detectedEnv == "" {
+		t.Error("expected non-empty detected environment")
+	}
+	fpAuto, err := AutoDetectFingerprint()
+	if err != nil || fpAuto.Primary == "" {
+		t.Errorf("AutoDetectFingerprint failed: %v", err)
+	}
+	fpAutoCtx, err := AutoDetectFingerprintWithContext(context.Background())
+	if err != nil || fpAutoCtx.Primary == "" {
+		t.Errorf("AutoDetectFingerprintWithContext failed: %v", err)
+	}
+
+	// 3. Resolver Options constructors
+	client := &http.Client{Timeout: 1 * time.Second}
+	optEC2Client := WithAWSEC2HTTPClient(client)
+	if optEC2Client == nil {
+		t.Error("WithAWSEC2HTTPClient returned nil")
+	}
+	optK8sClient := WithKubernetesHTTPClient(client)
+	if optK8sClient == nil {
+		t.Error("WithKubernetesHTTPClient returned nil")
+	}
+	optK8sTimeout := WithKubernetesTimeout(2 * time.Second)
+	if optK8sTimeout == nil {
+		t.Error("WithKubernetesTimeout returned nil")
+	}
+
+	// 4. Kubernetes convenience wrappers failure when outside K8s
+	_, err = ResolveKubernetesFingerprint()
+	if err == nil {
+		t.Log("ResolveKubernetesFingerprint succeeded in cluster")
+	}
+	_, err = ResolveKubernetesFingerprintWithContext(context.Background())
+	if err == nil {
+		t.Log("ResolveKubernetesFingerprintWithContext succeeded in cluster")
+	}
+
+	// 5. EC2 convenience wrappers failure when outside EC2
+	_, err = ResolveAWSEC2Fingerprint()
+	if err == nil {
+		t.Log("ResolveAWSEC2Fingerprint succeeded")
+	}
+	_, err = ResolveAWSEC2FingerprintWithContext(context.Background())
+	if err == nil {
+		t.Log("ResolveAWSEC2FingerprintWithContext succeeded")
+	}
+
+	// 6. Default Composite Resolver and ResolveDefaultFingerprintWithContext
+	defaultComp := NewDefaultCompositeResolver()
+	if defaultComp == nil {
+		t.Error("NewDefaultCompositeResolver returned nil")
+	}
+	_, err = ResolveDefaultFingerprintWithContext(context.Background())
+	if err != nil {
+		t.Logf("ResolveDefaultFingerprintWithContext: %v", err)
+	}
+}

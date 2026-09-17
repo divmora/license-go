@@ -35,6 +35,12 @@ func TestValidateClaimsPayloadJSON_MissingFields(t *testing.T) {
 		{"missing_issued_at", `{"id":"1","customer":{"name":"Acme"},"product":"p","plan":"standard"}`},
 		{"invalid_email", `{"id":"1","customer":{"name":"Acme","email":"not-an-email"},"product":"p","plan":"standard","issued_at":"2026-01-01T00:00:00Z"}`},
 		{"float_limits", `{"id":"1","customer":{"name":"Acme"},"product":"p","plan":"standard","issued_at":"2026-01-01T00:00:00Z","limits":{"val":1.5}}`},
+		{"string_limits_val", `{"id":"1","customer":{"name":"Acme"},"product":"p","plan":"standard","issued_at":"2026-01-01T00:00:00Z","limits":{"val":"text"}}`},
+		{"non_object_limits", `{"id":"1","customer":{"name":"Acme"},"product":"p","plan":"standard","issued_at":"2026-01-01T00:00:00Z","limits":"not-a-map"}`},
+		{"non_object_customer", `{"id":"1","customer":"not-a-map","product":"p","plan":"standard","issued_at":"2026-01-01T00:00:00Z"}`},
+		{"invalid_json", `{"id":`},
+		{"null_id", `{"id":null,"customer":{"name":"Acme"},"product":"p","plan":"standard","issued_at":"2026-01-01T00:00:00Z"}`},
+		{"empty_id", `{"id":"","customer":{"name":"Acme"},"product":"p","plan":"standard","issued_at":"2026-01-01T00:00:00Z"}`},
 	}
 
 	for _, tc := range tests {
@@ -47,5 +53,20 @@ func TestValidateClaimsPayloadJSON_MissingFields(t *testing.T) {
 				t.Fatalf("expected ErrInvalidLicenseFormat for %s, got: %v", tc.name, err)
 			}
 		})
+	}
+}
+
+func TestValidateClaimsPayloadJSON_OptionalFieldsValid(t *testing.T) {
+	// null email, null limits
+	jsonBytes := []byte(`{
+		"id": "lic_1",
+		"customer": {"name": "Acme", "email": null},
+		"product": "p",
+		"plan": "s",
+		"issued_at": "2026-01-01T00:00:00Z",
+		"limits": null
+	}`)
+	if err := ValidateClaimsPayloadJSON(jsonBytes); err != nil {
+		t.Fatalf("expected valid JSON with null optional fields to pass, got: %v", err)
 	}
 }

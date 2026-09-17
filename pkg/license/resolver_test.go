@@ -724,3 +724,67 @@ func TestNewValidatorWithFallbackKey_AntiSpoofing(t *testing.T) {
 		t.Errorf("expected vendorToken to verify when no env var is present, got: %v", err)
 	}
 }
+
+func TestResolver_KeyOverridesAndPrimaryAccessors(t *testing.T) {
+	pub, _, err := GenerateKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. SetVerificationPublicKey with invalid and valid keys
+	SetVerificationPublicKey([]byte("too-short"))
+	SetVerificationPublicKey(pub)
+	resolved, err := ResolveKeyRing()
+	if err != nil || !resolved.Primary().PublicKey.Equal(pub) {
+		t.Errorf("expected programmatic key override to match pub, err=%v", err)
+	}
+	ResetVerificationPublicKey()
+
+	// 2. SetAllowEnvKeyOverride toggle
+	SetAllowEnvKeyOverride(true)
+	if !IsAllowEnvKeyOverride() {
+		t.Error("expected IsAllowEnvKeyOverride to be true")
+	}
+	ResetAllowEnvKeyOverride()
+	if IsAllowEnvKeyOverride() {
+		t.Error("expected IsAllowEnvKeyOverride to be false after reset")
+	}
+
+	// 3. ResolvedKeyRing.Primary() variations
+	var nilR *ResolvedKeyRing
+	if nilR.Primary() != nil {
+		t.Error("expected nil for nil ResolvedKeyRing.Primary()")
+	}
+	emptyR := &ResolvedKeyRing{}
+	if emptyR.Primary() != nil {
+		t.Error("expected nil for empty ResolvedKeyRing.Primary()")
+	}
+	krEmpty := &ResolvedKeyRing{KeyRing: &KeyRing{}}
+	if krEmpty.Primary() != nil {
+		t.Error("expected nil for KeyRing without keys in Primary()")
+	}
+	populatedR := &ResolvedKeyRing{KeyRing: NewKeyRing(pub)}
+	if !populatedR.Primary().Equal(pub) {
+		t.Error("expected populated Primary to return pub key")
+	}
+
+	// 4. ParsePublicKeyFromString
+	pemBytes, _ := EncodePublicKeyToPEM(pub)
+	parsedFromPEM, err := ParsePublicKeyFromString(string(pemBytes))
+	if err != nil || !parsedFromPEM.Equal(pub) {
+		t.Errorf("ParsePublicKeyFromString(pem) failed: %v", err)
+	}
+	parsedFromB64, err := ParsePublicKeyFromString(EncodePublicKeyToBase64(pub))
+	if err != nil || !parsedFromB64.Equal(pub) {
+		t.Errorf("ParsePublicKeyFromString(b64) failed: %v", err)
+	}
+	if _, err := ParsePublicKeyFromString("not-a-valid-key-at-all"); err == nil {
+		t.Error("expected error for invalid key string in ParsePublicKeyFromString")
+	}
+
+	// 5. ResolveKeyRingWithEnvPrecedence with fallback
+	resPrecedence, err := ResolveKeyRingWithEnvPrecedence(string(pemBytes))
+	if err != nil || resPrecedence == nil {
+		t.Fatalf("ResolveKeyRingWithEnvPrecedence failed: %v", err)
+	}
+}

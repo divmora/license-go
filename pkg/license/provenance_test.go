@@ -932,3 +932,137 @@ func TestEvaluateProvenance_BinaryDigestFailClosed(t *testing.T) {
 		t.Fatalf("expected binary digest verification required when attestation lacks digest, got: %v", err)
 	}
 }
+
+func TestReleaseClaims_NormalizedVersionAndArmored(t *testing.T) {
+	rc := ReleaseClaims{Version: "v1.2.3"}
+	if rc.NormalizedVersion() != "1.2.3" {
+		t.Errorf("expected '1.2.3', got %q", rc.NormalizedVersion())
+	}
+
+	payload := []byte(`{"product":"test"}`)
+	sig := make([]byte, 64)
+	armored := EncodeReleaseArmored(payload, sig)
+	if !strings.Contains(armored, "-----BEGIN DIVMORA RELEASE ATTESTATION-----") {
+		t.Errorf("unexpected armored output: %s", armored)
+	}
+}
+
+func TestReleaseClaims_Validate(t *testing.T) {
+	now := time.Now().UTC()
+
+	// Valid
+	rcValid := ReleaseClaims{
+		Product:   "gitlab-fleet-governor",
+		Version:   "v1.0.0",
+		BuildDate: now,
+	}
+	if err := rcValid.Validate(); err != nil {
+		t.Fatalf("expected valid claims, got error: %v", err)
+	}
+
+	// Missing product
+	rcNoProd := ReleaseClaims{Version: "v1.0.0", BuildDate: now}
+	if err := rcNoProd.Validate(); err == nil {
+		t.Error("expected error for missing product")
+	}
+
+	// Missing version
+	rcNoVer := ReleaseClaims{Product: "my-app", BuildDate: now}
+	if err := rcNoVer.Validate(); err == nil {
+		t.Error("expected error for missing version")
+	}
+
+	// Missing build and release date
+	rcNoDates := ReleaseClaims{Product: "my-app", Version: "v1.0.0"}
+	if err := rcNoDates.Validate(); err == nil {
+		t.Error("expected error for missing dates")
+	}
+}
+
+func TestProvenance_ComputeDigests(t *testing.T) {
+	content := []byte("binary executable data")
+	expectedDigest := ComputeBytesDigest(content)
+
+	// ComputeReaderDigest
+	readerDigest, err := ComputeReaderDigest(strings.NewReader(string(content)))
+	if err != nil || readerDigest != expectedDigest {
+		t.Errorf("ComputeReaderDigest error=%v, digest=%s (want %s)", err, readerDigest, expectedDigest)
+	}
+
+	// ComputeFileDigest
+	tmpDir := t.TempDir()
+	binPath := filepath.Join(tmpDir, "binary.bin")
+	if err := os.WriteFile(binPath, content, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	fileDigest, err := ComputeFileDigest(binPath)
+	if err != nil || fileDigest != expectedDigest {
+		t.Errorf("ComputeFileDigest error=%v, digest=%s (want %s)", err, fileDigest, expectedDigest)
+	}
+
+	// Non-existent file
+	_, err = ComputeFileDigest(filepath.Join(tmpDir, "nonexistent"))
+	if err == nil {
+		t.Error("expected error for missing file, got nil")
+	}
+}
+
+func TestReleaseClaims_MatchingAndInspectMethods(t *testing.T) {
+	rel := &ReleaseClaims{
+		Product:      "gitlab-fleet-governor",
+		Version:      "v1.2.3",
+		GitCommit:    "897f058123456789abcdef",
+		BinaryDigest: "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+	}
+
+	// 1. MatchesVersion
+	if !rel.MatchesVersion("") {
+		t.Error("expected true for empty running version")
+	}
+	if !rel.MatchesVersion("1.2.3") {
+		t.Error("expected true for normalized version match")
+	}
+	if rel.MatchesVersion("1.2.4") {
+		t.Error("expected false for different version")
+	}
+
+	// 2. MatchesCommit
+	if !rel.MatchesCommit("") {
+		t.Error("expected true for empty running commit")
+	}
+	if !rel.MatchesCommit("897f058123456789abcdef") {
+		t.Error("expected true for exact commit match")
+	}
+	if !rel.MatchesCommit("897f058") {
+		t.Error("expected true for short commit prefix match")
+	}
+	if rel.MatchesCommit("deadbeef") {
+		t.Error("expected false for mismatch commit")
+	}
+
+	// Empty commit on claims
+	relNoCommit := &ReleaseClaims{}
+	if !relNoCommit.MatchesCommit("any-commit") {
+		t.Error("expected true when claims has no commit")
+	}
+
+	// 3. MatchesDigest
+	if !rel.MatchesDigest("") {
+		t.Error("expected true for empty digest")
+	}
+	if !rel.MatchesDigest("sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855") {
+		t.Error("expected true for identical digest")
+	}
+	if !rel.MatchesDigest("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855") {
+		t.Error("expected true for digest without sha256: prefix")
+	}
+	if rel.MatchesDigest("sha256:0000000000000000000000000000000000000000000000000000000000000000") {
+		t.Error("expected false for mismatch digest")
+	}
+
+	// 4. InspectRelease error paths
+	if _, err := InspectRelease("invalid-release-token"); err == nil {
+		t.Error("expected error for invalid release token format")
+	}
+}

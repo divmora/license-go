@@ -374,3 +374,39 @@ func TestKeyRing_FingerprintCollisionDefense(t *testing.T) {
 		t.Fatalf("expected FindKeyByFingerprint(%q) to find key 2", fp2)
 	}
 }
+
+func TestKeyRing_SetPrimaryAndDescription(t *testing.T) {
+	pub1, _, err := license.GenerateKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub2, _, err := license.GenerateKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ring := license.NewKeyRing(pub1)
+	entry2, err := ring.AddKey(pub2,
+		license.WithCustomKeyID("key-secondary"),
+		license.WithKeyDescription("backup key for failover"),
+	)
+	if err != nil {
+		t.Fatalf("AddKey failed: %v", err)
+	}
+	if entry2.Description != "backup key for failover" {
+		t.Errorf("expected description 'backup key for failover', got %q", entry2.Description)
+	}
+
+	// SetPrimary to secondary key
+	if err := ring.SetPrimary("key-secondary"); err != nil {
+		t.Fatalf("SetPrimary failed: %v", err)
+	}
+	if !ring.Primary().PublicKey.Equal(pub2) {
+		t.Error("expected primary key to be pub2")
+	}
+
+	// SetPrimary to non-existent key returns error
+	if err := ring.SetPrimary("nonexistent-key-id"); err == nil {
+		t.Error("expected error for nonexistent key, got nil")
+	}
+}

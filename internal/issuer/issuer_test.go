@@ -1,6 +1,7 @@
 package issuer
 
 import (
+	"encoding/pem"
 	"path/filepath"
 	"testing"
 	"time"
@@ -229,5 +230,93 @@ func TestIssuer_SignerMethodsAndErrors(t *testing.T) {
 	}
 	if _, err := validator.VerifyFromFile(outFileCompact); err != nil {
 		t.Fatalf("VerifyFromFile (compact) failed: %v", err)
+	}
+}
+
+func TestIssuer_ErrorBranches(t *testing.T) {
+	_, priv, err := GenerateKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. EncodePrivateKeyToPEM with nil / empty
+	if _, err := EncodePrivateKeyToPEM(nil); err == nil {
+		t.Error("expected error for nil private key")
+	}
+
+	// 2. ParsePrivateKeyFromPEM with non-PEM bytes
+	if _, err := ParsePrivateKeyFromPEM([]byte("not a pem")); err == nil {
+		t.Error("expected error for invalid PEM bytes")
+	}
+
+	// 3. ParsePrivateKeyFromPEM with non-PKCS8 DER bytes
+	invalidBlock := &pem.Block{Type: PEMTypePrivateKey, Bytes: []byte("invalid-der")}
+	if _, err := ParsePrivateKeyFromPEM(pem.EncodeToMemory(invalidBlock)); err == nil {
+		t.Error("expected error for invalid PKCS#8 DER")
+	}
+
+	// 4. SavePrivateKeyToPEMFile with nil key
+	tmpDir := t.TempDir()
+	if err := SavePrivateKeyToPEMFile(nil, filepath.Join(tmpDir, "bad.pem"), 0600); err == nil {
+		t.Error("expected error for SavePrivateKeyToPEMFile with nil key")
+	}
+
+	// 5. LoadPrivateKeyFromPEMFile with non-existent file
+	if _, err := LoadPrivateKeyFromPEMFile(filepath.Join(tmpDir, "missing.pem")); err == nil {
+		t.Error("expected error for LoadPrivateKeyFromPEMFile with missing file")
+	}
+
+	// 6. NewSignerFromPEM with invalid PEM
+	if _, err := NewSignerFromPEM([]byte("bad pem")); err == nil {
+		t.Error("expected error for NewSignerFromPEM with bad pem")
+	}
+
+	// 7. NewSignerFromPEMFile with non-existent file
+	if _, err := NewSignerFromPEMFile(filepath.Join(tmpDir, "missing.pem")); err == nil {
+		t.Error("expected error for NewSignerFromPEMFile with missing file")
+	}
+
+	// 8. SignRelease with nil private key
+	relClaims := license.ReleaseClaims{
+		Product:     "test",
+		Version:     "v1.0.0",
+		BuildDate:   time.Now(),
+		ReleaseDate: time.Now(),
+	}
+	if _, err := SignRelease(relClaims, nil); err == nil {
+		t.Error("expected error for SignRelease with nil key")
+	}
+
+	// 9. SignRelease with invalid claims
+	if _, err := SignRelease(license.ReleaseClaims{}, priv); err == nil {
+		t.Error("expected error for SignRelease with empty claims")
+	}
+
+	// 10. SignReleaseArmored with invalid claims
+	if _, err := SignReleaseArmored(license.ReleaseClaims{}, priv); err == nil {
+		t.Error("expected error for SignReleaseArmored with empty claims")
+	}
+
+	// 11. Signer with nil private key
+	nilSigner := &Signer{}
+	validClaims := license.Claims{
+		Customer: license.Customer{Name: "Acme Corp"},
+		Product:  "test-prod",
+	}
+	if _, err := nilSigner.Sign(validClaims); err == nil {
+		t.Error("expected error for Signer.Sign with nil key")
+	}
+
+	// 12. Signer.Sign with invalid schema
+	signer, err := NewSigner(priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	invalidSchemaClaims := license.Claims{
+		Customer: license.Customer{Name: "Acme Corp", Email: "not-an-email"},
+		Product:  "test-prod",
+	}
+	if _, err := signer.Sign(invalidSchemaClaims); err == nil {
+		t.Error("expected error for invalid schema email")
 	}
 }

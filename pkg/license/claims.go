@@ -705,7 +705,7 @@ func (c *Claims) MatchesFingerprint(hostFingerprint string) bool {
 // If neither Scope.Environments nor Claims.Environment is defined, any environment is permitted.
 func (c *Claims) IsEnvironmentAllowed(env string) bool {
 	if c.Scope != nil && len(c.Scope.Environments) > 0 {
-		return matchesScopeSlice(c.Scope.Environments, env)
+		return c.Scope.IsEnvironmentAllowed(env)
 	}
 	if c.Environment != "" {
 		return matchesScopeSlice([]string{c.Environment}, env)
@@ -719,7 +719,7 @@ func (c *Claims) IsAccountAllowed(account string) bool {
 	if c.Scope == nil || len(c.Scope.Accounts) == 0 {
 		return true
 	}
-	return matchesScopeSlice(c.Scope.Accounts, account)
+	return c.Scope.IsAccountAllowed(account)
 }
 
 // IsRegionAllowed reports whether the target geographic/cloud region (e.g. "us-east-1") is authorized.
@@ -728,7 +728,7 @@ func (c *Claims) IsRegionAllowed(region string) bool {
 	if c.Scope == nil || len(c.Scope.Regions) == 0 {
 		return true
 	}
-	return matchesScopeSlice(c.Scope.Regions, region)
+	return c.Scope.IsRegionAllowed(region)
 }
 
 // IsClusterAllowed reports whether the target cluster ID/ARN is authorized.
@@ -737,7 +737,7 @@ func (c *Claims) IsClusterAllowed(cluster string) bool {
 	if c.Scope == nil || len(c.Scope.Clusters) == 0 {
 		return true
 	}
-	return matchesScopeSlice(c.Scope.Clusters, cluster)
+	return c.Scope.IsClusterAllowed(cluster)
 }
 
 // IsNamespaceAllowed reports whether the target project/group hierarchy (e.g. "gitlab.com/acme/*", "devops") is authorized.

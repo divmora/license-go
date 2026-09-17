@@ -246,4 +246,76 @@ func TestFilesHelper(t *testing.T) {
 	if err == nil {
 		t.Errorf("expected error for symlink, got nil")
 	}
+
+	// Non-existent file should return error
+	_, err = SafeReadFile(filepath.Join(tmpDir, "does-not-exist.txt"))
+	if err == nil {
+		t.Error("expected error for non-existent file, got nil")
+	}
+}
+
+func TestParseSemVer_EdgeCases(t *testing.T) {
+	maj, min, pat, ok := ParseSemVer("1.foo.0")
+	if !ok || maj != 1 || min != 0 || pat != 0 {
+		t.Errorf("expected 1.0.0, ok=true; got %d.%d.%d, ok=%v", maj, min, pat, ok)
+	}
+
+	maj, min, pat, ok = ParseSemVer("1.2.bar")
+	if !ok || maj != 1 || min != 2 || pat != 0 {
+		t.Errorf("expected 1.2.0, ok=true; got %d.%d.%d, ok=%v", maj, min, pat, ok)
+	}
+
+	_, _, _, ok = ParseSemVer("foo.1.2")
+	if ok {
+		t.Error("expected ok=false for non-integer major")
+	}
+
+	_, _, _, ok = ParseSemVer("")
+	if ok {
+		t.Error("expected ok=false for empty string")
+	}
+}
+
+func TestCompareSemVer_More(t *testing.T) {
+	tests := []struct {
+		v1, v2 string
+		want   int
+		ok     bool
+	}{
+		{"1.1.0", "1.2.0", -1, true},
+		{"1.2.0", "1.1.0", 1, true},
+		{"1.2.1", "1.2.2", -1, true},
+		{"1.2.2", "1.2.1", 1, true},
+		{"1.0.0", "invalid", 0, false},
+	}
+	for _, tc := range tests {
+		got, ok := CompareSemVer(tc.v1, tc.v2)
+		if ok != tc.ok || got != tc.want {
+			t.Errorf("CompareSemVer(%q, %q) = (%v, %v), want (%v, %v)", tc.v1, tc.v2, got, ok, tc.want, tc.ok)
+		}
+	}
+}
+
+func TestCheckMaxVersion_WildcardStrict(t *testing.T) {
+	tests := []struct {
+		maxVersion string
+		version    string
+		want       bool
+	}{
+		{"<1.*", "0.9.0", true},
+		{"<1.*", "1.0.0", false},
+		{"<1.2.*", "0.9.0", true},
+		{"<1.2.*", "1.1.0", true},
+		{"<1.2.*", "1.2.0", false},
+		{"1.2.*", "0.9.0", true},
+		{"all", "5.0.0", true},
+		{"invalid", "1.0.0", false},
+		{"2.0.0", "invalid", false},
+		{"1.*", "invalid", false},
+	}
+	for _, tc := range tests {
+		if got := CheckMaxVersion(tc.maxVersion, tc.version); got != tc.want {
+			t.Errorf("CheckMaxVersion(%q, %q) = %v, want %v", tc.maxVersion, tc.version, got, tc.want)
+		}
+	}
 }

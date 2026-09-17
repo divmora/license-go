@@ -267,3 +267,92 @@ func TestClaims_FormatStatus_Inspection(t *testing.T) {
 		t.Fatalf("expected nil claims message")
 	}
 }
+
+func TestStatusFormatter_OptionsAndBanners(t *testing.T) {
+	evalTime := time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC)
+	claims := &Claims{
+		Product:   "gitlab-fleet-governor",
+		Plan:      "pro",
+		Customer:  Customer{Name: "Acme Corp"},
+		Features:  []string{"sso"},
+		Limits:    map[string]int64{"runners": 10},
+		ExpiresAt: evalTime.Add(24 * time.Hour),
+		Scope: &Scope{
+			Environments: []string{"production"},
+		},
+	}
+
+	result := &VerificationResult{
+		Claims:         claims,
+		Status:         StatusActive,
+		EvaluationTime: evalTime,
+	}
+
+	// 1. FormatStatusBanner alias on result and claims
+	banner1 := result.FormatStatusBanner()
+	if !strings.Contains(banner1, "DIVMORA SOFTWARE LICENSE STATUS") {
+		t.Error("expected FormatStatusBanner to return status card")
+	}
+	banner2 := claims.FormatStatusBanner()
+	if !strings.Contains(banner2, "DIVMORA SOFTWARE LICENSE STATUS") {
+		t.Error("expected Claims.FormatStatusBanner to return status card")
+	}
+
+	// 2. Standalone FormatStatus and FormatClaimsStatus functions
+	fnOut1 := FormatStatus(result)
+	if !strings.Contains(fnOut1, "DIVMORA SOFTWARE LICENSE STATUS") {
+		t.Error("expected FormatStatus function to format result")
+	}
+	fnOut2 := FormatClaimsStatus(claims)
+	if !strings.Contains(fnOut2, "DIVMORA SOFTWARE LICENSE STATUS") {
+		t.Error("expected FormatClaimsStatus function to format claims")
+	}
+
+	// 3. Options toggles: width, exclude quotas, exclude features, exclude scopes, exclude provenance
+	customOut := FormatStatus(result,
+		WithStatusWidth(100),
+		WithStatusIncludeQuotas(false),
+		WithStatusIncludeFeatures(false),
+		WithStatusIncludeScopes(false),
+		WithStatusIncludeProvenance(false),
+	)
+	if strings.Contains(customOut, "RESOURCE QUOTAS & CAPACITY") {
+		t.Error("expected quotas to be excluded")
+	}
+	if strings.Contains(customOut, "ENTITLED FEATURES") {
+		t.Error("expected features to be excluded")
+	}
+	if strings.Contains(customOut, "OPERATIONAL INFRASTRUCTURE SCOPE") {
+		t.Error("expected scopes to be excluded")
+	}
+
+	// 4. Badges across different plans and statuses
+	planTests := []struct {
+		plan     string
+		status   Status
+		expected string
+	}{
+		{"community", StatusActive, "COMMUNITY"},
+		{"starter", StatusActive, "STARTER"},
+		{"pro", StatusGracePeriod, "GRACE PERIOD"},
+		{"trial", StatusExpired, "EXPIRED"},
+		{"standard", StatusNotYetValid, "PENDING"},
+	}
+
+	for _, pt := range planTests {
+		c := &Claims{
+			Product:  "test-product",
+			Plan:     pt.plan,
+			Customer: Customer{Name: "Tester"},
+		}
+		res := &VerificationResult{
+			Claims:         c,
+			Status:         pt.status,
+			EvaluationTime: evalTime,
+		}
+		out := res.FormatStatus()
+		if !strings.Contains(out, pt.expected) {
+			t.Errorf("expected status output to contain %q for plan %s / status %v", pt.expected, pt.plan, pt.status)
+		}
+	}
+}

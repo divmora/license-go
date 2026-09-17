@@ -710,3 +710,74 @@ func TestBSLAdditionalUseGrant_MatchFuncPriorityAndOverride(t *testing.T) {
 		t.Errorf("expected explicit rejection reason, got: %s", evalCompromised.Reason)
 	}
 }
+
+func TestBSLPolicy_AddGrantAndStatusMessage(t *testing.T) {
+	policy := license.BSLPolicy{
+		ReleaseDate:       time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC),
+		ChangePeriodYears: 3,
+	}
+
+	grant1 := license.NewNonProductionGrant("Non-Prod")
+	grant2 := license.NewFreeTierGrant("Free Tier", map[string]int64{"nodes": 5})
+
+	// Test AddGrant
+	policy.AddGrant(grant1)
+	if len(policy.AdditionalUseGrants) != 1 {
+		t.Errorf("expected 1 grant, got %d", len(policy.AdditionalUseGrants))
+	}
+
+	// Test WithGrants
+	updatedPolicy := policy.WithGrants(grant2)
+	if len(updatedPolicy.AdditionalUseGrants) != 2 {
+		t.Errorf("expected 2 grants, got %d", len(updatedPolicy.AdditionalUseGrants))
+	}
+
+	// Test StatusMessage
+	res := updatedPolicy.EvaluateEntitlement(license.BSLUsageRequest{
+		Environment: "staging",
+		Time:        time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+	})
+	msg := res.StatusMessage()
+	if !strings.Contains(msg, "Authorized under BSL 1.1 Additional Use Grant") {
+		t.Errorf("unexpected StatusMessage: %s", msg)
+	}
+
+	resUnauthorized := updatedPolicy.EvaluateEntitlement(license.BSLUsageRequest{
+		Environment: "production",
+		Usage:       map[string]int64{"nodes": 100},
+		Time:        time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+	})
+	msgUnauth := resUnauthorized.StatusMessage()
+	if !strings.Contains(msgUnauth, "Commercial license required") {
+		t.Errorf("unexpected unauthorized StatusMessage: %s", msgUnauth)
+	}
+
+	// Exhaustive StatusMessage branch coverage
+	var nilRes *license.BSLEntitlementResult
+	if got := nilRes.StatusMessage(); got != "No entitlement evaluation result" {
+		t.Errorf("expected 'No entitlement evaluation result', got %q", got)
+	}
+
+	resConvertedNoDate := &license.BSLEntitlementResult{
+		GrantType:        license.BSLGrantTypeConverted,
+		EffectiveLicense: "Apache-2.0",
+	}
+	if got := resConvertedNoDate.StatusMessage(); !strings.Contains(got, "converted to Apache-2.0") {
+		t.Errorf("expected converted message, got %q", got)
+	}
+
+	resAuthNoGrant := &license.BSLEntitlementResult{
+		Authorized: true,
+	}
+	if got := resAuthNoGrant.StatusMessage(); got != "Authorized under BSL 1.1 Additional Use Grant" {
+		t.Errorf("expected generic auth message, got %q", got)
+	}
+
+	resCommercialZeroDays := &license.BSLEntitlementResult{
+		Authorized:          false,
+		DaysUntilConversion: 0,
+	}
+	if got := resCommercialZeroDays.StatusMessage(); got != "Commercial license required (BSL 1.1)" {
+		t.Errorf("expected commercial license required, got %q", got)
+	}
+}

@@ -865,3 +865,72 @@ func TestManager_AssertFeature_Lifecycle(t *testing.T) {
 		t.Fatalf("expected ErrFeatureNotEntitled for advanced-billing, got: %v", err)
 	}
 }
+
+func TestManager_PolicyAndCanMutate(t *testing.T) {
+	pub, priv, err := license.GenerateKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	signer, err := license.NewSigner(priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	validator, err := license.NewValidator(pub, license.WithProduct("gitlab-fleet-governor"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	claims := license.Claims{
+		Product:   "gitlab-fleet-governor",
+		Customer:  license.Customer{Name: "Acme"},
+		ExpiresAt: time.Now().Add(1 * time.Hour),
+	}
+	token, _ := signer.SignArmored(claims)
+
+	// 1. Strict Active
+	mgrStrict, err := license.NewManager(license.ManagerConfig{
+		Validator:     validator,
+		LicenseString: token,
+		Policy:        license.PolicyStrict,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mgrStrict.Policy() != license.PolicyStrict {
+		t.Errorf("expected PolicyStrict, got %v", mgrStrict.Policy())
+	}
+	if err := mgrStrict.CanMutate(); err != nil {
+		t.Errorf("expected CanMutate to pass for active strict license: %v", err)
+	}
+
+	// 2. Degraded Read-Only
+	mgrDegraded, err := license.NewManager(license.ManagerConfig{
+		Validator:        validator,
+		Policy:           license.PolicyDegraded,
+		DegradedReadOnly: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mgrDegraded.Policy() != license.PolicyDegraded {
+		t.Errorf("expected PolicyDegraded, got %v", mgrDegraded.Policy())
+	}
+	if err := mgrDegraded.CanMutate(); !errors.Is(err, license.ErrDegradedReadOnly) {
+		t.Errorf("expected ErrDegradedReadOnly for degraded read-only manager, got: %v", err)
+	}
+
+	// 3. WarnOnly mutations allowlist
+	mgrWarn, err := license.NewManager(license.ManagerConfig{
+		Validator:         validator,
+		Policy:            license.PolicyWarnOnly,
+		WarnOnlyAllowlist: []string{"mutations"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mgrWarn.CanMutate(); err != nil {
+		t.Errorf("expected CanMutate to pass for warn-only allowlist: %v", err)
+	}
+}

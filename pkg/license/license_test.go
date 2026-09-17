@@ -1067,3 +1067,26 @@ func TestSigner_RandomIDGeneration(t *testing.T) {
 		t.Errorf("expected 32-char hex random ID (16 bytes), got length %d: %q", len(res.ID), res.ID)
 	}
 }
+
+func TestEncodeArmored(t *testing.T) {
+	_, priv, err := GenerateKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	payload := []byte(`{"id":"lic-1","product":"gitlab-fleet-governor"}`)
+	sig := ed25519.Sign(priv, []byte("DIV1."+string(payload)))
+
+	armored := EncodeArmored(payload, sig)
+	if !strings.Contains(armored, ArmoredHeader) || !strings.Contains(armored, ArmoredFooter) {
+		t.Errorf("expected armored boundaries in output: %s", armored)
+	}
+
+	unwrapped, err := UnwrapToken(armored)
+	if err != nil {
+		t.Fatalf("UnwrapToken failed: %v", err)
+	}
+	if !strings.HasPrefix(unwrapped, "DIV1.") {
+		t.Errorf("expected DIV1. prefix, got %s", unwrapped)
+	}
+}
