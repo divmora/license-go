@@ -6,7 +6,8 @@ import (
 	"os"
 	"path/filepath"
 
-	license "github.com/divmora/license-go/pkg/license"
+	"github.com/divmora/license-go/internal/issuer"
+	"github.com/divmora/license-go/pkg/license"
 )
 
 func runKeygen(args []string) error {
@@ -23,7 +24,7 @@ func runKeygen(args []string) error {
 		return fmt.Errorf("failed to create directory %s: %w", *outDir, err)
 	}
 
-	pub, priv, err := license.GenerateKeyPair()
+	pub, priv, err := issuer.GenerateKeyPair()
 	if err != nil {
 		return err
 	}
@@ -31,7 +32,7 @@ func runKeygen(args []string) error {
 	privPath := filepath.Join(*outDir, *privName)
 	pubPath := filepath.Join(*outDir, *pubName)
 
-	if err := license.SavePrivateKeyToPEMFile(priv, privPath, 0600); err != nil {
+	if err := issuer.SavePrivateKeyToPEMFile(priv, privPath, 0600); err != nil {
 		return fmt.Errorf("failed to save private key: %w", err)
 	}
 

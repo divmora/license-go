@@ -4,11 +4,13 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/divmora/license-go/internal/envelope"
 )
 
 var (
 	// ErrInvalidLicenseFormat is returned when the raw license string cannot be parsed or decoded.
-	ErrInvalidLicenseFormat = errors.New("license: invalid license format")
+	ErrInvalidLicenseFormat = envelope.ErrInvalidLicenseFormat
 
 	// ErrInvalidSignature is returned when the cryptographic signature does not match the payload.
 	ErrInvalidSignature = errors.New("license: invalid signature")
@@ -41,7 +43,7 @@ var (
 	ErrFingerprintMismatch = errors.New("license: node fingerprint mismatch")
 
 	// ErrLicenseNotFound is returned when no license data is found in the specified source or file.
-	ErrLicenseNotFound = errors.New("license: license not found")
+	ErrLicenseNotFound = envelope.ErrLicenseNotFound
 
 	// ErrScopeMismatch is returned when an environment, account, region, cluster, namespace, or host is not authorized by the license scope.
 	ErrScopeMismatch = errors.New("license: scope mismatch")

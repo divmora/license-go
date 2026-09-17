@@ -7,6 +7,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/divmora/license-go/internal/helpers"
 )
 
 // Verify decodes, verifies the cryptographic signature, and checks all claims against current time.
@@ -326,12 +328,7 @@ func (v *Validator) checkScope(claims *Claims) error {
 }
 
 func resolveEnvFromProcess() string {
-	for _, k := range []string{"DIVMORA_ENV", "DIVMORA_ENVIRONMENT"} {
-		if val := strings.TrimSpace(os.Getenv(k)); val != "" {
-			return val
-		}
-	}
-	return ""
+	return helpers.ResolveEnvFromProcess()
 }
 
 func resolveRegionFromProcess() string {

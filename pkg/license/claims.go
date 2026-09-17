@@ -1,14 +1,14 @@
 package license
 
 import (
-	"crypto/subtle"
-	"encoding/json"
 	"fmt"
-	"net/mail"
 	"path"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/divmora/license-go/internal/helpers"
+	"github.com/divmora/license-go/internal/schema"
 )
 
 // Customer represents the licensed customer organization, tenant, and primary contact.
@@ -171,28 +171,7 @@ type Claims struct {
 
 // isValidEmail validates an email address string against standard email format requirements.
 func isValidEmail(email string) bool {
-	email = strings.TrimSpace(email)
-	if email == "" {
-		return false
-	}
-	addr, err := mail.ParseAddress(email)
-	if err != nil || addr.Address != email {
-		return false
-	}
-	parts := strings.Split(addr.Address, "@")
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-		return false
-	}
-	domainParts := strings.Split(parts[1], ".")
-	if len(domainParts) < 2 {
-		return false
-	}
-	for _, p := range domainParts {
-		if p == "" {
-			return false
-		}
-	}
-	return true
+	return helpers.IsValidEmail(email)
 }
 
 // ValidateClaimsSchema validates the Claims struct against the DIV1 claims schema constraints
@@ -225,57 +204,7 @@ func (c *Claims) ValidateClaimsSchema() error {
 // Validates required fields, object structures, email format, and limit integer type constraints.
 // Returns a typed error wrapping ErrInvalidLicenseFormat on violation.
 func ValidateClaimsPayloadJSON(data []byte) error {
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return fmt.Errorf("%w: failed to parse claims JSON: %v", ErrInvalidLicenseFormat, err)
-	}
-
-	requiredFields := []string{"id", "customer", "product", "plan", "issued_at"}
-	for _, req := range requiredFields {
-		rawVal, exists := raw[req]
-		if !exists || len(rawVal) == 0 || string(rawVal) == "null" || string(rawVal) == `""` {
-			return fmt.Errorf("%w: claims.%s is required", ErrInvalidLicenseFormat, req)
-		}
-	}
-
-	// Validate customer object
-	var custRaw map[string]json.RawMessage
-	if err := json.Unmarshal(raw["customer"], &custRaw); err != nil {
-		return fmt.Errorf("%w: claims.customer must be an object: %v", ErrInvalidLicenseFormat, err)
-	}
-	if nameRaw, ok := custRaw["name"]; !ok || len(nameRaw) == 0 || string(nameRaw) == "null" || string(nameRaw) == `""` {
-		return fmt.Errorf("%w: claims.customer.name is required", ErrInvalidLicenseFormat)
-	}
-
-	// Validate customer.email format if provided
-	if emailRaw, ok := custRaw["email"]; ok && len(emailRaw) > 0 && string(emailRaw) != "null" {
-		var emailStr string
-		if err := json.Unmarshal(emailRaw, &emailStr); err == nil && emailStr != "" {
-			if !isValidEmail(emailStr) {
-				return fmt.Errorf("%w: claims.customer.email format is invalid: %q", ErrInvalidLicenseFormat, emailStr)
-			}
-		}
-	}
-
-	// Validate limits types (must be integers, reject floats like 1.5)
-	if limitsRaw, ok := raw["limits"]; ok && len(limitsRaw) > 0 && string(limitsRaw) != "null" {
-		var limMap map[string]interface{}
-		if err := json.Unmarshal(limitsRaw, &limMap); err != nil {
-			return fmt.Errorf("%w: claims.limits must be a map of integer values: %v", ErrInvalidLicenseFormat, err)
-		}
-		for k, val := range limMap {
-			switch v := val.(type) {
-			case float64:
-				if v != float64(int64(v)) {
-					return fmt.Errorf("%w: claims.limits[%q] must be an integer, got float %v", ErrInvalidLicenseFormat, k, v)
-				}
-			default:
-				return fmt.Errorf("%w: claims.limits[%q] must be an integer", ErrInvalidLicenseFormat, k)
-			}
-		}
-	}
-
-	return nil
+	return schema.ValidateClaimsPayloadJSON(data)
 }
 
 // IsPerpetual reports whether the license has no expiration date.
@@ -756,10 +685,7 @@ func (c *Claims) IsBoundToFingerprint() bool {
 // constantTimeFingerprintMatch performs a constant-time case-insensitive string comparison
 // between two fingerprints to prevent timing side-channel attacks.
 func constantTimeFingerprintMatch(a, b string) bool {
-	if len(a) == 0 || len(b) == 0 {
-		return false
-	}
-	return subtle.ConstantTimeCompare([]byte(strings.ToLower(a)), []byte(strings.ToLower(b))) == 1
+	return helpers.ConstantTimeFingerprintMatch(a, b)
 }
 
 // MatchesFingerprint checks if the license fingerprint matches the provided host fingerprint.
@@ -1396,256 +1322,11 @@ func (c *Claims) HasMaintenanceExpired(buildDate time.Time) bool {
 }
 
 // matchVersionPattern checks if a target version matches a pattern.
-// Supported patterns:
-//   - "*" or "all": matches any version
-//   - "1.*", "v1.*", "1.x": matches any minor/patch in major 1
-//   - "1.2.*", "1.2.x": matches any patch in 1.2
-//   - exact match: "1.2.3" or "v1.2.3"
 func matchVersionPattern(pattern, version string) bool {
-	p := cleanVersionString(pattern)
-	v := cleanVersionString(version)
-
-	if p == "*" || p == "all" {
-		return true
-	}
-	if p == v {
-		return true
-	}
-
-	normV := normalizeSemVerString(v)
-	normP := normalizeSemVerString(p)
-	if normP == normV || p == normV {
-		return true
-	}
-
-	// Convert standalone segment "x" or "X" to "*"
-	p = replaceWildcardSegments(p)
-
-	if strings.Contains(p, "*") {
-		if matched, err := path.Match(p, normV); err == nil && matched {
-			return true
-		}
-		if matched, err := path.Match(p, v); err == nil && matched {
-			return true
-		}
-	}
-
-	return false
-}
-
-// replaceWildcardSegments converts standalone 'x' or 'X' segments (e.g. "1.x", "1.X.0") to '*'
-// without altering non-wildcard occurrences of 'x' inside words (e.g. "1.0.fix").
-func replaceWildcardSegments(versionStr string) string {
-	segments := strings.Split(versionStr, ".")
-	for i, seg := range segments {
-		if seg == "x" || seg == "X" {
-			segments[i] = "*"
-		}
-	}
-	return strings.Join(segments, ".")
+	return helpers.MatchVersionPattern(pattern, version)
 }
 
 // checkMaxVersion asserts that version does not exceed maxVersion.
-// Supports:
-//   - "<=2.5.0", "<=2.5", "2.5.0"
-//   - "<2.5.0", "<2.5"
-//   - "1.*", "1.x" (allows any version with major <= 1)
-//   - "1.2.*", "1.2.x" (allows any version with major < 1 || (major == 1 && minor <= 2))
 func checkMaxVersion(maxVersion, version string) bool {
-	maxClean := strings.TrimSpace(maxVersion)
-	isStrictLess := false
-	if strings.HasPrefix(maxClean, "<=") {
-		maxClean = strings.TrimSpace(strings.TrimPrefix(maxClean, "<="))
-	} else if strings.HasPrefix(maxClean, "<") {
-		isStrictLess = true
-		maxClean = strings.TrimSpace(strings.TrimPrefix(maxClean, "<"))
-	}
-	maxClean = cleanVersionString(maxClean)
-	vClean := cleanVersionString(version)
-
-	if maxClean == "*" || maxClean == "all" {
-		return true
-	}
-
-	vMajor, vMinor, vPatch, vOk := parseSemVer(vClean)
-	if !vOk {
-		return false
-	}
-
-	// Normalize wildcards: replace standalone 'x' or 'X' segments with '*'
-	normalizedMax := replaceWildcardSegments(maxClean)
-
-	// If maxVersion contains wildcard '*'
-	if strings.Contains(normalizedMax, "*") {
-		parts := strings.Split(normalizedMax, ".")
-		if len(parts) == 1 {
-			return true
-		}
-
-		// Major only wildcard, e.g. "1.*"
-		if len(parts) >= 2 && parts[1] == "*" {
-			pMajor, err := strconv.Atoi(parts[0])
-			if err == nil {
-				if isStrictLess {
-					return vMajor < pMajor
-				}
-				return vMajor <= pMajor
-			}
-		}
-
-		// Major.Minor wildcard, e.g. "1.2.*"
-		if len(parts) >= 3 && parts[2] == "*" {
-			pMajor, err1 := strconv.Atoi(parts[0])
-			pMinor, err2 := strconv.Atoi(parts[1])
-			if err1 == nil && err2 == nil {
-				if vMajor < pMajor {
-					return true
-				}
-				if vMajor > pMajor {
-					return false
-				}
-				// vMajor == pMajor
-				if isStrictLess {
-					return vMinor < pMinor
-				}
-				return vMinor <= pMinor
-			}
-		}
-
-		// Major.Minor.Patch wildcard, e.g. "1.2.3.*"
-		if len(parts) >= 4 && parts[3] == "*" {
-			pMajor, err1 := strconv.Atoi(parts[0])
-			pMinor, err2 := strconv.Atoi(parts[1])
-			pPatch, err3 := strconv.Atoi(parts[2])
-			if err1 == nil && err2 == nil && err3 == nil {
-				if vMajor < pMajor {
-					return true
-				}
-				if vMajor > pMajor {
-					return false
-				}
-				if vMinor < pMinor {
-					return true
-				}
-				if vMinor > pMinor {
-					return false
-				}
-				// vMajor == pMajor && vMinor == pMinor
-				if isStrictLess {
-					return vPatch < pPatch
-				}
-				return vPatch <= pPatch
-			}
-		}
-	}
-
-	// Direct semver comparison: version <= maxVersion (or version < maxVersion if strict)
-	cmp, ok := compareSemVer(vClean, maxClean)
-	if ok {
-		if isStrictLess {
-			return cmp < 0
-		}
-		return cmp <= 0
-	}
-
-	// Fallback to exact or pattern match
-	return matchVersionPattern(maxVersion, version)
-}
-
-// normalizeSemVerString normalizes partial version strings (e.g. "1", "1.2") into standard 3-part SemVer ("1.0.0", "1.2.0").
-func normalizeSemVerString(s string) string {
-	s = cleanVersionString(s)
-	pre := ""
-	if idx := strings.IndexAny(s, "-+"); idx != -1 {
-		pre = s[idx:]
-		s = s[:idx]
-	}
-	parts := strings.Split(s, ".")
-	switch len(parts) {
-	case 1:
-		if parts[0] != "" && parts[0] != "*" {
-			s = parts[0] + ".0.0"
-		}
-	case 2:
-		if parts[1] != "*" {
-			s = parts[0] + "." + parts[1] + ".0"
-		}
-	}
-	return s + pre
-}
-
-func cleanVersionString(s string) string {
-	s = strings.TrimSpace(s)
-	s = strings.TrimPrefix(s, "v")
-	s = strings.TrimPrefix(s, "V")
-	return s
-}
-
-// parseSemVer extracts major, minor, patch numbers from a version string.
-func parseSemVer(s string) (major, minor, patch int, ok bool) {
-	s = cleanVersionString(s)
-	// Strip pre-release or build metadata: 1.2.3-rc1 -> 1.2.3
-	if idx := strings.IndexAny(s, "-+"); idx != -1 {
-		s = s[:idx]
-	}
-
-	parts := strings.Split(s, ".")
-	if len(parts) == 0 {
-		return 0, 0, 0, false
-	}
-
-	var err error
-	major, err = strconv.Atoi(parts[0])
-	if err != nil {
-		return 0, 0, 0, false
-	}
-
-	if len(parts) > 1 {
-		minor, err = strconv.Atoi(parts[1])
-		if err != nil {
-			return major, 0, 0, true
-		}
-	}
-
-	if len(parts) > 2 {
-		patch, err = strconv.Atoi(parts[2])
-		if err != nil {
-			return major, minor, 0, true
-		}
-	}
-
-	return major, minor, patch, true
-}
-
-// compareSemVer compares two semver strings:
-// returns -1 if v1 < v2, 0 if v1 == v2, 1 if v1 > v2.
-func compareSemVer(v1, v2 string) (int, bool) {
-	maj1, min1, pat1, ok1 := parseSemVer(v1)
-	maj2, min2, pat2, ok2 := parseSemVer(v2)
-	if !ok1 || !ok2 {
-		return 0, false
-	}
-
-	if maj1 != maj2 {
-		if maj1 < maj2 {
-			return -1, true
-		}
-		return 1, true
-	}
-
-	if min1 != min2 {
-		if min1 < min2 {
-			return -1, true
-		}
-		return 1, true
-	}
-
-	if pat1 != pat2 {
-		if pat1 < pat2 {
-			return -1, true
-		}
-		return 1, true
-	}
-
-	return 0, true
+	return helpers.CheckMaxVersion(maxVersion, version)
 }

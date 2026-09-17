@@ -2,7 +2,6 @@ package license
 
 import (
 	"crypto/ed25519"
-	"crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
@@ -14,36 +13,9 @@ import (
 )
 
 const (
-	// PEMTypePrivateKey is the PEM block type for PKCS#8 private keys.
-	PEMTypePrivateKey = "PRIVATE KEY"
 	// PEMTypePublicKey is the PEM block type for PKIX public keys.
 	PEMTypePublicKey = "PUBLIC KEY"
 )
-
-// GenerateKeyPair generates a new cryptographically secure Ed25519 public and private key pair.
-func GenerateKeyPair() (ed25519.PublicKey, ed25519.PrivateKey, error) {
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to generate Ed25519 key pair: %w", err)
-	}
-	return pub, priv, nil
-}
-
-// EncodePrivateKeyToPEM marshals an Ed25519 private key into PKCS#8 PEM format.
-func EncodePrivateKeyToPEM(priv ed25519.PrivateKey) ([]byte, error) {
-	if len(priv) == 0 {
-		return nil, ErrMissingPrivateKey
-	}
-	der, err := x509.MarshalPKCS8PrivateKey(priv)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal private key to PKCS#8: %w", err)
-	}
-	block := &pem.Block{
-		Type:  PEMTypePrivateKey,
-		Bytes: der,
-	}
-	return pem.EncodeToMemory(block), nil
-}
 
 // EncodePublicKeyToPEM marshals an Ed25519 public key into PKIX PEM format.
 func EncodePublicKeyToPEM(pub ed25519.PublicKey) ([]byte, error) {
@@ -59,25 +31,6 @@ func EncodePublicKeyToPEM(pub ed25519.PublicKey) ([]byte, error) {
 		Bytes: der,
 	}
 	return pem.EncodeToMemory(block), nil
-}
-
-// ParsePrivateKeyFromPEM parses a PKCS#8 PEM-encoded Ed25519 private key.
-func ParsePrivateKeyFromPEM(pemBytes []byte) (ed25519.PrivateKey, error) {
-	block, _ := pem.Decode(pemBytes)
-	if block == nil {
-		return nil, errors.New("failed to parse PEM block containing private key")
-	}
-
-	key, err := x509.ParsePKCS8PrivateKey(block.Bytes)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse PKCS#8 private key: %w", err)
-	}
-
-	privKey, ok := key.(ed25519.PrivateKey)
-	if !ok {
-		return nil, fmt.Errorf("unsupported private key type %T, expected Ed25519", key)
-	}
-	return privKey, nil
 }
 
 // ParsePublicKeyFromPEM parses a PKIX PEM-encoded Ed25519 public key.
@@ -130,15 +83,6 @@ func ParsePublicKeyFromBase64(s string) (ed25519.PublicKey, error) {
 	return nil, fmt.Errorf("invalid Ed25519 public key data length: %d bytes (expected %d)", len(data), ed25519.PublicKeySize)
 }
 
-// SavePrivateKeyToPEMFile writes an Ed25519 private key to a PEM file with the specified file permissions.
-func SavePrivateKeyToPEMFile(priv ed25519.PrivateKey, filePath string, perm os.FileMode) error {
-	pemData, err := EncodePrivateKeyToPEM(priv)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(filePath, pemData, perm)
-}
-
 // SavePublicKeyToPEMFile writes an Ed25519 public key to a PEM file.
 func SavePublicKeyToPEMFile(pub ed25519.PublicKey, filePath string, perm os.FileMode) error {
 	pemData, err := EncodePublicKeyToPEM(pub)
@@ -146,15 +90,6 @@ func SavePublicKeyToPEMFile(pub ed25519.PublicKey, filePath string, perm os.File
 		return err
 	}
 	return os.WriteFile(filePath, pemData, perm)
-}
-
-// LoadPrivateKeyFromPEMFile reads and parses an Ed25519 private key from a PEM file.
-func LoadPrivateKeyFromPEMFile(filePath string) (ed25519.PrivateKey, error) {
-	data, err := os.ReadFile(filePath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read private key file: %w", err)
-	}
-	return ParsePrivateKeyFromPEM(data)
 }
 
 // LoadPublicKeyFromPEMFile reads and parses an Ed25519 public key from a PEM file.

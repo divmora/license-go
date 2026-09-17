@@ -1,14 +1,16 @@
-package license
+package issuer
 
 import (
 	"crypto/ed25519"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"time"
+
+	"github.com/divmora/license-go/internal/envelope"
+	"github.com/divmora/license-go/internal/helpers"
+	"github.com/divmora/license-go/pkg/license"
 )
 
 // SignerOption is a functional option for configuring a Signer.
@@ -30,7 +32,7 @@ type Signer struct {
 // NewSigner creates a new Signer with the provided Ed25519 private key and options.
 func NewSigner(privateKey ed25519.PrivateKey, opts ...SignerOption) (*Signer, error) {
 	if len(privateKey) != ed25519.PrivateKeySize {
-		return nil, ErrMissingPrivateKey
+		return nil, license.ErrMissingPrivateKey
 	}
 	s := &Signer{privateKey: privateKey}
 	for _, opt := range opts {
@@ -69,9 +71,9 @@ func NewSignerFromPEMFile(filePath string, opts ...SignerOption) (*Signer, error
 // If claims.ID is empty, a random unique ID is generated.
 // If claims.KeyID is empty and the signer is configured with a Key ID, it is automatically set.
 // If claims.IssuedAt is zero, it defaults to the current UTC time.
-func (s *Signer) Sign(claims Claims) (string, error) {
+func (s *Signer) Sign(claims license.Claims) (string, error) {
 	if s.privateKey == nil {
-		return "", ErrMissingPrivateKey
+		return "", license.ErrMissingPrivateKey
 	}
 
 	if claims.Customer.Name == "" {
@@ -83,7 +85,7 @@ func (s *Signer) Sign(claims Claims) (string, error) {
 
 	// Default ID if not provided
 	if claims.ID == "" {
-		id, err := generateRandomID()
+		id, err := helpers.GenerateRandomID()
 		if err != nil {
 			return "", err
 		}
@@ -117,26 +119,25 @@ func (s *Signer) Sign(claims Claims) (string, error) {
 
 	// Construct token and sign canonical data
 	// The signed data is "DIV1.<base64url(payloadJSON)>"
-	tempToken := EncodeToken(payloadJSON, nil)
-	// tempToken is "DIV1.<payloadB64>."
+	tempToken := envelope.EncodeToken(payloadJSON, nil)
 	dotIdx := len(tempToken) - 1
 	signedData := []byte(tempToken[:dotIdx])
 
 	sig := ed25519.Sign(s.privateKey, signedData)
-	return EncodeToken(payloadJSON, sig), nil
+	return envelope.EncodeToken(payloadJSON, sig), nil
 }
 
 // SignArmored marshals and signs Claims, returning an armored text block.
-func (s *Signer) SignArmored(claims Claims) (string, error) {
+func (s *Signer) SignArmored(claims license.Claims) (string, error) {
 	token, err := s.Sign(claims)
 	if err != nil {
 		return "", err
 	}
-	return WrapArmored(token), nil
+	return envelope.WrapArmored(token), nil
 }
 
 // SignToFile marshals and signs Claims, saving the result to a specified file.
-func (s *Signer) SignToFile(claims Claims, filePath string, armored bool) error {
+func (s *Signer) SignToFile(claims license.Claims, filePath string, armored bool) error {
 	var content string
 	var err error
 	if armored {
@@ -148,13 +149,4 @@ func (s *Signer) SignToFile(claims Claims, filePath string, armored bool) error 
 		return err
 	}
 	return os.WriteFile(filePath, []byte(content), 0644)
-}
-
-// generateRandomID produces a secure 16-byte random hex string.
-func generateRandomID() (string, error) {
-	bytes := make([]byte, 16)
-	if _, err := rand.Read(bytes); err != nil {
-		return "", fmt.Errorf("failed to generate random license ID: %w", err)
-	}
-	return hex.EncodeToString(bytes), nil
 }

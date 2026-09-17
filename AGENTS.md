@@ -9,14 +9,13 @@ Guidelines and operational runbooks for AI coding agents working on `github.com/
 ```
 license-go/
 ├── pkg/
-│   └── license/                # Reusable Go licensing library
+│   └── license/                # Reusable Go licensing consumer SDK
 │       ├── claims.go           # Standard Claims schema & evaluation helper methods
 │       ├── errors.go           # Typed sentinel errors & structured error types
-│       ├── keys.go             # Ed25519 key generation, PEM PKCS#8/PKIX serialization
-│       ├── envelope.go         # Token serialization (compact DIV1 & armored PEM blocks)
+│       ├── keys.go             # Public Ed25519 key loading & PKIX PEM parsing
+│       ├── envelope.go         # Token parsing, unmarshaling & armored PEM block unwrapping
 │       ├── keyring.go          # KeyRing multi-key rotation, bundle management & revocation
 │       ├── bsl.go              # BSL 1.1 Change Date, Apache 2.0 conversion & clock defense
-│       ├── signer.go           # License generation & signing engine (private key)
 │       ├── validator.go              # Validator struct, options, VerificationResult & accessors
 │       ├── validator_constructors.go # Constructor variants (NewValidator*) & key resolution
 │       ├── validator_clock.go        # Authoritative time, clock skew & tampering defense
@@ -24,6 +23,8 @@ license-go/
 │       ├── provenance.go       # Cryptographic release attestation & binary provenance engine
 │       ├── status_formatter.go # Standardized CLI status card & quota utilization formatter
 │       ├── manager.go          # Daemon background monitor, file watcher, expiry alerts
+│       ├── fingerprint.go      # Node/cluster fingerprint aliases & evaluation
+│       ├── resolvers.go        # Infrastructure fingerprint resolvers
 │       ├── keys_test.go        # Key generation & PEM round-trip tests
 │       ├── keyring_test.go     # KeyRing rotation, revocation & multi-key tests
 │       ├── bsl_test.go         # BSL 1.1 conversion & clock tampering defense tests
@@ -33,6 +34,12 @@ license-go/
 │       ├── manager_test.go     # Background daemon lifecycle & hot-reloading tests
 │       ├── policy_test.go      # Operational policy modes (Strict, Degraded, WarnOnly) tests
 │       └── version_test.go     # Perpetual license version lock & maintenance cutoff tests
+├── internal/
+│   ├── helpers/                # String manipulation, semver, crypto matching, env & file I/O
+│   ├── envelope/               # Token packing/unpacking and PEM armoring primitives
+│   ├── schema/                 # JSON claims validation & required field assertions
+│   ├── resolvers/              # Platform fingerprint resolvers (Host, EC2, Lambda, K8s, Container)
+│   └── issuer/                 # Restricted private key generation, PEM I/O, and signing engine
 ├── cmd/
 │   └── license-cli/            # Standalone CLI binary & subcommands
 │       ├── main.go             # Entry point & subcommand dispatcher

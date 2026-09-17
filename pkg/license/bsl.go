@@ -5,6 +5,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/divmora/license-go/internal/helpers"
 )
 
 const (
@@ -198,7 +200,7 @@ func (g *BSLAdditionalUseGrant) Evaluate(req BSLUsageRequest) BSLGrantEvaluation
 	}
 
 	// 3. Allowed environments check (bypassed if request is dry-run/simulation or explicitly authorized by MatchFunc)
-	if !isDryRun && !matchFuncAllowed && len(g.AllowedEnvironments) > 0 && !containsCaseInsensitive(g.AllowedEnvironments, "*") {
+	if !isDryRun && !matchFuncAllowed && len(g.AllowedEnvironments) > 0 && !helpers.ContainsCaseInsensitive(g.AllowedEnvironments, "*") {
 		if reqEnv == "" {
 			return BSLGrantEvaluation{
 				GrantName: grantName,
@@ -206,7 +208,7 @@ func (g *BSLAdditionalUseGrant) Evaluate(req BSLUsageRequest) BSLGrantEvaluation
 				Reason:    fmt.Sprintf("deployment environment is unspecified, but grant %q requires one of %v", grantName, g.AllowedEnvironments),
 			}
 		}
-		if !containsCaseInsensitive(g.AllowedEnvironments, reqEnv) {
+		if !helpers.ContainsCaseInsensitive(g.AllowedEnvironments, reqEnv) {
 			return BSLGrantEvaluation{
 				GrantName: grantName,
 				Matched:   false,
@@ -223,7 +225,7 @@ func (g *BSLAdditionalUseGrant) Evaluate(req BSLUsageRequest) BSLGrantEvaluation
 			if trimmedFeat == "" {
 				continue
 			}
-			if containsCaseInsensitive(g.ExcludedFeatures, trimmedFeat) {
+			if helpers.ContainsCaseInsensitive(g.ExcludedFeatures, trimmedFeat) {
 				disallowed = append(disallowed, trimmedFeat)
 			}
 		}
@@ -239,14 +241,14 @@ func (g *BSLAdditionalUseGrant) Evaluate(req BSLUsageRequest) BSLGrantEvaluation
 	}
 
 	// 5. Allowed features check
-	if len(g.AllowedFeatures) > 0 && !containsCaseInsensitive(g.AllowedFeatures, "*") && !containsCaseInsensitive(g.AllowedFeatures, "all") && len(req.Features) > 0 {
+	if len(g.AllowedFeatures) > 0 && !helpers.ContainsCaseInsensitive(g.AllowedFeatures, "*") && !helpers.ContainsCaseInsensitive(g.AllowedFeatures, "all") && len(req.Features) > 0 {
 		var unentitled []string
 		for _, feat := range req.Features {
 			trimmedFeat := strings.TrimSpace(feat)
 			if trimmedFeat == "" {
 				continue
 			}
-			if !containsCaseInsensitive(g.AllowedFeatures, trimmedFeat) {
+			if !helpers.ContainsCaseInsensitive(g.AllowedFeatures, trimmedFeat) {
 				unentitled = append(unentitled, trimmedFeat)
 			}
 		}
@@ -289,7 +291,7 @@ func (g *BSLAdditionalUseGrant) Evaluate(req BSLUsageRequest) BSLGrantEvaluation
 	// 7. Final MatchFunc check if it returned false without an explicit reason
 	if matchFuncEvaluated && !matchFuncAllowed {
 		hasStandardCriteria := len(g.AllowedEnvironments) > 0 || len(g.Limits) > 0 || len(g.AllowedFeatures) > 0
-		if !hasStandardCriteria || (len(g.AllowedEnvironments) > 0 && !containsCaseInsensitive(g.AllowedEnvironments, reqEnv)) {
+		if !hasStandardCriteria || (len(g.AllowedEnvironments) > 0 && !helpers.ContainsCaseInsensitive(g.AllowedEnvironments, reqEnv)) {
 			reason := matchFuncReason
 			if reason == "" {
 				reason = fmt.Sprintf("custom predicate for grant %q rejected the usage request", grantName)
@@ -573,14 +575,4 @@ func (b *BSLPolicy) EvaluateEntitlementAt(req BSLUsageRequest, at time.Time) *BS
 		ChangeDate:          changeDate,
 		DaysUntilConversion: daysUntil,
 	}
-}
-
-func containsCaseInsensitive(slice []string, target string) bool {
-	target = strings.TrimSpace(target)
-	for _, item := range slice {
-		if strings.EqualFold(strings.TrimSpace(item), target) {
-			return true
-		}
-	}
-	return false
 }

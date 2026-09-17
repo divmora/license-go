@@ -14,6 +14,23 @@ import (
 	"time"
 )
 
+type ec2IdentityDocument struct {
+	InstanceID       string `json:"instanceId"`
+	AccountID        string `json:"accountId"`
+	Region           string `json:"region"`
+	AvailabilityZone string `json:"availabilityZone"`
+	InstanceType     string `json:"instanceType"`
+	Architecture     string `json:"architecture"`
+	ImageID          string `json:"imageId"`
+}
+
+type k8sNamespaceMetadata struct {
+	Metadata struct {
+		UID  string `json:"uid"`
+		Name string `json:"name"`
+	} `json:"metadata"`
+}
+
 func TestAWSEC2Resolver_Success(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {

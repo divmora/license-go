@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/divmora/license-go/internal/issuer"
 	license "github.com/divmora/license-go/pkg/license"
 )
 
@@ -75,12 +76,12 @@ func runIssue(args []string) error {
 		return fmt.Errorf("-customer is required (or provide -request)")
 	}
 
-	var signerOpts []license.SignerOption
+	var signerOpts []issuer.SignerOption
 	if *kid != "" {
-		signerOpts = append(signerOpts, license.WithSignerKeyID(*kid))
+		signerOpts = append(signerOpts, issuer.WithSignerKeyID(*kid))
 	}
 
-	signer, err := license.NewSignerFromPEMFile(*privKeyPath, signerOpts...)
+	signer, err := issuer.NewSignerFromPEMFile(*privKeyPath, signerOpts...)
 	if err != nil {
 		return fmt.Errorf("failed to load private key: %w", err)
 	}

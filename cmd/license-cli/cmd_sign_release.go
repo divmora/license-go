@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/divmora/license-go/internal/issuer"
 	license "github.com/divmora/license-go/pkg/license"
 )
 
@@ -46,7 +47,7 @@ func runSignRelease(args []string) error {
 		return fmt.Errorf("failed to read private key file: %w", err)
 	}
 
-	privKey, err := license.ParsePrivateKeyFromPEM(privKeyPEM)
+	privKey, err := issuer.ParsePrivateKeyFromPEM(privKeyPEM)
 	if err != nil {
 		return fmt.Errorf("failed to parse private key: %w", err)
 	}
@@ -101,15 +102,15 @@ func runSignRelease(args []string) error {
 	}
 
 	var output string
-	var opts []license.SignerOption
+	var opts []issuer.SignerOption
 	if *keyID != "" {
-		opts = append(opts, license.WithSignerKeyID(*keyID))
+		opts = append(opts, issuer.WithSignerKeyID(*keyID))
 	}
 
 	if *armored {
-		output, err = license.SignReleaseArmored(claims, privKey, opts...)
+		output, err = issuer.SignReleaseArmored(claims, privKey, opts...)
 	} else {
-		output, err = license.SignRelease(claims, privKey, opts...)
+		output, err = issuer.SignRelease(claims, privKey, opts...)
 	}
 	if err != nil {
 		return fmt.Errorf("failed to sign release attestation: %w", err)
