@@ -299,3 +299,134 @@ func TestManager_AutoResolveEnv(t *testing.T) {
 		t.Errorf("expected claims ID %q, got %q", claims.ID, mgrFile.Claims().ID)
 	}
 }
+
+func TestManager_BSLConversionClockDefense(t *testing.T) {
+	pub, priv, err := GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("GenerateKeyPair failed: %v", err)
+	}
+
+	signer, _ := NewSigner(priv)
+	now := time.Now().UTC()
+
+	// ChangeDate is in the future
+	changeDate := now.Add(365 * 24 * time.Hour)
+	bslPolicy := BSLPolicy{
+		Product:            "gitlab-fleet-governor",
+		ExplicitChangeDate: changeDate,
+	}
+
+	// Authoritative time is current time (now), strictly before changeDate
+	authTime := now
+	validator, err := NewValidator(pub,
+		WithProduct("gitlab-fleet-governor"),
+		WithBSLPolicy(bslPolicy),
+		WithAuthoritativeTime(authTime),
+		WithStrictClockDefense(false),
+	)
+	if err != nil {
+		t.Fatalf("NewValidator failed: %v", err)
+	}
+
+	claims := sampleClaims()
+	claims.Product = "gitlab-fleet-governor"
+	claims.ExpiresAt = now.Add(30 * 24 * time.Hour)
+	token, _ := signer.SignArmored(claims)
+
+	var bslConvertedCalled bool
+	mgr, err := NewManager(ManagerConfig{
+		Validator:     validator,
+		LicenseString: token,
+		OnBSLConverted: func(c *Claims) {
+			bslConvertedCalled = true
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewManager failed: %v", err)
+	}
+
+	// Run check: authoritative time defends against premature conversion
+	mgr.check()
+
+	if bslConvertedCalled {
+		t.Error("expected BSL conversion NOT to trigger because authoritative time is before changeDate")
+	}
+	if mgr.Claims().Plan == "open-source" {
+		t.Error("claims should not have converted to open-source")
+	}
+
+	// Now update validator with authoritative time PAST changeDate
+	validatorConverted, _ := NewValidator(pub,
+		WithProduct("gitlab-fleet-governor"),
+		WithBSLPolicy(bslPolicy),
+		WithAuthoritativeTime(changeDate.Add(24*time.Hour)),
+	)
+	mgrConverted, err := NewManager(ManagerConfig{
+		Validator:     validatorConverted,
+		LicenseString: token,
+		OnBSLConverted: func(c *Claims) {
+			bslConvertedCalled = true
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewManager failed: %v", err)
+	}
+
+	mgrConverted.check()
+
+	if !bslConvertedCalled {
+		t.Error("expected BSL conversion to trigger when authoritative time is past changeDate")
+	}
+	if mgrConverted.Claims().Plan != "open-source" {
+		t.Errorf("expected plan 'open-source', got %q", mgrConverted.Claims().Plan)
+	}
+}
+
+func TestManager_ExpirationClockDefense(t *testing.T) {
+	pub, priv, err := GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("GenerateKeyPair failed: %v", err)
+	}
+
+	signer, _ := NewSigner(priv)
+	now := time.Now().UTC()
+
+	claims := sampleClaims()
+	claims.Product = "gitlab-fleet-governor"
+	// License expired 1 day ago according to authoritative time
+	claims.ExpiresAt = now.Add(-24 * time.Hour)
+	claims.GracePeriodDays = 0
+	token, _ := signer.SignArmored(claims)
+
+	// Authoritative server time is now (past expiration)
+	validator, err := NewValidator(pub,
+		WithProduct("gitlab-fleet-governor"),
+		WithServerTimeAttestation(now, 1*time.Hour),
+		WithAllowExpired(true),
+	)
+	if err != nil {
+		t.Fatalf("NewValidator failed: %v", err)
+	}
+
+	var expiredNotified bool
+	mgr, err := NewManager(ManagerConfig{
+		Validator:     validator,
+		LicenseString: token,
+		Policy:        PolicyStrict,
+		OnExpired: func(c *Claims) {
+			expiredNotified = true
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewManager failed: %v", err)
+	}
+
+	mgr.check()
+
+	if !expiredNotified {
+		t.Error("expected OnExpired notification when authoritative time shows license is expired")
+	}
+	if mgr.IsActive() {
+		t.Error("expected mgr.IsActive() == false when license is expired according to authoritative time")
+	}
+}

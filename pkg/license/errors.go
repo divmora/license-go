@@ -87,6 +87,9 @@ var (
 
 	// ErrCommercialLicenseRequired is returned when usage exceeds BSL 1.1 Additional Use Grants and requires a commercial license.
 	ErrCommercialLicenseRequired = errors.New("license: usage exceeds BSL 1.1 Additional Use Grant; commercial license required")
+
+	// ErrMissingAuthoritativeTime is returned when authoritative time is required by policy but not configured.
+	ErrMissingAuthoritativeTime = errors.New("license: authoritative reference time required but not configured")
 )
 
 // LimitExceededError provides structured detail when a quota is exceeded.

@@ -187,6 +187,14 @@ func (m *Manager) Stop() {
 }
 
 // Policy returns the configured enforcement policy mode.
+func (m *Manager) evalTime() (time.Time, error) {
+	if m.cfg.Validator == nil {
+		return time.Now(), nil
+	}
+	evalTime, _, _, err := m.cfg.Validator.resolveEvaluationTime(time.Now())
+	return evalTime, err
+}
+
 func (m *Manager) Policy() EnforcementPolicy {
 	return m.cfg.Policy
 }
@@ -195,7 +203,8 @@ func (m *Manager) Policy() EnforcementPolicy {
 func (m *Manager) Claims() *Claims {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	if m.cfg.Policy == PolicyDegraded && m.currentClaims != nil && !m.currentClaims.IsActive() && m.cfg.FallbackClaims != nil {
+	evalTime, _ := m.evalTime()
+	if m.cfg.Policy == PolicyDegraded && m.currentClaims != nil && !m.currentClaims.IsActiveAt(evalTime) && m.cfg.FallbackClaims != nil {
 		return m.cfg.FallbackClaims
 	}
 	return m.currentClaims
@@ -208,7 +217,8 @@ func (m *Manager) IsDegraded() bool {
 	if m.isDegraded {
 		return true
 	}
-	if m.cfg.Policy == PolicyDegraded && m.currentClaims != nil && !m.currentClaims.IsActive() {
+	evalTime, _ := m.evalTime()
+	if m.cfg.Policy == PolicyDegraded && m.currentClaims != nil && !m.currentClaims.IsActiveAt(evalTime) {
 		return true
 	}
 	return false
@@ -221,7 +231,8 @@ func (m *Manager) DegradedReason() error {
 	if m.degradedReason != nil {
 		return m.degradedReason
 	}
-	if m.cfg.Policy == PolicyDegraded && m.currentClaims != nil && !m.currentClaims.IsActive() {
+	evalTime, _ := m.evalTime()
+	if m.cfg.Policy == PolicyDegraded && m.currentClaims != nil && !m.currentClaims.IsActiveAt(evalTime) {
 		return ErrExpired
 	}
 	return nil
@@ -248,7 +259,8 @@ func (m *Manager) CanMutate() error {
 		if claims == nil {
 			return ErrLicenseNotFound
 		}
-		if claims.Status() == StatusNotYetValid {
+		evalTime, _ := m.evalTime()
+		if claims.StatusAt(evalTime) == StatusNotYetValid {
 			return ErrNotYetValid
 		}
 		return ErrExpired
@@ -286,7 +298,8 @@ func (m *Manager) AssertFeature(feature string) error {
 		return ErrLicenseNotFound
 	}
 	if !m.IsActive() {
-		if claims.Status() == StatusNotYetValid {
+		evalTime, _ := m.evalTime()
+		if claims.StatusAt(evalTime) == StatusNotYetValid {
 			return ErrNotYetValid
 		}
 		return ErrExpired
@@ -306,7 +319,8 @@ func (m *Manager) CheckLimit(limitName string, currentUsage int64) error {
 		return ErrLicenseNotFound
 	}
 	if !m.IsActive() {
-		if claims.Status() == StatusNotYetValid {
+		evalTime, _ := m.evalTime()
+		if claims.StatusAt(evalTime) == StatusNotYetValid {
 			return ErrNotYetValid
 		}
 		return ErrExpired
@@ -330,7 +344,14 @@ func (m *Manager) IsActive() bool {
 		m.mu.RLock()
 		degraded := m.isDegraded
 		m.mu.RUnlock()
-		return !degraded && claims.IsActive()
+		if degraded {
+			return false
+		}
+		evalTime, err := m.evalTime()
+		if err != nil {
+			return false
+		}
+		return claims.IsActiveAt(evalTime)
 	}
 	return true
 }
@@ -347,7 +368,14 @@ func (m *Manager) IsCommercialActive() bool {
 	m.mu.RLock()
 	degraded := m.isDegraded
 	m.mu.RUnlock()
-	return !degraded && claims.IsActive()
+	if degraded {
+		return false
+	}
+	evalTime, err := m.evalTime()
+	if err != nil {
+		return false
+	}
+	return claims.IsActiveAt(evalTime)
 }
 
 // Check triggers an immediate inspection and verification cycle synchronously.
@@ -384,10 +412,19 @@ func (m *Manager) check() {
 		}
 	}
 
-	now := time.Now()
+	evalTime, err := m.evalTime()
+	if err != nil {
+		if m.cfg.OnError != nil {
+			m.cfg.OnError(err)
+		}
+		if m.cfg.Policy == PolicyDegraded {
+			m.transitionToDegraded(err)
+		}
+		return
+	}
 
 	// 2. Check BSL 1.1 Change Date conversion
-	if bsl := m.cfg.Validator.BSLPolicy(); bsl != nil && bsl.IsConverted(now) {
+	if bsl := m.cfg.Validator.BSLPolicy(); bsl != nil && bsl.IsConverted(evalTime) {
 		m.mu.Lock()
 		if !m.hasNotifiedBSL {
 			m.hasNotifiedBSL = true
@@ -427,13 +464,13 @@ func (m *Manager) check() {
 	}
 
 	// Check if currently operating in grace period
-	if claims.IsInGracePeriod() {
+	if claims.IsInGracePeriodAt(evalTime) {
 		m.mu.Lock()
 		if !m.hasNotifiedGrace {
 			m.hasNotifiedGrace = true
 			m.mu.Unlock()
 			if m.cfg.OnGracePeriod != nil {
-				m.cfg.OnGracePeriod(claims, claims.GraceDaysRemaining())
+				m.cfg.OnGracePeriod(claims, claims.GraceDaysRemainingAt(evalTime))
 			}
 		} else {
 			m.mu.Unlock()
@@ -442,7 +479,7 @@ func (m *Manager) check() {
 	}
 
 	// Check if completely expired
-	if claims.IsExpired() {
+	if claims.IsExpiredAt(evalTime) {
 		m.mu.Lock()
 		shouldNotifyExp := !m.hasNotifiedExp
 		m.hasNotifiedExp = true
@@ -460,7 +497,7 @@ func (m *Manager) check() {
 	}
 
 	// Active license: check days remaining
-	days := claims.DaysRemaining()
+	days := claims.DaysRemainingAt(evalTime)
 	if days >= 0 && days <= m.cfg.ExpiryWarningDays {
 		m.mu.Lock()
 		shouldNotify := m.lastWarnedDays != days

@@ -44,6 +44,15 @@ func WithAuthoritativeTime(t time.Time) ValidatorOption {
 	}
 }
 
+// WithRequireAuthoritativeTime enforces that an authoritative time source
+// (e.g., via WithAuthoritativeTime, WithServerTimeAttestation, or WithServerTimeHeader)
+// must be configured, failing closed with ErrMissingAuthoritativeTime if none is provided.
+func WithRequireAuthoritativeTime(require bool) ValidatorOption {
+	return func(v *Validator) {
+		v.requireAuthoritativeTime = require
+	}
+}
+
 // WithServerTimeAttestation validates licenses against an authoritative external server timestamp
 // (e.g., from an HTTP response Date header, cloud metadata API, or central licensing service)
 // with a configurable maximum allowed clock skew threshold.
@@ -141,6 +150,9 @@ func (v *Validator) resolveEvaluationTimeWithProv(localNow time.Time, prov *Rele
 	}
 
 	if v.authoritativeTime.IsZero() {
+		if v.requireAuthoritativeTime {
+			return localNow, false, 0, ErrMissingAuthoritativeTime
+		}
 		// Offline / air-gapped clock defense: local evaluation time cannot be physically prior to binary build date
 		if !buildTime.IsZero() {
 			earliest := buildTime.Add(-skewTolerance)

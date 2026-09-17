@@ -600,3 +600,57 @@ func TestValidator_OnlineFallback_WhenLocalClockPriorToBuildDate(t *testing.T) {
 		t.Fatalf("expected strict validator to reject with ErrClockTamperingDetected, got: %v", err)
 	}
 }
+
+func TestValidator_WithRequireAuthoritativeTime(t *testing.T) {
+	pub, priv, err := GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("GenerateKeyPair failed: %v", err)
+	}
+
+	signer, _ := NewSigner(priv)
+	now := time.Now().UTC()
+
+	claims := sampleClaims()
+	claims.Product = "gitlab-fleet-governor"
+	claims.IssuedAt = now.Add(-1 * time.Hour)
+	claims.ExpiresAt = now.Add(24 * time.Hour)
+	token, err := signer.SignArmored(claims)
+	if err != nil {
+		t.Fatalf("SignArmored failed: %v", err)
+	}
+
+	// 1. Validator configured with WithRequireAuthoritativeTime(true) but NO authoritative time source
+	vMissingAuth, err := NewValidator(pub,
+		WithProduct("gitlab-fleet-governor"),
+		WithRequireAuthoritativeTime(true),
+	)
+	if err != nil {
+		t.Fatalf("NewValidator failed: %v", err)
+	}
+	if !vMissingAuth.RequireAuthoritativeTime() {
+		t.Error("expected RequireAuthoritativeTime() == true")
+	}
+
+	_, err = vMissingAuth.Verify(token)
+	if !errors.Is(err, ErrMissingAuthoritativeTime) {
+		t.Fatalf("expected ErrMissingAuthoritativeTime when authoritative time required but not configured, got: %v", err)
+	}
+
+	// 2. Validator configured with WithRequireAuthoritativeTime(true) AND authoritative time source
+	vWithAuth, err := NewValidator(pub,
+		WithProduct("gitlab-fleet-governor"),
+		WithRequireAuthoritativeTime(true),
+		WithAuthoritativeTime(now),
+	)
+	if err != nil {
+		t.Fatalf("NewValidator failed: %v", err)
+	}
+
+	res, err := vWithAuth.VerifyWithResult(token)
+	if err != nil {
+		t.Fatalf("expected verification to succeed with authoritative time, got: %v", err)
+	}
+	if res.Status != StatusActive {
+		t.Errorf("expected StatusActive, got %s", res.Status)
+	}
+}

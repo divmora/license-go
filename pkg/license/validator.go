@@ -32,6 +32,7 @@ type Validator struct {
 	buildDate                 time.Time
 	bslPolicy                 *BSLPolicy
 	authoritativeTime         time.Time
+	requireAuthoritativeTime  bool
 	maxClockDrift             time.Duration
 	serverTimeAttested        bool
 	strictClockDefense        bool
@@ -380,6 +381,26 @@ func (v *Validator) KeyRing() *KeyRing {
 // AllowEnvKeyOverride reports whether environment variables are permitted to override explicit fallback keys.
 func (v *Validator) AllowEnvKeyOverride() bool {
 	return v.allowEnvKeyOverride
+}
+
+// ClockSkew returns the configured clock skew tolerance duration.
+func (v *Validator) ClockSkew() time.Duration {
+	return v.clockSkew
+}
+
+// GracePeriod returns the configured grace period duration.
+func (v *Validator) GracePeriod() time.Duration {
+	return v.gracePeriod
+}
+
+// RequireAuthoritativeTime reports whether authoritative time is strictly required.
+func (v *Validator) RequireAuthoritativeTime() bool {
+	return v.requireAuthoritativeTime
+}
+
+// ResolveEvaluationTime reconciles local reference time with authoritative time sources and clock defense.
+func (v *Validator) ResolveEvaluationTime(localNow time.Time) (evalTime time.Time, tampered bool, skew time.Duration, err error) {
+	return v.resolveEvaluationTime(localNow)
 }
 
 // VerificationResult encapsulates verified license claims alongside explicit grace period dynamics,
