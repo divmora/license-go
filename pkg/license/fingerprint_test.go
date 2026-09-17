@@ -469,6 +469,7 @@ func TestValidator_AutoFingerprint_AWSLambda(t *testing.T) {
 
 	// Set environment for Lambda
 	t.Setenv("AWS_LAMBDA_FUNCTION_NAME", "otel-aws-log-processor-prod")
+	t.Setenv("AWS_LAMBDA_RUNTIME_API", "127.0.0.1:9001")
 	t.Setenv("AWS_REGION", "us-east-1")
 
 	val, err := NewValidator(pub,

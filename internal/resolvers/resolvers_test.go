@@ -125,6 +125,7 @@ func TestGenericContainerResolver(t *testing.T) {
 func TestDetectEnvironment(t *testing.T) {
 	t.Run("detects lambda", func(t *testing.T) {
 		t.Setenv("AWS_LAMBDA_FUNCTION_NAME", "my-lambda-fn")
+		t.Setenv("AWS_LAMBDA_RUNTIME_API", "127.0.0.1:9001")
 		if env := DetectEnvironment(); env != PlatformAWSLambda {
 			t.Errorf("expected PlatformAWSLambda, got %s", env)
 		}
@@ -371,6 +372,7 @@ func TestAWSLambdaResolver_SuccessWithOptions(t *testing.T) {
 
 func TestAWSLambdaResolver_SuccessWithEnv(t *testing.T) {
 	t.Setenv("AWS_LAMBDA_FUNCTION_NAME", "my-env-lambda")
+	t.Setenv("AWS_LAMBDA_RUNTIME_API", "127.0.0.1:9001")
 	t.Setenv("AWS_REGION", "eu-central-1")
 	t.Setenv("AWS_ACCOUNT_ID", "112233445566")
 	t.Setenv("AWS_LAMBDA_FUNCTION_MEMORY_SIZE", "512")
@@ -540,6 +542,37 @@ func TestCompositeResolver_Errors(t *testing.T) {
 	}
 }
 
+func TestAWSLambda_SpoofProtection(t *testing.T) {
+	// Attacker sets AWS_LAMBDA_FUNCTION_NAME outside Lambda environment without runtime markers
+	t.Setenv("AWS_LAMBDA_FUNCTION_NAME", "target-function-name")
+	t.Setenv("LAMBDA_TASK_ROOT", "")
+	t.Setenv("AWS_LAMBDA_RUNTIME_API", "")
+	t.Setenv("AWS_REGION", "us-east-1")
+	t.Setenv("AWS_ACCOUNT_ID", "123456789012")
+
+	// 1. AWSLambdaResolver.Resolve must fail closed
+	r := NewAWSLambdaResolver()
+	_, err := r.Resolve(context.Background())
+	if err == nil {
+		t.Fatal("security vulnerability: AWSLambdaResolver.Resolve accepted spoofed environment variables")
+	}
+
+	// 2. DetectEnvironment must not detect PlatformAWSLambda
+	if env := DetectEnvironment(); env == PlatformAWSLambda {
+		t.Fatal("security vulnerability: DetectEnvironment detected PlatformAWSLambda with spoofed env var")
+	}
+
+	// 3. NewDefaultCompositeResolver must not return a Lambda fingerprint
+	comp := NewDefaultCompositeResolver()
+	fp, err := comp.Resolve(context.Background())
+	if err != nil {
+		t.Fatalf("DefaultCompositeResolver failed: %v", err)
+	}
+	if fp.Platform == PlatformAWSLambda {
+		t.Fatalf("security vulnerability: DefaultCompositeResolver resolved AWS Lambda fingerprint on spoofed environment")
+	}
+}
+
 func TestAutoDetectResolver_MetadataAndDetection(t *testing.T) {
 	r := NewAutoDetectResolver()
 	if r.Name() != "auto-detect" {
@@ -560,6 +593,7 @@ func TestAutoDetectResolver_MetadataAndDetection(t *testing.T) {
 
 	// Test Lambda environment detection
 	t.Setenv("AWS_LAMBDA_FUNCTION_NAME", "test-function")
+	t.Setenv("AWS_LAMBDA_RUNTIME_API", "127.0.0.1:9001")
 	t.Setenv("AWS_REGION", "us-east-1")
 	t.Setenv("_HANDLER", "bootstrap")
 	if env := DetectEnvironment(); env != PlatformAWSLambda {

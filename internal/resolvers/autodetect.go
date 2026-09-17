@@ -42,7 +42,7 @@ func (r *AutoDetectResolver) Platform() Platform {
 // DetectEnvironment inspects runtime markers to determine the current execution platform.
 func DetectEnvironment() Platform {
 	// 1. AWS Lambda
-	if os.Getenv("AWS_LAMBDA_FUNCTION_NAME") != "" {
+	if isLambdaRuntime() {
 		return PlatformAWSLambda
 	}
 

@@ -644,6 +644,7 @@ func TestAWSLambdaResolver_SuccessWithOptions(t *testing.T) {
 
 func TestAWSLambdaResolver_SuccessWithEnv(t *testing.T) {
 	t.Setenv("AWS_LAMBDA_FUNCTION_NAME", "my-env-lambda")
+	t.Setenv("AWS_LAMBDA_RUNTIME_API", "127.0.0.1:9001")
 	t.Setenv("AWS_REGION", "eu-central-1")
 	t.Setenv("AWS_ACCOUNT_ID", "112233445566")
 	t.Setenv("AWS_LAMBDA_FUNCTION_MEMORY_SIZE", "512")
@@ -671,6 +672,7 @@ func TestAWSLambdaResolver_SuccessWithEnv(t *testing.T) {
 
 func TestAWSLambdaResolver_ARNParsing(t *testing.T) {
 	// Only ARN set in env; region, account_id, and function_name should be extracted automatically
+	t.Setenv("AWS_LAMBDA_RUNTIME_API", "127.0.0.1:9001")
 	t.Setenv("LAMBDA_TASK_ROOT", "/var/task")
 	t.Setenv("AWS_LAMBDA_FUNCTION_ARN", "arn:aws:lambda:ap-southeast-1:555666777888:function:auto-extracted-func:$LATEST")
 	t.Setenv("AWS_LAMBDA_FUNCTION_NAME", "")
@@ -711,6 +713,7 @@ func TestAWSLambdaResolver_OutsideLambda(t *testing.T) {
 
 func TestAWSLambdaResolver_ConvenienceFunctions(t *testing.T) {
 	t.Setenv("AWS_LAMBDA_FUNCTION_NAME", "convenience-test-func")
+	t.Setenv("AWS_LAMBDA_RUNTIME_API", "127.0.0.1:9001")
 	t.Setenv("AWS_REGION", "us-east-2")
 
 	fp, err := ResolveAWSLambdaFingerprint()
@@ -734,6 +737,7 @@ func TestAWSLambdaResolver_ConvenienceFunctions(t *testing.T) {
 
 func TestCompositeResolver_LambdaPriority(t *testing.T) {
 	t.Setenv("AWS_LAMBDA_FUNCTION_NAME", "priority-lambda-func")
+	t.Setenv("AWS_LAMBDA_RUNTIME_API", "127.0.0.1:9001")
 	t.Setenv("AWS_REGION", "us-east-1")
 
 	comp := NewDefaultCompositeResolver()

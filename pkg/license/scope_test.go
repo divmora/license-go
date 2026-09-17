@@ -917,6 +917,45 @@ func TestScope_HybridScopeAndEnvironment_Enforcement(t *testing.T) {
 	}
 }
 
+func TestScope_AccountAndRegionSpoofProtection(t *testing.T) {
+	pub, priv, err := GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("GenerateKeyPair failed: %v", err)
+	}
+	signer, err := NewSigner(priv)
+	if err != nil {
+		t.Fatalf("NewSigner failed: %v", err)
+	}
+
+	claims := Claims{
+		Product:  "gitlab-fleet-governor",
+		Customer: Customer{Name: "Target Account Customer"},
+		Scope: &Scope{
+			Accounts: []string{"123456789012"},
+			Regions:  []string{"us-east-1"},
+		},
+	}
+	token, err := signer.Sign(claims)
+	if err != nil {
+		t.Fatalf("Sign failed: %v", err)
+	}
+
+	// Attacker sets unauthenticated env vars AWS_ACCOUNT_ID and AWS_REGION
+	t.Setenv("AWS_ACCOUNT_ID", "123456789012")
+	t.Setenv("AWS_REGION", "us-east-1")
+
+	// Validator without explicit WithCurrentAccount or WithCurrentRegion must FAIL closed
+	val, err := NewValidator(pub, WithProduct("gitlab-fleet-governor"))
+	if err != nil {
+		t.Fatalf("NewValidator failed: %v", err)
+	}
+
+	_, err = val.Verify(token)
+	if err == nil || !errors.Is(err, ErrScopeMismatch) {
+		t.Fatalf("security vulnerability: scope check blindly trusted unauthenticated process env vars, got err: %v", err)
+	}
+}
+
 func TestValidator_WithRequireScope(t *testing.T) {
 	pub, priv, err := GenerateKeyPair()
 	if err != nil {
