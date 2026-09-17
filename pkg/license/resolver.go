@@ -148,7 +148,10 @@ func ResolveLicense(explicitSource ...string) (*ResolvedLicense, error) {
 			continue
 		}
 
-		if fi, err := os.Stat(src); err == nil && !fi.IsDir() {
+		if fi, err := os.Lstat(src); err == nil && !fi.IsDir() {
+			if fi.Mode()&os.ModeSymlink != 0 {
+				return nil, fmt.Errorf("%w: license file %s is a symlink", ErrSymlinkNotAllowed, src)
+			}
 			data, err := os.ReadFile(src)
 			if err != nil {
 				return nil, fmt.Errorf("failed to read license file %s: %w", src, err)
@@ -182,6 +185,11 @@ func ResolveLicense(explicitSource ...string) (*ResolvedLicense, error) {
 
 	// 3. Check DIVMORA_LICENSE_FILE environment variable
 	if envFile := strings.TrimSpace(os.Getenv(EnvLicenseFile)); envFile != "" {
+		if fi, err := os.Lstat(envFile); err == nil {
+			if fi.Mode()&os.ModeSymlink != 0 {
+				return nil, fmt.Errorf("%w: license file %s is a symlink", ErrSymlinkNotAllowed, envFile)
+			}
+		}
 		data, err := os.ReadFile(envFile)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read license file from %s (%s): %w", EnvLicenseFile, envFile, err)
@@ -194,7 +202,10 @@ func ResolveLicense(explicitSource ...string) (*ResolvedLicense, error) {
 	}
 
 	// 4. Check DefaultLicensePath (/etc/divmora/license.key)
-	if fi, err := os.Stat(DefaultLicensePath); err == nil && !fi.IsDir() {
+	if fi, err := os.Lstat(DefaultLicensePath); err == nil && !fi.IsDir() {
+		if fi.Mode()&os.ModeSymlink != 0 {
+			return nil, fmt.Errorf("%w: default license file %s is a symlink", ErrSymlinkNotAllowed, DefaultLicensePath)
+		}
 		data, err := os.ReadFile(DefaultLicensePath)
 		if err == nil {
 			return &ResolvedLicense{
@@ -360,7 +371,10 @@ func parseFallbackKeys(fallbacks []string) (*ResolvedKeyRing, error) {
 func resolveKeyRingFromEnv() (*ResolvedKeyRing, error) {
 	// 1. DIVMORA_PUBLIC_KEYS_PEM (multi-key PKIX PEM bundle or file path)
 	if pemVal := strings.TrimSpace(os.Getenv(EnvPublicKeysPEM)); pemVal != "" {
-		if fi, err := os.Stat(pemVal); err == nil && !fi.IsDir() {
+		if fi, err := os.Lstat(pemVal); err == nil && !fi.IsDir() {
+			if fi.Mode()&os.ModeSymlink != 0 {
+				return nil, fmt.Errorf("%w: public key bundle file %s is a symlink", ErrSymlinkNotAllowed, pemVal)
+			}
 			data, err := os.ReadFile(pemVal)
 			if err != nil {
 				return nil, fmt.Errorf("failed to read key bundle file from %s (%s): %w", EnvPublicKeysPEM, pemVal, err)
@@ -387,7 +401,10 @@ func resolveKeyRingFromEnv() (*ResolvedKeyRing, error) {
 
 	// 2. DIVMORA_PUBLIC_KEY (base64 single key, PEM block, or file path)
 	if keyVal := strings.TrimSpace(os.Getenv(EnvPublicKey)); keyVal != "" {
-		if fi, err := os.Stat(keyVal); err == nil && !fi.IsDir() {
+		if fi, err := os.Lstat(keyVal); err == nil && !fi.IsDir() {
+			if fi.Mode()&os.ModeSymlink != 0 {
+				return nil, fmt.Errorf("%w: public key file %s is a symlink", ErrSymlinkNotAllowed, keyVal)
+			}
 			ring, err := ParseKeyRingFromString(keyVal)
 			if err != nil {
 				return nil, fmt.Errorf("failed to parse key file from %s (%s): %w", EnvPublicKey, keyVal, err)
@@ -410,6 +427,11 @@ func resolveKeyRingFromEnv() (*ResolvedKeyRing, error) {
 
 	// 3. DIVMORA_PUBLIC_KEY_FILE (path to public key or PEM bundle on disk)
 	if fileVal := strings.TrimSpace(os.Getenv(EnvPublicKeyFile)); fileVal != "" {
+		if fi, err := os.Lstat(fileVal); err == nil {
+			if fi.Mode()&os.ModeSymlink != 0 {
+				return nil, fmt.Errorf("%w: public key file %s is a symlink", ErrSymlinkNotAllowed, fileVal)
+			}
+		}
 		data, err := os.ReadFile(fileVal)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read public key file from %s (%s): %w", EnvPublicKeyFile, fileVal, err)
@@ -426,7 +448,10 @@ func resolveKeyRingFromEnv() (*ResolvedKeyRing, error) {
 	}
 
 	// 4. Default Linux/container system path (/etc/divmora/public.pem)
-	if fi, err := os.Stat(DefaultPublicKeyPath); err == nil && !fi.IsDir() {
+	if fi, err := os.Lstat(DefaultPublicKeyPath); err == nil && !fi.IsDir() {
+		if fi.Mode()&os.ModeSymlink != 0 {
+			return nil, fmt.Errorf("%w: default public key file %s is a symlink", ErrSymlinkNotAllowed, DefaultPublicKeyPath)
+		}
 		data, err := os.ReadFile(DefaultPublicKeyPath)
 		if err == nil {
 			if ring, err := NewKeyRingFromPEM(data); err == nil {

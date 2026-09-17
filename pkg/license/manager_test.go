@@ -2,6 +2,7 @@ package license
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"sync"
@@ -428,5 +429,114 @@ func TestManager_ExpirationClockDefense(t *testing.T) {
 	}
 	if mgr.IsActive() {
 		t.Error("expected mgr.IsActive() == false when license is expired according to authoritative time")
+	}
+}
+
+func TestManager_SymlinkAttackDefense(t *testing.T) {
+	pub, priv, err := GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("GenerateKeyPair failed: %v", err)
+	}
+	signer, _ := NewSigner(priv)
+	validator, _ := NewValidator(pub, WithProduct("gitlab-fleet-governor"))
+
+	tempDir := t.TempDir()
+	realLicFile := filepath.Join(tempDir, "real_license.key")
+	symlinkLicFile := filepath.Join(tempDir, "symlink_license.key")
+
+	claims := sampleClaims()
+	claims.Product = "gitlab-fleet-governor"
+	token, err := signer.SignArmored(claims)
+	if err != nil {
+		t.Fatalf("SignArmored failed: %v", err)
+	}
+
+	if err := os.WriteFile(realLicFile, []byte(token), 0600); err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
+
+	if err := os.Symlink(realLicFile, symlinkLicFile); err != nil {
+		t.Fatalf("Symlink failed: %v", err)
+	}
+
+	// 1. ResolveLicense must reject symlink
+	_, err = ResolveLicense(symlinkLicFile)
+	if !errors.Is(err, ErrSymlinkNotAllowed) {
+		t.Fatalf("expected ResolveLicense to reject symlink with ErrSymlinkNotAllowed, got: %v", err)
+	}
+
+	// 2. InspectFromFile must reject symlink
+	_, err = InspectFromFile(symlinkLicFile)
+	if !errors.Is(err, ErrSymlinkNotAllowed) {
+		t.Fatalf("expected InspectFromFile to reject symlink with ErrSymlinkNotAllowed, got: %v", err)
+	}
+
+	// 3. Manager with AllowSymlinks: false (default) in PolicyStrict must fail with ErrSymlinkNotAllowed
+	_, err = NewManager(ManagerConfig{
+		Validator:   validator,
+		LicenseFile: symlinkLicFile,
+		Policy:      PolicyStrict,
+	})
+	if !errors.Is(err, ErrSymlinkNotAllowed) {
+		t.Fatalf("expected NewManager to reject symlink with ErrSymlinkNotAllowed, got: %v", err)
+	}
+
+	// 4. Manager with AllowSymlinks: true must succeed
+	mgrAllowed, err := NewManager(ManagerConfig{
+		Validator:     validator,
+		LicenseFile:   symlinkLicFile,
+		AllowSymlinks: true,
+	})
+	if err != nil {
+		t.Fatalf("expected NewManager with AllowSymlinks:true to succeed, got: %v", err)
+	}
+	if mgrAllowed.Claims().ID != claims.ID {
+		t.Errorf("expected claims ID %q, got %q", claims.ID, mgrAllowed.Claims().ID)
+	}
+}
+
+func TestManager_DegradedModeDefaultsAndDefense(t *testing.T) {
+	pub, _, err := GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("GenerateKeyPair failed: %v", err)
+	}
+	validator, _ := NewValidator(pub, WithProduct("gitlab-fleet-governor"))
+
+	// 1. Default PolicyDegraded without explicit DegradedReadOnly must default to DegradedReadOnly == true
+	mgrDefault, err := NewManager(ManagerConfig{
+		Validator: validator,
+		Policy:    PolicyDegraded,
+		// No license provided -> triggers degraded fallback
+	})
+	if err != nil {
+		t.Fatalf("NewManager failed: %v", err)
+	}
+	if !mgrDefault.IsDegraded() {
+		t.Error("expected manager to be in degraded mode")
+	}
+	if !mgrDefault.IsReadOnly() {
+		t.Error("expected DegradedReadOnly to default to true under PolicyDegraded")
+	}
+	if err := mgrDefault.CanMutate(); !errors.Is(err, ErrDegradedReadOnly) {
+		t.Errorf("expected CanMutate to return ErrDegradedReadOnly, got: %v", err)
+	}
+
+	// 2. PolicyDegraded with AllowDegradedMutations: true must allow mutations
+	mgrMutable, err := NewManager(ManagerConfig{
+		Validator:              validator,
+		Policy:                 PolicyDegraded,
+		AllowDegradedMutations: true,
+	})
+	if err != nil {
+		t.Fatalf("NewManager failed: %v", err)
+	}
+	if !mgrMutable.IsDegraded() {
+		t.Error("expected manager to be in degraded mode")
+	}
+	if mgrMutable.IsReadOnly() {
+		t.Error("expected IsReadOnly() == false when AllowDegradedMutations is true")
+	}
+	if err := mgrMutable.CanMutate(); err != nil {
+		t.Errorf("expected CanMutate to succeed when AllowDegradedMutations is true, got: %v", err)
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"sync"
 	"time"
@@ -63,7 +64,16 @@ type ManagerConfig struct {
 	FallbackClaims *Claims
 
 	// DegradedReadOnly restricts write operations (CanMutate returns ErrDegradedReadOnly) when in degraded mode.
+	// Defaults to true when PolicyDegraded is selected to prevent silent downgrade attacks.
 	DegradedReadOnly bool
+
+	// AllowDegradedMutations explicitly permits mutations/writes while operating in PolicyDegraded.
+	// When false (default), PolicyDegraded enforces read-only mode to defend against license deletion attacks.
+	AllowDegradedMutations bool
+
+	// AllowSymlinks permits license file paths to be symbolic links.
+	// When false (default), symlinks are rejected to defend against path traversal and substitution attacks.
+	AllowSymlinks bool
 
 	// CheckInterval configures how often the license status and file are checked.
 	// Defaults to 1 hour if not specified.
@@ -134,6 +144,11 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 	// In PolicyDegraded or PolicyWarnOnly, populate default community claims if none provided
 	if (cfg.Policy == PolicyDegraded || cfg.Policy == PolicyWarnOnly) && cfg.FallbackClaims == nil {
 		cfg.FallbackClaims = DefaultCommunityClaims(cfg.Validator.ExpectedProduct())
+	}
+
+	// In PolicyDegraded, default DegradedReadOnly to true to protect against unauthorized mutations unless explicitly overridden
+	if cfg.Policy == PolicyDegraded && !cfg.AllowDegradedMutations {
+		cfg.DegradedReadOnly = true
 	}
 
 	// Auto-resolve from environment (DIVMORA_LICENSE_FILE, DIVMORA_LICENSE_KEY, or /etc/divmora/license.key)
@@ -521,6 +536,10 @@ func (m *Manager) transitionToDegraded(reason error) {
 	claims := m.currentClaims
 	m.mu.Unlock()
 
+	if !wasDegraded {
+		log.Printf("[SECURITY WARNING] License manager transitioned to degraded fallback mode: %v", reason)
+	}
+
 	if !wasDegraded && m.cfg.OnDegraded != nil {
 		m.cfg.OnDegraded(reason, claims)
 	}
@@ -551,6 +570,25 @@ func (m *Manager) loadAndVerify(initial bool) error {
 	var modTime time.Time
 
 	if m.cfg.LicenseFile != "" {
+		if !m.cfg.AllowSymlinks {
+			lstatInfo, err := os.Lstat(m.cfg.LicenseFile)
+			if err != nil {
+				if m.cfg.Policy == PolicyDegraded || m.cfg.Policy == PolicyWarnOnly {
+					m.transitionToDegraded(err)
+					return nil
+				}
+				return fmt.Errorf("failed to stat license file: %w", err)
+			}
+			if lstatInfo.Mode()&os.ModeSymlink != 0 {
+				symlinkErr := fmt.Errorf("%w: license file %s is a symlink", ErrSymlinkNotAllowed, m.cfg.LicenseFile)
+				if m.cfg.Policy == PolicyDegraded || m.cfg.Policy == PolicyWarnOnly {
+					m.transitionToDegraded(symlinkErr)
+					return nil
+				}
+				return symlinkErr
+			}
+		}
+
 		info, err := os.Stat(m.cfg.LicenseFile)
 		if err != nil {
 			if m.cfg.Policy == PolicyDegraded || m.cfg.Policy == PolicyWarnOnly {

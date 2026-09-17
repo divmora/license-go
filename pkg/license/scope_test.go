@@ -775,28 +775,41 @@ func TestScope_LegacyClaimsEnvironment_Enforcement(t *testing.T) {
 		}
 	})
 
-	// 4. Unconfigured validator, but process environment APP_ENV="production" -> PASS
-	t.Run("resolve from APP_ENV", func(t *testing.T) {
-		t.Setenv("APP_ENV", "production")
+	// 4. Unconfigured validator, but process environment DIVMORA_ENVIRONMENT="production" -> PASS
+	t.Run("resolve from DIVMORA_ENVIRONMENT", func(t *testing.T) {
+		t.Setenv("DIVMORA_ENVIRONMENT", "production")
 		vUnconfigured, _ := NewValidator(pub, WithProduct("gitlab-fleet-governor"))
 		if _, err := vUnconfigured.Verify(token); err != nil {
-			t.Fatalf("expected verification to pass via APP_ENV, got: %v", err)
+			t.Fatalf("expected verification to pass via DIVMORA_ENVIRONMENT, got: %v", err)
 		}
 	})
 
-	// 5. Unconfigured validator, but process environment ENV="staging" -> FAIL
-	t.Run("mismatch from ENV", func(t *testing.T) {
-		t.Setenv("ENV", "staging")
+	// 5. Unconfigured validator, but process environment DIVMORA_ENV="staging" -> FAIL
+	t.Run("mismatch from DIVMORA_ENV", func(t *testing.T) {
+		t.Setenv("DIVMORA_ENV", "staging")
 		vUnconfigured, _ := NewValidator(pub, WithProduct("gitlab-fleet-governor"))
 		_, err := vUnconfigured.Verify(token)
 		if !errors.Is(err, ErrScopeMismatch) {
-			t.Fatalf("expected ErrScopeMismatch for staging ENV, got: %v", err)
+			t.Fatalf("expected ErrScopeMismatch for staging DIVMORA_ENV, got: %v", err)
 		}
 	})
 
-	// 6. Unconfigured validator with NO environment variables -> FAIL CLOSED
+	// 6. Generic ENV and APP_ENV are ignored to prevent accidental privilege escalation -> FAIL CLOSED
+	t.Run("generic ENV ignored", func(t *testing.T) {
+		t.Setenv("DIVMORA_ENV", "")
+		t.Setenv("DIVMORA_ENVIRONMENT", "")
+		t.Setenv("ENV", "production")
+		t.Setenv("APP_ENV", "production")
+		vUnconfigured, _ := NewValidator(pub, WithProduct("gitlab-fleet-governor"))
+		_, err := vUnconfigured.Verify(token)
+		if !errors.Is(err, ErrScopeMismatch) {
+			t.Fatalf("expected generic ENV to be ignored and fail closed with ErrScopeMismatch, got: %v", err)
+		}
+	})
+
+	// 7. Unconfigured validator with NO environment variables -> FAIL CLOSED
 	t.Run("fail closed when environment undetermined", func(t *testing.T) {
-		for _, k := range []string{"DIVMORA_ENV", "ENV", "ENVIRONMENT", "APP_ENV"} {
+		for _, k := range []string{"DIVMORA_ENV", "DIVMORA_ENVIRONMENT", "ENV", "ENVIRONMENT", "APP_ENV"} {
 			t.Setenv(k, "")
 		}
 		vUnconfigured, _ := NewValidator(pub, WithProduct("gitlab-fleet-governor"))

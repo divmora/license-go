@@ -293,9 +293,18 @@ func WithReleaseAttestation(tokenOrPEM string) ValidatorOption {
 }
 
 // WithReleaseAttestationFile loads a release attestation from disk.
-// If the file is missing or cannot be read, an initialization error is recorded.
+// If the file is missing, a symlink, or cannot be read, an initialization error is recorded.
 func WithReleaseAttestationFile(filePath string) ValidatorOption {
 	return func(v *Validator) {
+		fi, err := os.Lstat(filePath)
+		if err != nil {
+			v.initErr = fmt.Errorf("failed to stat release attestation file: %w", err)
+			return
+		}
+		if fi.Mode()&os.ModeSymlink != 0 {
+			v.initErr = fmt.Errorf("%w: release attestation file %s is a symlink", ErrSymlinkNotAllowed, filePath)
+			return
+		}
 		data, err := os.ReadFile(filePath)
 		if err != nil {
 			v.initErr = fmt.Errorf("failed to read release attestation file: %w", err)

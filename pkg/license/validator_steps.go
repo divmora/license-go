@@ -306,7 +306,7 @@ func (v *Validator) checkScope(claims *Claims) error {
 }
 
 func resolveEnvFromProcess() string {
-	for _, k := range []string{"DIVMORA_ENV", "ENV", "ENVIRONMENT", "APP_ENV"} {
+	for _, k := range []string{"DIVMORA_ENV", "DIVMORA_ENVIRONMENT"} {
 		if val := strings.TrimSpace(os.Getenv(k)); val != "" {
 			return val
 		}
@@ -567,6 +567,13 @@ func Inspect(rawLicense string) (*Claims, error) {
 
 // InspectFromFile reads a license file and unpacks the claims without verifying signature.
 func InspectFromFile(filePath string) (*Claims, error) {
+	fi, err := os.Lstat(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to stat license file: %w", err)
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("%w: license file %s is a symlink", ErrSymlinkNotAllowed, filePath)
+	}
 	data, err := os.ReadFile(filePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read license file: %w", err)

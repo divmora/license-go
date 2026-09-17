@@ -90,6 +90,9 @@ var (
 
 	// ErrMissingAuthoritativeTime is returned when authoritative time is required by policy but not configured.
 	ErrMissingAuthoritativeTime = errors.New("license: authoritative reference time required but not configured")
+
+	// ErrSymlinkNotAllowed is returned when a license or key file is a symbolic link.
+	ErrSymlinkNotAllowed = errors.New("license: symbolic links are not permitted for security")
 )
 
 // LimitExceededError provides structured detail when a quota is exceeded.
