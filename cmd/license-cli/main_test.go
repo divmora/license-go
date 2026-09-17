@@ -626,3 +626,140 @@ func TestCLI_BSLEvalSubcommand(t *testing.T) {
 		t.Fatalf("expected bsl-eval to succeed after Change Date, got: %v", err)
 	}
 }
+
+func TestCLI_DomainGroupedRouting(t *testing.T) {
+	tmpDir := t.TempDir()
+	privKeyPath := filepath.Join(tmpDir, "priv.pem")
+	pubKeyPath := filepath.Join(tmpDir, "pub.pem")
+	licPath := filepath.Join(tmpDir, "lic.key")
+	relPath := filepath.Join(tmpDir, "release.divrel")
+
+	// 1. Grouped key generation: 'key gen'
+	err := runCLI([]string{"key", "gen", "-out-dir", tmpDir, "-priv-name", "priv.pem", "-pub-name", "pub.pem"})
+	if err != nil {
+		t.Fatalf("key gen failed: %v", err)
+	}
+
+	// 2. Grouped key inspection: 'key inspect'
+	err = runCLI([]string{"key", "inspect", pubKeyPath})
+	if err != nil {
+		t.Fatalf("key inspect failed: %v", err)
+	}
+
+	// 3. Grouped license issuance: 'license issue'
+	err = runCLI([]string{
+		"license", "issue",
+		"-private-key", privKeyPath,
+		"-customer", "Grouped Corp",
+		"-product", "gitlab-fleet-governor",
+		"-valid-days", "30",
+		"-out", licPath,
+	})
+	if err != nil {
+		t.Fatalf("license issue failed: %v", err)
+	}
+
+	// 4. Grouped license verification: 'license verify'
+	err = runCLI([]string{
+		"license", "verify",
+		"-public-key", pubKeyPath,
+		"-license", licPath,
+		"-product", "gitlab-fleet-governor",
+	})
+	if err != nil {
+		t.Fatalf("license verify failed: %v", err)
+	}
+
+	// 5. Grouped license inspection: 'license inspect'
+	err = runCLI([]string{
+		"license", "inspect",
+		"-license", licPath,
+		"-json",
+	})
+	if err != nil {
+		t.Fatalf("license inspect failed: %v", err)
+	}
+
+	// 6. Grouped license status: 'license status'
+	err = runCLI([]string{
+		"license", "status",
+		"-public-key", pubKeyPath,
+		"-license", licPath,
+		"-compact",
+	})
+	if err != nil {
+		t.Fatalf("license status failed: %v", err)
+	}
+
+	// 7. Grouped release attestation: 'release sign'
+	err = runCLI([]string{
+		"release", "sign",
+		"-private-key", privKeyPath,
+		"-product", "gitlab-fleet-governor",
+		"-version", "v1.0.0",
+		"-out", relPath,
+	})
+	if err != nil {
+		t.Fatalf("release sign failed: %v", err)
+	}
+
+	// 8. Grouped release verification: 'release verify'
+	err = runCLI([]string{
+		"release", "verify",
+		"-public-key", pubKeyPath,
+		"-attestation", relPath,
+		"-product", "gitlab-fleet-governor",
+		"-version", "v1.0.0",
+	})
+	if err != nil {
+		t.Fatalf("release verify failed: %v", err)
+	}
+
+	// 9. Grouped release inspection: 'release inspect'
+	err = runCLI([]string{
+		"release", "inspect",
+		"-attestation", relPath,
+		"-json",
+	})
+	if err != nil {
+		t.Fatalf("release inspect failed: %v", err)
+	}
+
+	// 10. Grouped BSL evaluation: 'bsl eval'
+	err = runCLI([]string{
+		"bsl", "eval",
+		"-release-date", "2025-01-01",
+		"-years", "3",
+		"-env", "staging",
+	})
+	if err != nil {
+		t.Fatalf("bsl eval failed: %v", err)
+	}
+
+	// 11. Help commands should return nil error
+	helpInvocations := [][]string{
+		{},
+		{"help"},
+		{"license"},
+		{"license", "help"},
+		{"release"},
+		{"release", "help"},
+		{"key"},
+		{"key", "help"},
+		{"bsl"},
+		{"bsl", "help"},
+	}
+	for _, h := range helpInvocations {
+		if err := runCLI(h); err != nil {
+			t.Fatalf("expected help for %v to succeed, got: %v", h, err)
+		}
+	}
+
+	// 12. Invalid commands
+	if err := runCLI([]string{"unknown-group"}); err == nil {
+		t.Errorf("expected error for unknown group")
+	}
+	if err := runCLI([]string{"license", "unknown-sub"}); err == nil {
+		t.Errorf("expected error for unknown license subcommand")
+	}
+}
