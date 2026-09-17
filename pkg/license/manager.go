@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -74,6 +75,15 @@ type ManagerConfig struct {
 	// AllowSymlinks permits license file paths to be symbolic links.
 	// When false (default), symlinks are rejected to defend against path traversal and substitution attacks.
 	AllowSymlinks bool
+
+	// WarnOnlyAllowlist specifies an optional list of feature and limit names that may be bypassed under PolicyWarnOnly.
+	// If empty or nil (default), all features and limits are bypassed with a prominent security alert logged.
+	// If non-empty, only the explicitly listed features, limits, or "mutations" are bypassed; all others are evaluated against claims.
+	WarnOnlyAllowlist []string
+
+	// AllowWarnOnlyInProduction permits PolicyWarnOnly to run in production environments (DIVMORA_ENV=prod/production).
+	// Defaults to false to prevent accidental license bypass in mission-critical environments.
+	AllowWarnOnlyInProduction bool
 
 	// CheckInterval configures how often the license status and file are checked.
 	// Defaults to 1 hour if not specified.
@@ -149,6 +159,19 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 	// In PolicyDegraded, default DegradedReadOnly to true to protect against unauthorized mutations unless explicitly overridden
 	if cfg.Policy == PolicyDegraded && !cfg.AllowDegradedMutations {
 		cfg.DegradedReadOnly = true
+	}
+
+	// In PolicyWarnOnly, log a prominent security warning and enforce production environment safeguard
+	if cfg.Policy == PolicyWarnOnly {
+		if len(cfg.WarnOnlyAllowlist) > 0 {
+			log.Printf("[SECURITY WARNING] License manager running in PolicyWarnOnly — features and limits bypass active (allowlist: %v)", cfg.WarnOnlyAllowlist)
+		} else {
+			log.Printf("[SECURITY WARNING] License manager running in PolicyWarnOnly — ALL features and limits are bypassed")
+		}
+		env := resolveEnvFromProcess()
+		if (strings.EqualFold(env, "production") || strings.EqualFold(env, "prod")) && !cfg.AllowWarnOnlyInProduction {
+			return nil, errors.New("license: PolicyWarnOnly is not permitted in production environment without explicit AllowWarnOnlyInProduction")
+		}
 	}
 
 	// Auto-resolve from environment (DIVMORA_LICENSE_FILE, DIVMORA_LICENSE_KEY, or /etc/divmora/license.key)
@@ -266,10 +289,27 @@ func (m *Manager) CanMutate() error {
 	if m.IsReadOnly() {
 		return ErrDegradedReadOnly
 	}
-	if m.cfg.Policy == PolicyWarnOnly {
+	warnOnlyMutations := m.cfg.Policy == PolicyWarnOnly &&
+		(len(m.cfg.WarnOnlyAllowlist) == 0 || sliceContainsFold(m.cfg.WarnOnlyAllowlist, "mutations") || sliceContainsFold(m.cfg.WarnOnlyAllowlist, "*"))
+	if warnOnlyMutations {
 		return nil
 	}
-	if !m.IsActive() {
+	if m.cfg.Policy == PolicyWarnOnly || m.cfg.Policy == PolicyStrict {
+		if m.IsDegraded() {
+			return ErrDegradedReadOnly
+		}
+		claims := m.Claims()
+		if claims == nil {
+			return ErrLicenseNotFound
+		}
+		evalTime, _ := m.evalTime()
+		if claims.StatusAt(evalTime) == StatusNotYetValid {
+			return ErrNotYetValid
+		}
+		if claims.StatusAt(evalTime) == StatusExpired {
+			return ErrExpired
+		}
+	} else if !m.IsActive() {
 		claims := m.Claims()
 		if claims == nil {
 			return ErrLicenseNotFound
@@ -285,10 +325,12 @@ func (m *Manager) CanMutate() error {
 
 // HasFeature returns whether the specified feature is entitled in the active license (or fallback claims).
 // If the license is expired, inactive, or not found under PolicyStrict, this returns false.
-// Under PolicyWarnOnly, this unconditionally returns true.
+// Under PolicyWarnOnly, this returns true if WarnOnlyAllowlist is empty or includes the feature.
 func (m *Manager) HasFeature(feature string) bool {
 	if m.cfg.Policy == PolicyWarnOnly {
-		return true
+		if len(m.cfg.WarnOnlyAllowlist) == 0 || sliceContainsFold(m.cfg.WarnOnlyAllowlist, feature) || sliceContainsFold(m.cfg.WarnOnlyAllowlist, "*") {
+			return true
+		}
 	}
 	if !m.IsActive() {
 		return false
@@ -303,10 +345,12 @@ func (m *Manager) HasFeature(feature string) bool {
 // AssertFeature asserts that the specified feature is active and entitled in the current license (or fallback claims).
 // Returns nil if entitled, ErrExpired if the license has expired, ErrNotYetValid if the license is not yet active,
 // ErrLicenseNotFound if no claims exist, or ErrFeatureNotEntitled if the feature is not granted.
-// Under PolicyWarnOnly, this unconditionally returns nil.
+// Under PolicyWarnOnly, this returns nil if WarnOnlyAllowlist is empty or includes the feature.
 func (m *Manager) AssertFeature(feature string) error {
 	if m.cfg.Policy == PolicyWarnOnly {
-		return nil
+		if len(m.cfg.WarnOnlyAllowlist) == 0 || sliceContainsFold(m.cfg.WarnOnlyAllowlist, feature) || sliceContainsFold(m.cfg.WarnOnlyAllowlist, "*") {
+			return nil
+		}
 	}
 	claims := m.Claims()
 	if claims == nil {
@@ -324,10 +368,12 @@ func (m *Manager) AssertFeature(feature string) error {
 
 // CheckLimit checks if current usage is within the active license limits (or fallback limits if degraded).
 // If the license is inactive (expired, not yet valid, or not found) under PolicyStrict, this returns an error.
-// Under PolicyWarnOnly, this unconditionally returns nil.
+// Under PolicyWarnOnly, this returns nil if WarnOnlyAllowlist is empty or includes the limit name.
 func (m *Manager) CheckLimit(limitName string, currentUsage int64) error {
 	if m.cfg.Policy == PolicyWarnOnly {
-		return nil
+		if len(m.cfg.WarnOnlyAllowlist) == 0 || sliceContainsFold(m.cfg.WarnOnlyAllowlist, limitName) || sliceContainsFold(m.cfg.WarnOnlyAllowlist, "*") {
+			return nil
+		}
 	}
 	claims := m.Claims()
 	if claims == nil {
@@ -665,4 +711,13 @@ func (m *Manager) loadAndVerify(initial bool) error {
 	}
 
 	return nil
+}
+
+func sliceContainsFold(slice []string, val string) bool {
+	for _, s := range slice {
+		if strings.EqualFold(strings.TrimSpace(s), strings.TrimSpace(val)) {
+			return true
+		}
+	}
+	return false
 }

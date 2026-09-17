@@ -747,6 +747,34 @@ func (c *Claims) IsInScope(dimension string, target string) bool {
 	}
 }
 
+// HasScopeDimension reports whether a specific scope dimension is explicitly defined and non-empty in Claims.
+func (c *Claims) HasScopeDimension(dimension string) bool {
+	dimLower := strings.ToLower(strings.TrimSpace(dimension))
+	switch dimLower {
+	case "environments", "environment", "env":
+		return (c.Scope != nil && len(c.Scope.Environments) > 0) || strings.TrimSpace(c.Environment) != ""
+	case "accounts", "account":
+		return c.Scope != nil && len(c.Scope.Accounts) > 0
+	case "regions", "region":
+		return c.Scope != nil && len(c.Scope.Regions) > 0
+	case "clusters", "cluster":
+		return c.Scope != nil && len(c.Scope.Clusters) > 0
+	case "namespaces", "namespace", "groups", "group":
+		return c.Scope != nil && len(c.Scope.Namespaces) > 0
+	case "hosts", "host", "domain", "domains":
+		return c.Scope != nil && len(c.Scope.Hosts) > 0
+	default:
+		if c.Scope != nil && c.Scope.Custom != nil {
+			for k, allowed := range c.Scope.Custom {
+				if strings.EqualFold(k, dimension) {
+					return len(allowed) > 0
+				}
+			}
+		}
+		return false
+	}
+}
+
 // AssertScope asserts that target is permitted under dimension, returning ScopeMismatchError if not.
 func (c *Claims) AssertScope(dimension string, target string) error {
 	if c.IsInScope(dimension, target) {

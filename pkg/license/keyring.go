@@ -61,16 +61,18 @@ func WithCustomKeyID(id string) KeyOption {
 // KeyRing holds a collection of trusted Ed25519 public keys for zero-downtime key rotation
 // and emergency key revocation. It is safe for concurrent access across multiple goroutines.
 type KeyRing struct {
-	mu      sync.RWMutex
-	primary *KeyEntry
-	keys    []*KeyEntry
-	byID    map[string]*KeyEntry
+	mu            sync.RWMutex
+	primary       *KeyEntry
+	keys          []*KeyEntry
+	byID          map[string]*KeyEntry
+	byFingerprint map[string]*KeyEntry
 }
 
 // NewKeyRing initializes a KeyRing with a primary public key and optional fallback keys.
 func NewKeyRing(primaryKey ed25519.PublicKey, fallbacks ...ed25519.PublicKey) *KeyRing {
 	ring := &KeyRing{
-		byID: make(map[string]*KeyEntry),
+		byID:          make(map[string]*KeyEntry),
+		byFingerprint: make(map[string]*KeyEntry),
 	}
 
 	if len(primaryKey) == ed25519.PublicKeySize {
@@ -135,8 +137,23 @@ func (r *KeyRing) indexEntry(entry *KeyEntry) {
 		r.byID[entry.ID] = entry
 	}
 	if entry.Fingerprint != "" {
-		r.byID[entry.Fingerprint] = entry
+		r.byFingerprint[entry.Fingerprint] = entry
 	}
+}
+
+func (r *KeyRing) findEntryLocked(idOrFingerprint string) (*KeyEntry, bool) {
+	if strings.HasPrefix(idOrFingerprint, "sha256:") {
+		if entry, ok := r.byFingerprint[idOrFingerprint]; ok {
+			return entry, true
+		}
+	}
+	if entry, ok := r.byID[idOrFingerprint]; ok {
+		return entry, true
+	}
+	if entry, ok := r.byFingerprint[idOrFingerprint]; ok {
+		return entry, true
+	}
+	return nil, false
 }
 
 // AddKey adds a public key to the KeyRing with configurable options.
@@ -172,7 +189,7 @@ func (r *KeyRing) SetPrimary(idOrFingerprint string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	entry, ok := r.byID[idOrFingerprint]
+	entry, ok := r.findEntryLocked(idOrFingerprint)
 	if !ok {
 		return fmt.Errorf("%w: %q", ErrKeyNotFound, idOrFingerprint)
 	}
@@ -187,7 +204,7 @@ func (r *KeyRing) Revoke(idOrFingerprint string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	entry, ok := r.byID[idOrFingerprint]
+	entry, ok := r.findEntryLocked(idOrFingerprint)
 	if !ok {
 		return fmt.Errorf("%w: %q", ErrKeyNotFound, idOrFingerprint)
 	}
@@ -218,7 +235,24 @@ func (r *KeyRing) FindKey(idOrFingerprint string) (*KeyEntry, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	entry, ok := r.byID[idOrFingerprint]
+	return r.findEntryLocked(idOrFingerprint)
+}
+
+// FindKeyByID looks up a KeyEntry specifically by its Key ID.
+func (r *KeyRing) FindKeyByID(id string) (*KeyEntry, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	entry, ok := r.byID[id]
+	return entry, ok
+}
+
+// FindKeyByFingerprint looks up a KeyEntry specifically by its SHA-256 fingerprint.
+func (r *KeyRing) FindKeyByFingerprint(fp string) (*KeyEntry, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	entry, ok := r.byFingerprint[fp]
 	return entry, ok
 }
 
@@ -244,7 +278,7 @@ func (r *KeyRing) VerifySignature(signedData, sig []byte, targetKeyID string) (*
 
 	// 1. If targetKeyID is specified, check that specific key first
 	if targetKeyID != "" {
-		if entry, ok := r.byID[targetKeyID]; ok {
+		if entry, ok := r.findEntryLocked(targetKeyID); ok {
 			if ed25519.Verify(entry.PublicKey, signedData, sig) {
 				if entry.Status == KeyStatusRevoked {
 					return nil, ErrKeyRevoked

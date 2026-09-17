@@ -308,3 +308,69 @@ func TestKeyRing_ConcurrentAccess(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+func TestKeyRing_FingerprintCollisionDefense(t *testing.T) {
+	pub1, _, err := license.GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("GenerateKeyPair 1 failed: %v", err)
+	}
+	pub2, _, err := license.GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("GenerateKeyPair 2 failed: %v", err)
+	}
+
+	fp1 := license.KeyFingerprint(pub1)
+	fp2 := license.KeyFingerprint(pub2)
+
+	ring := license.NewKeyRing(pub1)
+
+	// Register key 2 with a custom ID that intentionally matches key 1's fingerprint!
+	entry2, err := ring.AddKey(pub2, license.WithCustomKeyID(fp1))
+	if err != nil {
+		t.Fatalf("AddKey with colliding custom ID failed: %v", err)
+	}
+
+	// 1. Finding by fingerprint should return key 1, NOT key 2
+	foundFP, ok := ring.FindKeyByFingerprint(fp1)
+	if !ok || foundFP == nil {
+		t.Fatalf("expected FindKeyByFingerprint(%q) to find key 1", fp1)
+	}
+	if !foundFP.PublicKey.Equal(pub1) {
+		t.Fatalf("expected FindKeyByFingerprint to return pub1, got: %v", foundFP.PublicKey)
+	}
+
+	// 2. Finding by ID should return key 2 (which registered that custom ID)
+	foundID, ok := ring.FindKeyByID(fp1)
+	if !ok || foundID == nil {
+		t.Fatalf("expected FindKeyByID(%q) to find key 2", fp1)
+	}
+	if !foundID.PublicKey.Equal(pub2) {
+		t.Fatalf("expected FindKeyByID to return pub2, got: %v", foundID.PublicKey)
+	}
+
+	// 3. FindKey with "sha256:" prefix prioritizes fingerprint map
+	foundGeneral, ok := ring.FindKey(fp1)
+	if !ok || !foundGeneral.PublicKey.Equal(pub1) {
+		t.Fatalf("expected FindKey(%q) to return key 1", fp1)
+	}
+
+	// 4. Revoking fp1 must revoke key 1, NOT key 2
+	if err := ring.Revoke(fp1); err != nil {
+		t.Fatalf("Revoke failed: %v", err)
+	}
+
+	foundFPAfter, _ := ring.FindKeyByFingerprint(fp1)
+	if foundFPAfter.Status != license.KeyStatusRevoked {
+		t.Fatalf("expected key 1 to be revoked, got status: %s", foundFPAfter.Status)
+	}
+
+	if entry2.Status != license.KeyStatusActive {
+		t.Fatalf("expected key 2 to remain active after revoking key 1's fingerprint, got: %s", entry2.Status)
+	}
+
+	// 5. Verify finding key 2 by its genuine fingerprint
+	foundFP2, ok := ring.FindKeyByFingerprint(fp2)
+	if !ok || !foundFP2.PublicKey.Equal(pub2) {
+		t.Fatalf("expected FindKeyByFingerprint(%q) to find key 2", fp2)
+	}
+}

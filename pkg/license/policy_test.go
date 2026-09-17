@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -311,6 +312,110 @@ func TestManager_PolicyWarnOnly(t *testing.T) {
 	if err := mgr.CanMutate(); err != nil {
 		t.Fatalf("expected CanMutate to return nil under PolicyWarnOnly: %v", err)
 	}
+}
+
+func TestManager_PolicyWarnOnly_Safeguards(t *testing.T) {
+	pub, _, err := license.GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("GenerateKeyPair failed: %v", err)
+	}
+
+	validator, err := license.NewValidator(pub, license.WithProduct("gitlab-fleet-governor"))
+	if err != nil {
+		t.Fatalf("NewValidator failed: %v", err)
+	}
+
+	t.Run("refuses PolicyWarnOnly in production environment by default", func(t *testing.T) {
+		t.Setenv("DIVMORA_ENV", "production")
+
+		_, err := license.NewManager(license.ManagerConfig{
+			Validator:     validator,
+			LicenseString: "invalid-license",
+			Policy:        license.PolicyWarnOnly,
+		})
+		if err == nil || !strings.Contains(err.Error(), "PolicyWarnOnly is not permitted in production") {
+			t.Fatalf("expected production refusal for PolicyWarnOnly, got: %v", err)
+		}
+	})
+
+	t.Run("permits PolicyWarnOnly in production when AllowWarnOnlyInProduction is true", func(t *testing.T) {
+		t.Setenv("DIVMORA_ENV", "production")
+
+		mgr, err := license.NewManager(license.ManagerConfig{
+			Validator:                 validator,
+			LicenseString:             "invalid-license",
+			Policy:                    license.PolicyWarnOnly,
+			AllowWarnOnlyInProduction: true,
+		})
+		if err != nil {
+			t.Fatalf("expected NewManager to succeed with AllowWarnOnlyInProduction: true, got: %v", err)
+		}
+		if !mgr.HasFeature("test") {
+			t.Fatal("expected feature to be allowed")
+		}
+	})
+
+	t.Run("WarnOnlyAllowlist selective bypass", func(t *testing.T) {
+		t.Setenv("DIVMORA_ENV", "development")
+
+		// Fallback claims provide only "community_feature" and limit "free_users": 10
+		fallback := &license.Claims{
+			Product:  "gitlab-fleet-governor",
+			Features: []string{"community_feature"},
+			Limits:   map[string]int64{"free_users": 10},
+		}
+
+		mgr, err := license.NewManager(license.ManagerConfig{
+			Validator:         validator,
+			LicenseString:     "invalid-license",
+			Policy:            license.PolicyWarnOnly,
+			FallbackClaims:    fallback,
+			WarnOnlyAllowlist: []string{"enterprise_audit", "users"},
+		})
+		if err != nil {
+			t.Fatalf("NewManager failed: %v", err)
+		}
+
+		// Allowlisted feature is bypassed
+		if !mgr.HasFeature("enterprise_audit") {
+			t.Fatal("expected allowlisted enterprise_audit to return true")
+		}
+		if err := mgr.AssertFeature("enterprise_audit"); err != nil {
+			t.Fatalf("expected AssertFeature for allowlisted feature to return nil: %v", err)
+		}
+
+		// Non-allowlisted feature falls back to claims
+		// "community_feature" is in fallback claims -> true
+		if !mgr.HasFeature("community_feature") {
+			t.Fatal("expected community_feature from fallback claims to be true")
+		}
+		// "unauthorized_feature" is neither allowlisted nor in fallback claims -> false
+		if mgr.HasFeature("unauthorized_feature") {
+			t.Fatal("expected unauthorized_feature not in allowlist to return false")
+		}
+		if err := mgr.AssertFeature("unauthorized_feature"); err == nil {
+			t.Fatal("expected AssertFeature for unauthorized_feature to return error")
+		}
+
+		// Allowlisted limit is bypassed
+		if err := mgr.CheckLimit("users", 999999); err != nil {
+			t.Fatalf("expected allowlisted limit users to return nil, got: %v", err)
+		}
+
+		// Non-allowlisted limit evaluated against claims
+		// "free_users" has quota 10: 5 passes, 15 fails
+		if err := mgr.CheckLimit("free_users", 5); err != nil {
+			t.Fatalf("expected usage 5 to be within limit 10: %v", err)
+		}
+		if err := mgr.CheckLimit("free_users", 15); err == nil {
+			t.Fatal("expected usage 15 to exceed limit 10")
+		}
+
+		// Mutations: not in allowlist -> check returns ErrDegradedReadOnly (since degraded fallback is read-only)
+		if err := mgr.CanMutate(); !errors.Is(err, license.ErrDegradedReadOnly) {
+			t.Fatalf("expected CanMutate to return ErrDegradedReadOnly when mutations not allowlisted, got: %v", err)
+		}
+	})
 }
 
 func TestManager_PolicyDegraded_BSLConversionRecovery(t *testing.T) {

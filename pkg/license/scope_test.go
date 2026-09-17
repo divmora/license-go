@@ -3,6 +3,7 @@ package license
 import (
 	"errors"
 	"testing"
+	"time"
 )
 
 func TestScope_ClaimsHelpers(t *testing.T) {
@@ -914,4 +915,155 @@ func TestScope_HybridScopeAndEnvironment_Enforcement(t *testing.T) {
 	if !errors.Is(err, ErrScopeMismatch) {
 		t.Fatalf("expected ErrScopeMismatch for unconfigured validator, got: %v", err)
 	}
+}
+
+func TestValidator_WithRequireScope(t *testing.T) {
+	pub, priv, err := GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("GenerateKeyPair failed: %v", err)
+	}
+	signer, err := NewSigner(priv)
+	if err != nil {
+		t.Fatalf("NewSigner failed: %v", err)
+	}
+
+	t.Run("license without scope fails when scope is required", func(t *testing.T) {
+		unscopedClaims := Claims{
+			Product:   "gitlab-fleet-governor",
+			ExpiresAt: time.Now().Add(24 * time.Hour),
+			Customer:  Customer{Name: "Acme Corp"},
+		}
+		token, err := signer.Sign(unscopedClaims)
+		if err != nil {
+			t.Fatalf("Sign failed: %v", err)
+		}
+
+		val, err := NewValidator(pub,
+			WithProduct("gitlab-fleet-governor"),
+			WithCurrentEnvironment("production"),
+			WithRequireScope("environments"),
+		)
+		if err != nil {
+			t.Fatalf("NewValidator failed: %v", err)
+		}
+
+		_, err = val.Verify(token)
+		if err == nil || !errors.Is(err, ErrScopeMismatch) {
+			t.Fatalf("expected ErrScopeMismatch when required scope dimension is missing, got: %v", err)
+		}
+		var scopeErr *ScopeMismatchError
+		if !errors.As(err, &scopeErr) || scopeErr.Dimension != "environments" {
+			t.Fatalf("expected ScopeMismatchError on dimension 'environments', got: %v", err)
+		}
+	})
+
+	t.Run("license with partial scope fails when another dimension is required", func(t *testing.T) {
+		partialClaims := Claims{
+			Product:   "gitlab-fleet-governor",
+			ExpiresAt: time.Now().Add(24 * time.Hour),
+			Customer:  Customer{Name: "Acme Corp"},
+			Scope: &Scope{
+				Environments: []string{"production"},
+			},
+		}
+		token, err := signer.Sign(partialClaims)
+		if err != nil {
+			t.Fatalf("Sign failed: %v", err)
+		}
+
+		val, err := NewValidator(pub,
+			WithProduct("gitlab-fleet-governor"),
+			WithCurrentEnvironment("production"),
+			WithCurrentAccount("123456789012"),
+			WithRequireScope("environments", "accounts"),
+		)
+		if err != nil {
+			t.Fatalf("NewValidator failed: %v", err)
+		}
+
+		_, err = val.Verify(token)
+		if err == nil || !errors.Is(err, ErrScopeMismatch) {
+			t.Fatalf("expected ErrScopeMismatch when accounts dimension is missing, got: %v", err)
+		}
+		var scopeErr *ScopeMismatchError
+		if !errors.As(err, &scopeErr) || scopeErr.Dimension != "accounts" {
+			t.Fatalf("expected ScopeMismatchError on dimension 'accounts', got: %v", err)
+		}
+	})
+
+	t.Run("license satisfying all required dimensions passes", func(t *testing.T) {
+		fullClaims := Claims{
+			Product:   "gitlab-fleet-governor",
+			ExpiresAt: time.Now().Add(24 * time.Hour),
+			Customer:  Customer{Name: "Acme Corp"},
+			Scope: &Scope{
+				Environments: []string{"production"},
+				Accounts:     []string{"123456789012"},
+			},
+		}
+		token, err := signer.Sign(fullClaims)
+		if err != nil {
+			t.Fatalf("Sign failed: %v", err)
+		}
+
+		val, err := NewValidator(pub,
+			WithProduct("gitlab-fleet-governor"),
+			WithCurrentEnvironment("production"),
+			WithCurrentAccount("123456789012"),
+			WithRequireScope("environments", "accounts"),
+		)
+		if err != nil {
+			t.Fatalf("NewValidator failed: %v", err)
+		}
+
+		verified, err := val.Verify(token)
+		if err != nil {
+			t.Fatalf("expected verification to succeed, got: %v", err)
+		}
+		if verified.Product != "gitlab-fleet-governor" {
+			t.Fatalf("unexpected verified claims: %+v", verified)
+		}
+	})
+
+	t.Run("custom scope dimension requirement", func(t *testing.T) {
+		customClaims := Claims{
+			Product:   "gitlab-fleet-governor",
+			ExpiresAt: time.Now().Add(24 * time.Hour),
+			Customer:  Customer{Name: "Acme Corp"},
+			Scope: &Scope{
+				Custom: map[string][]string{
+					"tenant_tier": {"enterprise"},
+				},
+			},
+		}
+		token, err := signer.Sign(customClaims)
+		if err != nil {
+			t.Fatalf("Sign failed: %v", err)
+		}
+
+		valFail, err := NewValidator(pub,
+			WithProduct("gitlab-fleet-governor"),
+			WithCurrentCustomScope("tenant_tier", "enterprise"),
+			WithRequireScope("tenant_tier", "data_residency"),
+		)
+		if err != nil {
+			t.Fatalf("NewValidator failed: %v", err)
+		}
+		_, err = valFail.Verify(token)
+		if err == nil || !errors.Is(err, ErrScopeMismatch) {
+			t.Fatalf("expected ErrScopeMismatch for missing data_residency, got: %v", err)
+		}
+
+		valPass, err := NewValidator(pub,
+			WithProduct("gitlab-fleet-governor"),
+			WithCurrentCustomScope("tenant_tier", "enterprise"),
+			WithRequireScope("tenant_tier"),
+		)
+		if err != nil {
+			t.Fatalf("NewValidator failed: %v", err)
+		}
+		if _, err := valPass.Verify(token); err != nil {
+			t.Fatalf("expected verification to pass with required custom scope, got: %v", err)
+		}
+	})
 }

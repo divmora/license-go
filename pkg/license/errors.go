@@ -131,6 +131,9 @@ type ScopeMismatchError struct {
 }
 
 func (e *ScopeMismatchError) Error() string {
+	if len(e.Allowed) == 0 {
+		return fmt.Sprintf("license: scope dimension %q is required by policy but not restricted in license claims", e.Dimension)
+	}
 	if e.Target == "" {
 		return fmt.Sprintf("license: scope mismatch on %s: license restricted to %v, but no target was configured or detected on host", e.Dimension, e.Allowed)
 	}

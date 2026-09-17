@@ -222,6 +222,19 @@ func (v *Validator) verifyClaimsWithDetails(payloadJSON []byte, now time.Time) (
 }
 
 func (v *Validator) checkScope(claims *Claims) error {
+	// 0. Enforce required scope dimensions if configured
+	if len(v.requireScopeDimensions) > 0 {
+		for _, dim := range v.requireScopeDimensions {
+			if !claims.HasScopeDimension(dim) {
+				return &ScopeMismatchError{
+					Dimension: dim,
+					Allowed:   nil,
+					Target:    "",
+				}
+			}
+		}
+	}
+
 	// 1. Environments: assert modern Scope.Environments, or fallback to legacy Claims.Environment
 	var allowedEnvs []string
 	if claims.Scope != nil && len(claims.Scope.Environments) > 0 {

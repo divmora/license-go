@@ -28,6 +28,7 @@ type Validator struct {
 	currentNamespace          string
 	currentHost               string
 	currentCustomScope        map[string]string
+	requireScopeDimensions    []string
 	currentVersion            string
 	buildDate                 time.Time
 	bslPolicy                 *BSLPolicy
@@ -157,6 +158,14 @@ func WithCurrentCustomScope(dimension, value string) ValidatorOption {
 			v.currentCustomScope = make(map[string]string)
 		}
 		v.currentCustomScope[dimension] = value
+	}
+}
+
+// WithRequireScope enforces that validated licenses must explicitly declare the specified scope dimensions.
+// If a license does not declare or leaves empty any required dimension, verification fails with ErrScopeMismatch.
+func WithRequireScope(dimensions ...string) ValidatorOption {
+	return func(v *Validator) {
+		v.requireScopeDimensions = append(v.requireScopeDimensions, dimensions...)
 	}
 }
 
