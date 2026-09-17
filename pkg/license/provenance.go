@@ -212,6 +212,17 @@ type ProvenanceParams struct {
 
 	// BinaryBytes contains binary executable bytes in-memory (alternative to BinaryPath).
 	BinaryBytes []byte
+
+	// RequireReleaseAttestation enforces that all attested fields (version, commit, digest)
+	// must be verified by the running binary parameters.
+	RequireReleaseAttestation bool
+
+	// MaxBuildDateSkew defines the allowable deviation between claims.BuildDate and CurrentBuildDate.
+	// If zero, defaults to 24 * time.Hour (or 1 minute if RequireStrictBuildDate is set).
+	MaxBuildDateSkew time.Duration
+
+	// RequireStrictBuildDate enforces exact or tight build date matching (defaults MaxBuildDateSkew to 1 minute if unset).
+	RequireStrictBuildDate bool
 }
 
 // ComputeBytesDigest computes the SHA-256 digest of byte slice, returning "sha256:<hex>".
@@ -415,6 +426,9 @@ func IsPlaceholderAttestation(rawAttestation string) bool {
 // EvaluateProvenance evaluates a binary's authenticity, build parameters, and integrity against a release attestation.
 func EvaluateProvenance(rawAttestation string, ring *KeyRing, params ProvenanceParams) (*ReleaseProvenance, error) {
 	if IsPlaceholderAttestation(rawAttestation) {
+		if params.RequireReleaseAttestation {
+			return nil, ErrReleaseAttestationMissing
+		}
 		return &ReleaseProvenance{
 			Attested: false,
 		}, nil
@@ -447,8 +461,19 @@ func EvaluateProvenance(rawAttestation string, ring *KeyRing, params ProvenanceP
 	}
 
 	// 2. Version match assertion
-	if params.CurrentVersion != "" {
-		if !claims.MatchesVersion(params.CurrentVersion) {
+	if claims.Version != "" {
+		if params.CurrentVersion == "" {
+			if params.RequireReleaseAttestation {
+				prov.Tampered = true
+				prov.TamperReason = fmt.Sprintf("version verification required: release attestation certifies version %q but running binary version is not configured", claims.Version)
+				return prov, &ReleaseTamperingError{
+					Field:    "version",
+					Expected: claims.Version,
+					Actual:   "",
+					Reason:   prov.TamperReason,
+				}
+			}
+		} else if !claims.MatchesVersion(params.CurrentVersion) {
 			prov.Tampered = true
 			prov.TamperReason = fmt.Sprintf("version mismatch: running binary is %q, attested release is %q", params.CurrentVersion, claims.Version)
 			return prov, &ReleaseTamperingError{
@@ -461,8 +486,19 @@ func EvaluateProvenance(rawAttestation string, ring *KeyRing, params ProvenanceP
 	}
 
 	// 3. Git commit match assertion
-	if params.CurrentCommit != "" && claims.GitCommit != "" {
-		if !claims.MatchesCommit(params.CurrentCommit) {
+	if claims.GitCommit != "" {
+		if params.CurrentCommit == "" {
+			if params.RequireReleaseAttestation {
+				prov.Tampered = true
+				prov.TamperReason = fmt.Sprintf("git commit verification required: release attestation certifies commit %q but running binary commit is not configured", claims.GitCommit)
+				return prov, &ReleaseTamperingError{
+					Field:    "git_commit",
+					Expected: claims.GitCommit,
+					Actual:   "",
+					Reason:   prov.TamperReason,
+				}
+			}
+		} else if !claims.MatchesCommit(params.CurrentCommit) {
 			prov.Tampered = true
 			prov.TamperReason = fmt.Sprintf("git commit mismatch: running binary commit %q does not match attested commit %q", params.CurrentCommit, claims.GitCommit)
 			return prov, &ReleaseTamperingError{
@@ -474,14 +510,24 @@ func EvaluateProvenance(rawAttestation string, ring *KeyRing, params ProvenanceP
 		}
 	}
 
-	// 4. Build Date cross-check: if local build date claims to be significantly older than attested build date
+	// 4. Build Date cross-check: bi-directional drift check with configurable tolerance
 	if !params.CurrentBuildDate.IsZero() && !claims.BuildDate.IsZero() {
-		// If running binary claims a build date more than 24h earlier than official build date, flag tampering!
+		allowedSkew := params.MaxBuildDateSkew
+		if allowedSkew <= 0 {
+			if params.RequireStrictBuildDate {
+				allowedSkew = time.Minute
+			} else {
+				allowedSkew = 24 * time.Hour
+			}
+		}
 		diff := claims.BuildDate.Sub(params.CurrentBuildDate)
-		if diff > 24*time.Hour {
+		if diff < 0 {
+			diff = -diff
+		}
+		if diff > allowedSkew {
 			prov.Tampered = true
-			prov.TamperReason = fmt.Sprintf("build date tampered: running binary claims build date %s, but official release was built at %s",
-				params.CurrentBuildDate.UTC().Format(time.RFC3339), claims.BuildDate.UTC().Format(time.RFC3339))
+			prov.TamperReason = fmt.Sprintf("build date tampered: running binary claims build date %s, but official release was built at %s (skew %v exceeds allowed %v)",
+				params.CurrentBuildDate.UTC().Format(time.RFC3339), claims.BuildDate.UTC().Format(time.RFC3339), diff, allowedSkew)
 			return prov, &ReleaseTamperingError{
 				Field:    "build_date",
 				Expected: claims.BuildDate.UTC().Format(time.RFC3339),
@@ -491,10 +537,12 @@ func EvaluateProvenance(rawAttestation string, ring *KeyRing, params ProvenanceP
 		}
 	}
 
-	// 5. Release Date cross-check: if local release date claims to be significantly older than attested release date
+	// 5. Release Date cross-check: bi-directional drift check
 	if !params.CurrentReleaseDate.IsZero() && !claims.ReleaseDate.IsZero() {
-		// If running binary claims a release date more than 24h earlier than official release date, flag tampering!
 		diff := claims.ReleaseDate.Sub(params.CurrentReleaseDate)
+		if diff < 0 {
+			diff = -diff
+		}
 		if diff > 24*time.Hour {
 			prov.Tampered = true
 			prov.TamperReason = fmt.Sprintf("release date tampered: running binary claims release date %s, but official release date is %s",
@@ -520,13 +568,38 @@ func EvaluateProvenance(rawAttestation string, ring *KeyRing, params ProvenanceP
 		computedDigest = d
 	}
 
-	if computedDigest != "" && claims.BinaryDigest != "" {
+	hasAttestedDigest := strings.TrimSpace(claims.BinaryDigest) != ""
+	hasComputedDigest := computedDigest != ""
+
+	if hasAttestedDigest && hasComputedDigest {
 		if !claims.MatchesDigest(computedDigest) {
 			prov.Tampered = true
 			prov.TamperReason = fmt.Sprintf("binary digest mismatch: computed %s, attested %s", computedDigest, claims.BinaryDigest)
 			return prov, fmt.Errorf("%w: computed %s does not match attested %s", ErrReleaseDigestMismatch, computedDigest, claims.BinaryDigest)
 		}
 		prov.DigestMatched = true
+	} else if hasAttestedDigest && !hasComputedDigest {
+		if params.RequireReleaseAttestation {
+			prov.Tampered = true
+			prov.TamperReason = fmt.Sprintf("binary digest verification required: release attestation certifies digest %s but running binary path/bytes are not configured", claims.BinaryDigest)
+			return prov, &ReleaseTamperingError{
+				Field:    "binary_digest",
+				Expected: claims.BinaryDigest,
+				Actual:   "",
+				Reason:   prov.TamperReason,
+			}
+		}
+	} else if !hasAttestedDigest && hasComputedDigest {
+		if params.RequireReleaseAttestation {
+			prov.Tampered = true
+			prov.TamperReason = fmt.Sprintf("binary digest verification required: binary digest %s computed but release attestation does not certify a binary digest", computedDigest)
+			return prov, &ReleaseTamperingError{
+				Field:    "binary_digest",
+				Expected: "",
+				Actual:   computedDigest,
+				Reason:   prov.TamperReason,
+			}
+		}
 	}
 
 	return prov, nil

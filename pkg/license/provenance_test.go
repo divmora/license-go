@@ -514,3 +514,421 @@ func TestValidator_PlaceholderAttestation_RequireAttestation(t *testing.T) {
 		t.Fatalf("expected ErrReleaseAttestationMissing for 'dev' placeholder with RequireReleaseAttestation, got: %v", err)
 	}
 }
+
+func TestEvaluateProvenance_BuildDateSkewTolerance(t *testing.T) {
+	pub, priv := generateTestKeyPair(t)
+	ring := NewKeyRing(pub)
+
+	officialBuild := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	relClaims := ReleaseClaims{
+		Product:   "otel-aws-log-processor",
+		Version:   "v1.0.0",
+		BuildDate: officialBuild,
+	}
+	token, err := SignRelease(relClaims, priv)
+	if err != nil {
+		t.Fatalf("SignRelease failed: %v", err)
+	}
+
+	t.Run("bi-directional drift: future build date beyond default 24h", func(t *testing.T) {
+		params := ProvenanceParams{
+			ExpectedProduct:  "otel-aws-log-processor",
+			CurrentVersion:   "v1.0.0",
+			CurrentBuildDate: officialBuild.Add(48 * time.Hour), // 2 days in future
+		}
+		_, err := EvaluateProvenance(token, ring, params)
+		if err == nil || !strings.Contains(err.Error(), "build date tampered") {
+			t.Fatalf("expected build date tampering for future timestamp, got: %v", err)
+		}
+		if !errors.Is(err, ErrReleaseTampered) {
+			t.Fatalf("expected ErrReleaseTampered, got: %v", err)
+		}
+	})
+
+	t.Run("bi-directional drift: past build date beyond default 24h", func(t *testing.T) {
+		params := ProvenanceParams{
+			ExpectedProduct:  "otel-aws-log-processor",
+			CurrentVersion:   "v1.0.0",
+			CurrentBuildDate: officialBuild.Add(-48 * time.Hour), // 2 days in past
+		}
+		_, err := EvaluateProvenance(token, ring, params)
+		if err == nil || !strings.Contains(err.Error(), "build date tampered") {
+			t.Fatalf("expected build date tampering for past timestamp, got: %v", err)
+		}
+		if !errors.Is(err, ErrReleaseTampered) {
+			t.Fatalf("expected ErrReleaseTampered, got: %v", err)
+		}
+	})
+
+	t.Run("within default tolerance (2 hours)", func(t *testing.T) {
+		params := ProvenanceParams{
+			ExpectedProduct:  "otel-aws-log-processor",
+			CurrentVersion:   "v1.0.0",
+			CurrentBuildDate: officialBuild.Add(2 * time.Hour),
+		}
+		prov, err := EvaluateProvenance(token, ring, params)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if prov.Tampered {
+			t.Fatalf("expected not tampered, got: %s", prov.TamperReason)
+		}
+	})
+
+	t.Run("custom MaxBuildDateSkew", func(t *testing.T) {
+		paramsFail := ProvenanceParams{
+			ExpectedProduct:  "otel-aws-log-processor",
+			CurrentVersion:   "v1.0.0",
+			CurrentBuildDate: officialBuild.Add(10 * time.Minute),
+			MaxBuildDateSkew: 5 * time.Minute,
+		}
+		_, err := EvaluateProvenance(token, ring, paramsFail)
+		if err == nil || !strings.Contains(err.Error(), "build date tampered") {
+			t.Fatalf("expected build date tampering, got: %v", err)
+		}
+
+		paramsPass := ProvenanceParams{
+			ExpectedProduct:  "otel-aws-log-processor",
+			CurrentVersion:   "v1.0.0",
+			CurrentBuildDate: officialBuild.Add(2 * time.Minute),
+			MaxBuildDateSkew: 5 * time.Minute,
+		}
+		prov, err := EvaluateProvenance(token, ring, paramsPass)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if prov.Tampered {
+			t.Fatalf("expected not tampered")
+		}
+	})
+
+	t.Run("strict build date enforcement", func(t *testing.T) {
+		paramsStrictFail := ProvenanceParams{
+			ExpectedProduct:        "otel-aws-log-processor",
+			CurrentVersion:         "v1.0.0",
+			CurrentBuildDate:       officialBuild.Add(5 * time.Minute),
+			RequireStrictBuildDate: true,
+		}
+		_, err := EvaluateProvenance(token, ring, paramsStrictFail)
+		if err == nil || !strings.Contains(err.Error(), "build date tampered") {
+			t.Fatalf("expected build date tampering under strict mode, got: %v", err)
+		}
+
+		paramsStrictPass := ProvenanceParams{
+			ExpectedProduct:        "otel-aws-log-processor",
+			CurrentVersion:         "v1.0.0",
+			CurrentBuildDate:       officialBuild.Add(30 * time.Second),
+			RequireStrictBuildDate: true,
+		}
+		prov, err := EvaluateProvenance(token, ring, paramsStrictPass)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if prov.Tampered {
+			t.Fatalf("expected not tampered")
+		}
+	})
+
+	t.Run("Validator options WithMaxBuildDateSkew and WithRequireStrictBuildDate", func(t *testing.T) {
+		val, err := NewValidator(pub,
+			WithProduct("otel-aws-log-processor"),
+			WithCurrentVersion("v1.0.0"),
+			WithBuildDate(officialBuild.Add(5*time.Minute)),
+			WithReleaseAttestation(token),
+			WithRequireStrictBuildDate(true),
+		)
+		if err != nil {
+			t.Fatalf("NewValidator failed: %v", err)
+		}
+		_, err = val.EvaluateProvenance()
+		if err == nil || !strings.Contains(err.Error(), "build date tampered") {
+			t.Fatalf("expected build date tampering from Validator, got: %v", err)
+		}
+
+		valWithSkew, err := NewValidator(pub,
+			WithProduct("otel-aws-log-processor"),
+			WithCurrentVersion("v1.0.0"),
+			WithBuildDate(officialBuild.Add(5*time.Minute)),
+			WithReleaseAttestation(token),
+			WithMaxBuildDateSkew(10*time.Minute),
+		)
+		if err != nil {
+			t.Fatalf("NewValidator failed: %v", err)
+		}
+		prov, err := valWithSkew.EvaluateProvenance()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if prov.Tampered {
+			t.Fatalf("expected not tampered")
+		}
+	})
+}
+
+func TestEvaluateProvenance_VersionCheckFailClosed(t *testing.T) {
+	pub, priv := generateTestKeyPair(t)
+	ring := NewKeyRing(pub)
+
+	claims := Claims{
+		Product:   "gitlab-fleet-governor",
+		ExpiresAt: time.Now().Add(24 * time.Hour),
+		Customer:  Customer{Name: "Acme Corp"},
+	}
+	signer, _ := NewSigner(priv)
+	lic, _ := signer.Sign(claims)
+
+	relClaims := ReleaseClaims{
+		Product:   "gitlab-fleet-governor",
+		Version:   "v2.5.0",
+		BuildDate: time.Now(),
+	}
+	token, err := SignRelease(relClaims, priv)
+	if err != nil {
+		t.Fatalf("SignRelease failed: %v", err)
+	}
+
+	// 1. RequireReleaseAttestation is true, but CurrentVersion is omitted -> FAIL CLOSED
+	valOmittedVersion, err := NewValidator(pub,
+		WithProduct("gitlab-fleet-governor"),
+		WithRequireReleaseAttestation(true),
+		WithReleaseAttestation(token),
+		// Note: WithCurrentVersion is omitted
+	)
+	if err != nil {
+		t.Fatalf("NewValidator failed: %v", err)
+	}
+	_, err = valOmittedVersion.Verify(lic)
+	if err == nil || !strings.Contains(err.Error(), "version verification required") {
+		t.Fatalf("expected version verification required error, got: %v", err)
+	}
+	if !errors.Is(err, ErrReleaseTampered) {
+		t.Fatalf("expected ErrReleaseTampered, got: %v", err)
+	}
+
+	// 2. CurrentVersion is provided and matches -> PASS
+	valMatchedVersion, err := NewValidator(pub,
+		WithProduct("gitlab-fleet-governor"),
+		WithCurrentVersion("v2.5.0"),
+		WithRequireReleaseAttestation(true),
+		WithReleaseAttestation(token),
+	)
+	if err != nil {
+		t.Fatalf("NewValidator failed: %v", err)
+	}
+	res, err := valMatchedVersion.VerifyWithResult(lic)
+	if err != nil {
+		t.Fatalf("VerifyWithResult failed: %v", err)
+	}
+	if !res.Provenance.Attested {
+		t.Fatalf("expected attested provenance")
+	}
+
+	// 3. When RequireReleaseAttestation is false, omitted CurrentVersion does not fail closed
+	paramsOptional := ProvenanceParams{
+		ExpectedProduct:           "gitlab-fleet-governor",
+		RequireReleaseAttestation: false,
+		// CurrentVersion is empty
+	}
+	prov, err := EvaluateProvenance(token, ring, paramsOptional)
+	if err != nil {
+		t.Fatalf("EvaluateProvenance should succeed when RequireReleaseAttestation is false, got: %v", err)
+	}
+	if prov.Tampered {
+		t.Fatalf("expected not tampered")
+	}
+}
+
+func TestEvaluateProvenance_GitCommitFailClosed(t *testing.T) {
+	pub, priv := generateTestKeyPair(t)
+	ring := NewKeyRing(pub)
+
+	claims := Claims{
+		Product:   "gitlab-fleet-governor",
+		ExpiresAt: time.Now().Add(24 * time.Hour),
+		Customer:  Customer{Name: "Acme Corp"},
+	}
+	signer, _ := NewSigner(priv)
+	lic, _ := signer.Sign(claims)
+
+	relClaims := ReleaseClaims{
+		Product:   "gitlab-fleet-governor",
+		Version:   "v2.5.0",
+		GitCommit: "deadbeefcafe12345678",
+		BuildDate: time.Now(),
+	}
+	token, err := SignRelease(relClaims, priv)
+	if err != nil {
+		t.Fatalf("SignRelease failed: %v", err)
+	}
+
+	// 1. RequireReleaseAttestation is true, GitCommit is attested, but running binary commit omitted -> FAIL CLOSED
+	valOmittedCommit, err := NewValidator(pub,
+		WithProduct("gitlab-fleet-governor"),
+		WithCurrentVersion("v2.5.0"),
+		WithRequireReleaseAttestation(true),
+		WithReleaseAttestation(token),
+		// Note: WithCurrentGitCommit is omitted
+	)
+	if err != nil {
+		t.Fatalf("NewValidator failed: %v", err)
+	}
+	_, err = valOmittedCommit.Verify(lic)
+	if err == nil || !strings.Contains(err.Error(), "git commit verification required") {
+		t.Fatalf("expected git commit verification required error, got: %v", err)
+	}
+	if !errors.Is(err, ErrReleaseTampered) {
+		t.Fatalf("expected ErrReleaseTampered, got: %v", err)
+	}
+
+	// 2. Git commit provided and matches prefix -> PASS
+	valMatchedCommit, err := NewValidator(pub,
+		WithProduct("gitlab-fleet-governor"),
+		WithCurrentVersion("v2.5.0"),
+		WithCurrentGitCommit("deadbeef"),
+		WithRequireReleaseAttestation(true),
+		WithReleaseAttestation(token),
+	)
+	if err != nil {
+		t.Fatalf("NewValidator failed: %v", err)
+	}
+	res, err := valMatchedCommit.VerifyWithResult(lic)
+	if err != nil {
+		t.Fatalf("VerifyWithResult failed: %v", err)
+	}
+	if !res.Provenance.Attested {
+		t.Fatalf("expected attested provenance")
+	}
+
+	// 3. Git commit provided but wrong -> FAIL
+	valWrongCommit, err := NewValidator(pub,
+		WithProduct("gitlab-fleet-governor"),
+		WithCurrentVersion("v2.5.0"),
+		WithCurrentGitCommit("11112222"),
+		WithRequireReleaseAttestation(true),
+		WithReleaseAttestation(token),
+	)
+	if err != nil {
+		t.Fatalf("NewValidator failed: %v", err)
+	}
+	_, err = valWrongCommit.Verify(lic)
+	if err == nil || !strings.Contains(err.Error(), "git commit mismatch") {
+		t.Fatalf("expected git commit mismatch error, got: %v", err)
+	}
+
+	// 4. When RequireReleaseAttestation is false, omitted CurrentCommit does not fail closed
+	paramsOptional := ProvenanceParams{
+		ExpectedProduct:           "gitlab-fleet-governor",
+		CurrentVersion:            "v2.5.0",
+		RequireReleaseAttestation: false,
+	}
+	prov, err := EvaluateProvenance(token, ring, paramsOptional)
+	if err != nil {
+		t.Fatalf("EvaluateProvenance should succeed when RequireReleaseAttestation is false, got: %v", err)
+	}
+	if prov.Tampered {
+		t.Fatalf("expected not tampered")
+	}
+}
+
+func TestEvaluateProvenance_BinaryDigestFailClosed(t *testing.T) {
+	pub, priv := generateTestKeyPair(t)
+	ring := NewKeyRing(pub)
+
+	claims := Claims{
+		Product:   "gitlab-fleet-governor",
+		ExpiresAt: time.Now().Add(24 * time.Hour),
+		Customer:  Customer{Name: "Acme Corp"},
+	}
+	signer, _ := NewSigner(priv)
+	lic, _ := signer.Sign(claims)
+
+	binaryBytes := []byte("legitimate binary content")
+	digest := ComputeBytesDigest(binaryBytes)
+
+	relClaimsWithDigest := ReleaseClaims{
+		Product:      "gitlab-fleet-governor",
+		Version:      "v2.5.0",
+		BinaryDigest: digest,
+		BuildDate:    time.Now(),
+	}
+	tokenWithDigest, err := SignRelease(relClaimsWithDigest, priv)
+	if err != nil {
+		t.Fatalf("SignRelease failed: %v", err)
+	}
+
+	// 1. Attestation has digest, RequireReleaseAttestation is true, but binary bytes/path omitted -> FAIL CLOSED
+	valOmittedDigest, err := NewValidator(pub,
+		WithProduct("gitlab-fleet-governor"),
+		WithCurrentVersion("v2.5.0"),
+		WithRequireReleaseAttestation(true),
+		WithReleaseAttestation(tokenWithDigest),
+		// Note: WithBinaryBytes / WithBinaryPath omitted
+	)
+	if err != nil {
+		t.Fatalf("NewValidator failed: %v", err)
+	}
+	_, err = valOmittedDigest.Verify(lic)
+	if err == nil || !strings.Contains(err.Error(), "binary digest verification required") {
+		t.Fatalf("expected binary digest verification required error, got: %v", err)
+	}
+	if !errors.Is(err, ErrReleaseTampered) {
+		t.Fatalf("expected ErrReleaseTampered, got: %v", err)
+	}
+
+	// 2. Attestation has digest, binary bytes provided and MATCH -> PASS
+	valMatchedDigest, err := NewValidator(pub,
+		WithProduct("gitlab-fleet-governor"),
+		WithCurrentVersion("v2.5.0"),
+		WithBinaryBytes(binaryBytes),
+		WithRequireReleaseAttestation(true),
+		WithReleaseAttestation(tokenWithDigest),
+	)
+	if err != nil {
+		t.Fatalf("NewValidator failed: %v", err)
+	}
+	res, err := valMatchedDigest.VerifyWithResult(lic)
+	if err != nil {
+		t.Fatalf("VerifyWithResult failed: %v", err)
+	}
+	if !res.Provenance.DigestMatched {
+		t.Fatalf("expected DigestMatched to be true")
+	}
+
+	// 3. Attestation has digest, binary bytes provided but TAMPERED -> FAIL with ErrReleaseDigestMismatch
+	valTamperedDigest, err := NewValidator(pub,
+		WithProduct("gitlab-fleet-governor"),
+		WithCurrentVersion("v2.5.0"),
+		WithBinaryBytes([]byte("tampered binary content")),
+		WithRequireReleaseAttestation(true),
+		WithReleaseAttestation(tokenWithDigest),
+	)
+	if err != nil {
+		t.Fatalf("NewValidator failed: %v", err)
+	}
+	_, err = valTamperedDigest.Verify(lic)
+	if err == nil || !errors.Is(err, ErrReleaseDigestMismatch) {
+		t.Fatalf("expected ErrReleaseDigestMismatch, got: %v", err)
+	}
+
+	// 4. Attestation has NO digest, but binary provided bytes, and RequireReleaseAttestation is true -> FAIL CLOSED
+	relClaimsNoDigest := ReleaseClaims{
+		Product:   "gitlab-fleet-governor",
+		Version:   "v2.5.0",
+		BuildDate: time.Now(),
+	}
+	tokenNoDigest, err := SignRelease(relClaimsNoDigest, priv)
+	if err != nil {
+		t.Fatalf("SignRelease failed: %v", err)
+	}
+
+	paramsMismatchedConfig := ProvenanceParams{
+		ExpectedProduct:           "gitlab-fleet-governor",
+		CurrentVersion:            "v2.5.0",
+		BinaryBytes:               binaryBytes,
+		RequireReleaseAttestation: true,
+	}
+	_, err = EvaluateProvenance(tokenNoDigest, ring, paramsMismatchedConfig)
+	if err == nil || !strings.Contains(err.Error(), "binary digest verification required") {
+		t.Fatalf("expected binary digest verification required when attestation lacks digest, got: %v", err)
+	}
+}

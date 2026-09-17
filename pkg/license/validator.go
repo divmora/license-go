@@ -43,6 +43,8 @@ type Validator struct {
 	releaseGitCommit          string
 	binaryPath                string
 	binaryBytes               []byte
+	maxBuildDateSkew          time.Duration
+	requireStrictBuildDate    bool
 	currentUsage              map[string]int64
 	currentFeatures           []string
 	allowEnvKeyOverride       bool
@@ -343,6 +345,21 @@ func WithBinaryBytes(data []byte) ValidatorOption {
 	}
 }
 
+// WithMaxBuildDateSkew configures the allowable clock skew tolerance between
+// claims.BuildDate and running binary build date.
+func WithMaxBuildDateSkew(skew time.Duration) ValidatorOption {
+	return func(v *Validator) {
+		v.maxBuildDateSkew = skew
+	}
+}
+
+// WithRequireStrictBuildDate enforces exact or tight build date matching (defaults to 1 minute tolerance if unset).
+func WithRequireStrictBuildDate(strict bool) ValidatorOption {
+	return func(v *Validator) {
+		v.requireStrictBuildDate = strict
+	}
+}
+
 // EvaluateProvenance evaluates the binary release authenticity and provenance against the validator's KeyRing.
 func (v *Validator) EvaluateProvenance() (*ReleaseProvenance, error) {
 	if v.initErr != nil {
@@ -362,13 +379,16 @@ func (v *Validator) EvaluateProvenance() (*ReleaseProvenance, error) {
 	}
 
 	params := ProvenanceParams{
-		ExpectedProduct:    v.expectedProduct,
-		CurrentVersion:     v.currentVersion,
-		CurrentCommit:      v.releaseGitCommit,
-		CurrentBuildDate:   v.buildDate,
-		CurrentReleaseDate: releaseDate,
-		BinaryPath:         v.binaryPath,
-		BinaryBytes:        v.binaryBytes,
+		ExpectedProduct:           v.expectedProduct,
+		CurrentVersion:            v.currentVersion,
+		CurrentCommit:             v.releaseGitCommit,
+		CurrentBuildDate:          v.buildDate,
+		CurrentReleaseDate:        releaseDate,
+		BinaryPath:                v.binaryPath,
+		BinaryBytes:               v.binaryBytes,
+		RequireReleaseAttestation: v.requireReleaseAttestation,
+		MaxBuildDateSkew:          v.maxBuildDateSkew,
+		RequireStrictBuildDate:    v.requireStrictBuildDate,
 	}
 
 	return EvaluateProvenance(v.releaseAttestation, v.keyRing, params)
