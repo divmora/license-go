@@ -708,3 +708,197 @@ func TestScope_GlobstarRecursiveWildcard(t *testing.T) {
 		t.Error("expected 'acme/**/backend' to NOT match 'acme/infra/frontend'")
 	}
 }
+
+func TestScope_LegacyClaimsEnvironment_Enforcement(t *testing.T) {
+	pub, priv, err := GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("GenerateKeyPair failed: %v", err)
+	}
+	signer, err := NewSigner(priv)
+	if err != nil {
+		t.Fatalf("NewSigner failed: %v", err)
+	}
+
+	claims := Claims{
+		Product:     "gitlab-fleet-governor",
+		Customer:    Customer{Name: "Legacy Customer"},
+		Environment: "production",
+	}
+	token, err := signer.Sign(claims)
+	if err != nil {
+		t.Fatalf("Sign failed: %v", err)
+	}
+
+	// Clear any ambient process env vars during tests
+	for _, k := range []string{"DIVMORA_ENV", "ENV", "ENVIRONMENT", "APP_ENV"} {
+		t.Setenv(k, "")
+	}
+
+	// 1. Explicit validator matching environment -> PASS
+	vMatching, err := NewValidator(pub,
+		WithProduct("gitlab-fleet-governor"),
+		WithCurrentEnvironment("production"),
+	)
+	if err != nil {
+		t.Fatalf("NewValidator failed: %v", err)
+	}
+	if _, err := vMatching.Verify(token); err != nil {
+		t.Fatalf("expected verification to pass with matching environment, got: %v", err)
+	}
+
+	// 2. Explicit validator mismatching environment -> FAIL
+	vMismatch, err := NewValidator(pub,
+		WithProduct("gitlab-fleet-governor"),
+		WithCurrentEnvironment("staging"),
+	)
+	if err != nil {
+		t.Fatalf("NewValidator failed: %v", err)
+	}
+	_, err = vMismatch.Verify(token)
+	if !errors.Is(err, ErrScopeMismatch) {
+		t.Fatalf("expected ErrScopeMismatch for mismatching environment, got: %v", err)
+	}
+	var scopeErr *ScopeMismatchError
+	if !errors.As(err, &scopeErr) {
+		t.Fatalf("expected *ScopeMismatchError, got: %T", err)
+	}
+	if scopeErr.Dimension != "environments" || scopeErr.Target != "staging" {
+		t.Errorf("unexpected scopeErr: %+v", scopeErr)
+	}
+
+	// 3. Unconfigured validator, but process environment DIVMORA_ENV="production" -> PASS
+	t.Run("resolve from DIVMORA_ENV", func(t *testing.T) {
+		t.Setenv("DIVMORA_ENV", "production")
+		vUnconfigured, _ := NewValidator(pub, WithProduct("gitlab-fleet-governor"))
+		if _, err := vUnconfigured.Verify(token); err != nil {
+			t.Fatalf("expected verification to pass via DIVMORA_ENV, got: %v", err)
+		}
+	})
+
+	// 4. Unconfigured validator, but process environment APP_ENV="production" -> PASS
+	t.Run("resolve from APP_ENV", func(t *testing.T) {
+		t.Setenv("APP_ENV", "production")
+		vUnconfigured, _ := NewValidator(pub, WithProduct("gitlab-fleet-governor"))
+		if _, err := vUnconfigured.Verify(token); err != nil {
+			t.Fatalf("expected verification to pass via APP_ENV, got: %v", err)
+		}
+	})
+
+	// 5. Unconfigured validator, but process environment ENV="staging" -> FAIL
+	t.Run("mismatch from ENV", func(t *testing.T) {
+		t.Setenv("ENV", "staging")
+		vUnconfigured, _ := NewValidator(pub, WithProduct("gitlab-fleet-governor"))
+		_, err := vUnconfigured.Verify(token)
+		if !errors.Is(err, ErrScopeMismatch) {
+			t.Fatalf("expected ErrScopeMismatch for staging ENV, got: %v", err)
+		}
+	})
+
+	// 6. Unconfigured validator with NO environment variables -> FAIL CLOSED
+	t.Run("fail closed when environment undetermined", func(t *testing.T) {
+		for _, k := range []string{"DIVMORA_ENV", "ENV", "ENVIRONMENT", "APP_ENV"} {
+			t.Setenv(k, "")
+		}
+		vUnconfigured, _ := NewValidator(pub, WithProduct("gitlab-fleet-governor"))
+		_, err := vUnconfigured.Verify(token)
+		if !errors.Is(err, ErrScopeMismatch) {
+			t.Fatalf("expected ErrScopeMismatch when environment cannot be determined, got: %v", err)
+		}
+		var errScope *ScopeMismatchError
+		if errors.As(err, &errScope) {
+			if errScope.Target != "" {
+				t.Errorf("expected Target to be empty, got %q", errScope.Target)
+			}
+			if len(errScope.Allowed) != 1 || errScope.Allowed[0] != "production" {
+				t.Errorf("expected Allowed [production], got %v", errScope.Allowed)
+			}
+		}
+	})
+}
+
+func TestScope_HybridScopeAndEnvironment_Enforcement(t *testing.T) {
+	pub, priv, err := GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("GenerateKeyPair failed: %v", err)
+	}
+	signer, err := NewSigner(priv)
+	if err != nil {
+		t.Fatalf("NewSigner failed: %v", err)
+	}
+
+	claims := Claims{
+		Product:     "gitlab-fleet-governor",
+		Customer:    Customer{Name: "Hybrid Customer"},
+		Environment: "production",
+		Scope: &Scope{
+			Regions: []string{"us-east-1"},
+		},
+	}
+	token, err := signer.Sign(claims)
+	if err != nil {
+		t.Fatalf("Sign failed: %v", err)
+	}
+
+	for _, k := range []string{"DIVMORA_ENV", "ENV", "ENVIRONMENT", "APP_ENV", "AWS_REGION", "AWS_DEFAULT_REGION"} {
+		t.Setenv(k, "")
+	}
+
+	// 1. Both environment and region match -> PASS
+	vAllMatch, err := NewValidator(pub,
+		WithProduct("gitlab-fleet-governor"),
+		WithCurrentEnvironment("production"),
+		WithCurrentRegion("us-east-1"),
+	)
+	if err != nil {
+		t.Fatalf("NewValidator failed: %v", err)
+	}
+	if _, err := vAllMatch.Verify(token); err != nil {
+		t.Fatalf("expected verification to pass with matching environment and region, got: %v", err)
+	}
+
+	// 2. Region matches, but environment mismatches -> FAIL on environments
+	vEnvMismatch, err := NewValidator(pub,
+		WithProduct("gitlab-fleet-governor"),
+		WithCurrentEnvironment("development"),
+		WithCurrentRegion("us-east-1"),
+	)
+	if err != nil {
+		t.Fatalf("NewValidator failed: %v", err)
+	}
+	_, err = vEnvMismatch.Verify(token)
+	if !errors.Is(err, ErrScopeMismatch) {
+		t.Fatalf("expected ErrScopeMismatch for env mismatch, got: %v", err)
+	}
+	var envErr *ScopeMismatchError
+	if errors.As(err, &envErr) && envErr.Dimension != "environments" {
+		t.Errorf("expected Dimension 'environments', got %q", envErr.Dimension)
+	}
+
+	// 3. Environment matches, but region mismatches -> FAIL on regions
+	vRegionMismatch, err := NewValidator(pub,
+		WithProduct("gitlab-fleet-governor"),
+		WithCurrentEnvironment("production"),
+		WithCurrentRegion("eu-west-1"),
+	)
+	if err != nil {
+		t.Fatalf("NewValidator failed: %v", err)
+	}
+	_, err = vRegionMismatch.Verify(token)
+	if !errors.Is(err, ErrScopeMismatch) {
+		t.Fatalf("expected ErrScopeMismatch for region mismatch, got: %v", err)
+	}
+	var regErr *ScopeMismatchError
+	if errors.As(err, &regErr) && regErr.Dimension != "regions" {
+		t.Errorf("expected Dimension 'regions', got %q", regErr.Dimension)
+	}
+
+	// 4. Unconfigured validator -> FAILS CLOSED on environment
+	vUnconfigured, err := NewValidator(pub, WithProduct("gitlab-fleet-governor"))
+	if err != nil {
+		t.Fatalf("NewValidator failed: %v", err)
+	}
+	_, err = vUnconfigured.Verify(token)
+	if !errors.Is(err, ErrScopeMismatch) {
+		t.Fatalf("expected ErrScopeMismatch for unconfigured validator, got: %v", err)
+	}
+}

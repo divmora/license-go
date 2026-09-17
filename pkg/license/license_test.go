@@ -28,7 +28,6 @@ func sampleClaims() Claims {
 			"max_nodes":   10,
 			"unlimited_q": -1,
 		},
-		Environment: "production",
 		Metadata: map[string]string{
 			"tier":   "gold",
 			"region": "us-east-1",

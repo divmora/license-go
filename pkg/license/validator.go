@@ -936,18 +936,25 @@ func (v *Validator) verifyClaimsWithDetails(payloadJSON []byte, now time.Time) (
 }
 
 func (v *Validator) checkScope(claims *Claims) error {
-	if claims.Scope != nil {
-		// 1. Environments
-		if len(claims.Scope.Environments) > 0 {
-			targetEnv := v.currentEnvironment
-			if targetEnv == "" {
-				targetEnv = resolveEnvFromProcess()
-			}
-			if targetEnv == "" || !claims.IsEnvironmentAllowed(targetEnv) {
-				return &ScopeMismatchError{Dimension: "environments", Allowed: claims.Scope.Environments, Target: targetEnv}
-			}
-		}
+	// 1. Environments: assert modern Scope.Environments, or fallback to legacy Claims.Environment
+	var allowedEnvs []string
+	if claims.Scope != nil && len(claims.Scope.Environments) > 0 {
+		allowedEnvs = claims.Scope.Environments
+	} else if claims.Environment != "" {
+		allowedEnvs = []string{claims.Environment}
+	}
 
+	if len(allowedEnvs) > 0 {
+		targetEnv := v.currentEnvironment
+		if targetEnv == "" {
+			targetEnv = resolveEnvFromProcess()
+		}
+		if targetEnv == "" || !claims.IsEnvironmentAllowed(targetEnv) {
+			return &ScopeMismatchError{Dimension: "environments", Allowed: allowedEnvs, Target: targetEnv}
+		}
+	}
+
+	if claims.Scope != nil {
 		// 2. Accounts
 		if len(claims.Scope.Accounts) > 0 {
 			targetAccount := v.currentAccount
@@ -1007,10 +1014,6 @@ func (v *Validator) checkScope(claims *Claims) error {
 					}
 				}
 			}
-		}
-	} else if claims.Environment != "" && v.currentEnvironment != "" {
-		if !claims.IsEnvironmentAllowed(v.currentEnvironment) {
-			return &ScopeMismatchError{Dimension: "environments", Allowed: []string{claims.Environment}, Target: v.currentEnvironment}
 		}
 	}
 	return nil
