@@ -34,8 +34,21 @@ license-go/
 │       ├── policy_test.go      # Operational policy modes (Strict, Degraded, WarnOnly) tests
 │       └── version_test.go     # Perpetual license version lock & maintenance cutoff tests
 ├── cmd/
-│   └── license-cli/            # Standalone CLI binary (keygen, issue, verify, inspect)
-│       └── main.go
+│   └── license-cli/            # Standalone CLI binary & subcommands
+│       ├── main.go             # Entry point & subcommand dispatcher
+│       ├── shared.go           # CLI parsing helpers
+│       ├── cmd_keygen.go       # keygen subcommand
+│       ├── cmd_keyring.go      # keyring subcommand
+│       ├── cmd_issue.go        # issue subcommand
+│       ├── cmd_verify.go       # verify subcommand
+│       ├── cmd_inspect.go      # inspect subcommand
+│       ├── cmd_status.go       # status subcommand
+│       ├── cmd_bsl_eval.go     # bsl-eval subcommand
+│       ├── cmd_sign_release.go # sign-release subcommand
+│       ├── cmd_verify_release.go # verify-release subcommand
+│       ├── cmd_inspect_release.go # inspect-release subcommand
+│       ├── cmd_fingerprint.go  # fingerprint subcommand
+│       └── cmd_request.go      # request subcommand
 ├── Makefile                    # Standardized build and test targets
 └── .agents/
     └── skills/                 # Antigravity skill definitions
