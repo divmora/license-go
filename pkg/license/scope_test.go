@@ -956,6 +956,170 @@ func TestScope_AccountAndRegionSpoofProtection(t *testing.T) {
 	}
 }
 
+func TestScope_AccountAndRegionAutoResolution_NonFingerprintedLicense(t *testing.T) {
+	pub, priv, err := GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("GenerateKeyPair failed: %v", err)
+	}
+	signer, err := NewSigner(priv)
+	if err != nil {
+		t.Fatalf("NewSigner failed: %v", err)
+	}
+
+	claims := Claims{
+		Product:  "otel-aws-log-processor",
+		Customer: Customer{Name: "Legit Enterprise Customer"},
+		Plan:     "enterprise",
+		Scope: &Scope{
+			Accounts: []string{"112233445566"},
+			Regions:  []string{"eu-central-1"},
+		},
+		// Non-node-locked license: Fingerprint is empty!
+		Fingerprint: "",
+		ExpiresAt:   time.Now().Add(30 * 24 * time.Hour),
+	}
+	token, err := signer.Sign(claims)
+	if err != nil {
+		t.Fatalf("Sign failed: %v", err)
+	}
+
+	// Host runs inside AWS Lambda environment
+	t.Setenv("AWS_LAMBDA_FUNCTION_NAME", "my-env-lambda")
+	t.Setenv("AWS_LAMBDA_RUNTIME_API", "127.0.0.1:9001")
+	t.Setenv("AWS_REGION", "eu-central-1")
+	t.Setenv("AWS_ACCOUNT_ID", "112233445566")
+	t.Setenv("LAMBDA_TASK_ROOT", "/var/task")
+
+	// Standard validator without manual account/region or auto-fingerprint options
+	val, err := NewValidator(pub, WithProduct("otel-aws-log-processor"))
+	if err != nil {
+		t.Fatalf("NewValidator failed: %v", err)
+	}
+
+	res, err := val.VerifyWithResult(token)
+	if err != nil {
+		t.Fatalf("expected successful verification for legitimate account/region scoped license in Lambda, got: %v", err)
+	}
+
+	if res.ResolvedFingerprint == nil {
+		t.Fatal("expected ResolvedFingerprint to be populated on verification result")
+	}
+	if res.ResolvedFingerprint.Platform != PlatformAWSLambda {
+		t.Errorf("expected platform %s, got %s", PlatformAWSLambda, res.ResolvedFingerprint.Platform)
+	}
+	if res.ResolvedFingerprint.Components["account_id"] != "112233445566" {
+		t.Errorf("expected account_id 112233445566, got %s", res.ResolvedFingerprint.Components["account_id"])
+	}
+	if res.ResolvedFingerprint.Components["region"] != "eu-central-1" {
+		t.Errorf("expected region eu-central-1, got %s", res.ResolvedFingerprint.Components["region"])
+	}
+	if res.FingerprintMatched {
+		t.Error("expected FingerprintMatched == false for non-fingerprinted license")
+	}
+}
+
+func TestScope_AccountAndRegionAutoResolution_MismatchFails(t *testing.T) {
+	pub, priv, err := GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("GenerateKeyPair failed: %v", err)
+	}
+	signer, err := NewSigner(priv)
+	if err != nil {
+		t.Fatalf("NewSigner failed: %v", err)
+	}
+
+	claims := Claims{
+		Product:  "otel-aws-log-processor",
+		Customer: Customer{Name: "Legit Customer"},
+		Plan:     "enterprise",
+		Scope: &Scope{
+			Accounts: []string{"112233445566"},
+			Regions:  []string{"eu-central-1"},
+		},
+		Fingerprint: "",
+		ExpiresAt:   time.Now().Add(30 * 24 * time.Hour),
+	}
+	token, err := signer.Sign(claims)
+	if err != nil {
+		t.Fatalf("Sign failed: %v", err)
+	}
+
+	// Host runs in different AWS account and region
+	t.Setenv("AWS_LAMBDA_FUNCTION_NAME", "my-env-lambda")
+	t.Setenv("AWS_LAMBDA_RUNTIME_API", "127.0.0.1:9001")
+	t.Setenv("AWS_REGION", "us-west-2")
+	t.Setenv("AWS_ACCOUNT_ID", "999999999999")
+	t.Setenv("LAMBDA_TASK_ROOT", "/var/task")
+
+	val, err := NewValidator(pub, WithProduct("otel-aws-log-processor"))
+	if err != nil {
+		t.Fatalf("NewValidator failed: %v", err)
+	}
+
+	_, err = val.Verify(token)
+	if err == nil || !errors.Is(err, ErrScopeMismatch) {
+		t.Fatalf("expected ErrScopeMismatch for mismatched account/region, got: %v", err)
+	}
+}
+
+func TestScope_ClusterAutoResolution_Kubernetes(t *testing.T) {
+	pub, priv, err := GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("GenerateKeyPair failed: %v", err)
+	}
+	signer, err := NewSigner(priv)
+	if err != nil {
+		t.Fatalf("NewSigner failed: %v", err)
+	}
+
+	claims := Claims{
+		Product:  "gitlab-fleet-governor",
+		Customer: Customer{Name: "K8s Customer"},
+		Plan:     "enterprise",
+		Scope: &Scope{
+			Clusters: []string{"k8s-prod-cluster-01"},
+		},
+		Fingerprint: "",
+		ExpiresAt:   time.Now().Add(30 * 24 * time.Hour),
+	}
+	token, err := signer.Sign(claims)
+	if err != nil {
+		t.Fatalf("Sign failed: %v", err)
+	}
+
+	k8sResolver := NewKubernetesResolver(WithKubernetesClusterID("k8s-prod-cluster-01"))
+	val, err := NewValidator(pub,
+		WithProduct("gitlab-fleet-governor"),
+		WithFingerprintResolver(k8sResolver),
+	)
+	if err != nil {
+		t.Fatalf("NewValidator failed: %v", err)
+	}
+
+	// Should auto-resolve cluster UID from k8s resolver and succeed
+	res, err := val.VerifyWithResult(token)
+	if err != nil {
+		t.Fatalf("expected successful verification for cluster-scoped license, got: %v", err)
+	}
+	if res.ResolvedFingerprint == nil || res.ResolvedFingerprint.Platform != PlatformKubernetes {
+		t.Fatalf("expected resolved k8s platform fingerprint, got: %v", res.ResolvedFingerprint)
+	}
+
+	// Mismatched cluster UID
+	mismatchResolver := NewKubernetesResolver(WithKubernetesClusterID("k8s-dev-cluster-02"))
+	valMismatch, err := NewValidator(pub,
+		WithProduct("gitlab-fleet-governor"),
+		WithFingerprintResolver(mismatchResolver),
+	)
+	if err != nil {
+		t.Fatalf("NewValidator failed: %v", err)
+	}
+	_, err = valMismatch.Verify(token)
+	if err == nil || !errors.Is(err, ErrScopeMismatch) {
+		t.Fatalf("expected ErrScopeMismatch for mismatched cluster UID, got: %v", err)
+	}
+}
+
 func TestValidator_WithRequireScope(t *testing.T) {
 	pub, priv, err := GenerateKeyPair()
 	if err != nil {

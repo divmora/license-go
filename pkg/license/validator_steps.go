@@ -206,6 +206,22 @@ func (v *Validator) verifyClaimsWithDetails(payloadJSON []byte, now time.Time) (
 	}
 
 	// 7. Scope constraints check
+	// Auto-resolve cloud/platform identity if account, region, or cluster scope needs evaluation
+	if resolvedFP == nil && claims.Scope != nil &&
+		((len(claims.Scope.Accounts) > 0 && v.currentAccount == "") ||
+			(len(claims.Scope.Regions) > 0 && v.currentRegion == "") ||
+			(len(claims.Scope.Clusters) > 0 && v.currentCluster == "")) {
+		resolver := v.fingerprintResolver
+		if resolver == nil {
+			resolver = NewDefaultCompositeResolver()
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if fp, err := resolver.Resolve(ctx); err == nil && fp != nil {
+			resolvedFP = fp
+		}
+	}
+
 	if err := v.checkScope(&claims, resolvedFP); err != nil {
 		return nil, resolvedFP, fingerprintMatched, err
 	}
@@ -263,6 +279,21 @@ func (v *Validator) checkScope(claims *Claims, resolvedFP *MachineFingerprint) e
 	}
 
 	if claims.Scope != nil {
+		if resolvedFP == nil &&
+			((len(claims.Scope.Accounts) > 0 && v.currentAccount == "") ||
+				(len(claims.Scope.Regions) > 0 && v.currentRegion == "") ||
+				(len(claims.Scope.Clusters) > 0 && v.currentCluster == "")) {
+			resolver := v.fingerprintResolver
+			if resolver == nil {
+				resolver = NewDefaultCompositeResolver()
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			if fp, err := resolver.Resolve(ctx); err == nil && fp != nil {
+				resolvedFP = fp
+			}
+		}
+
 		// 2. Accounts
 		if len(claims.Scope.Accounts) > 0 {
 			targetAccount := v.currentAccount
@@ -287,8 +318,12 @@ func (v *Validator) checkScope(claims *Claims, resolvedFP *MachineFingerprint) e
 
 		// 4. Clusters
 		if len(claims.Scope.Clusters) > 0 {
-			if v.currentCluster == "" || !claims.IsClusterAllowed(v.currentCluster) {
-				return &ScopeMismatchError{Dimension: "clusters", Allowed: claims.Scope.Clusters, Target: v.currentCluster}
+			targetCluster := v.currentCluster
+			if targetCluster == "" && resolvedFP != nil && resolvedFP.Platform == PlatformKubernetes {
+				targetCluster = resolvedFP.Components["cluster_uid"]
+			}
+			if targetCluster == "" || !claims.IsClusterAllowed(targetCluster) {
+				return &ScopeMismatchError{Dimension: "clusters", Allowed: claims.Scope.Clusters, Target: targetCluster}
 			}
 		}
 
