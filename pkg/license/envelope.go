@@ -1,6 +1,7 @@
 package license
 
 import (
+	"crypto/ed25519"
 	"encoding/base64"
 	"fmt"
 	"strings"
@@ -133,6 +134,10 @@ func ParseToken(raw string) (payloadJSON []byte, signature []byte, signedData []
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("%w: invalid signature base64: %v", ErrInvalidLicenseFormat, err)
 		}
+	}
+
+	if len(signature) != ed25519.SignatureSize {
+		return nil, nil, nil, fmt.Errorf("%w: signature length is %d bytes, expected %d", ErrInvalidLicenseFormat, len(signature), ed25519.SignatureSize)
 	}
 
 	// Canonical signed data is "DIV1.<base64url(payload)>"

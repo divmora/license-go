@@ -144,7 +144,7 @@ func (v *Validator) verifyClaimsWithDetails(payloadJSON []byte, now time.Time) (
 	fingerprintMatched := false
 	if claims.Fingerprint != "" {
 		if v.expectedFingerprint != "" {
-			if strings.EqualFold(claims.Fingerprint, v.expectedFingerprint) {
+			if constantTimeFingerprintMatch(claims.Fingerprint, v.expectedFingerprint) {
 				fingerprintMatched = true
 			} else {
 				return nil, nil, false, fmt.Errorf("%w: expected %q, license bound to %q", ErrFingerprintMismatch, v.expectedFingerprint, claims.Fingerprint)

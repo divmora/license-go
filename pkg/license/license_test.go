@@ -1,7 +1,10 @@
 package license
 
 import (
+	"crypto/ed25519"
+	"encoding/base64"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -935,4 +938,132 @@ func TestValidator_ClockSkewStatusAlignment(t *testing.T) {
 			t.Errorf("expected expired status message, got: %q", resExpired.StatusMessage())
 		}
 	})
+}
+
+func TestParseToken_SignatureLengthValidation(t *testing.T) {
+	pub, priv, err := GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("GenerateKeyPair failed: %v", err)
+	}
+
+	signer, err := NewSigner(priv)
+	if err != nil {
+		t.Fatalf("NewSigner failed: %v", err)
+	}
+
+	token, err := signer.Sign(sampleClaims())
+	if err != nil {
+		t.Fatalf("Sign failed: %v", err)
+	}
+
+	// Token format is DIV1.<payload>.<sig>
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		t.Fatalf("expected 3 parts, got %d", len(parts))
+	}
+
+	// 1. Valid token passes ParseToken
+	payload, sig, signedData, err := ParseToken(token)
+	if err != nil {
+		t.Fatalf("ParseToken failed on valid token: %v", err)
+	}
+	if len(sig) != ed25519.SignatureSize {
+		t.Fatalf("expected sig length %d, got %d", ed25519.SignatureSize, len(sig))
+	}
+	if len(payload) == 0 || len(signedData) == 0 {
+		t.Fatal("empty payload or signedData")
+	}
+
+	// 2. Truncated signature (e.g. 32 bytes instead of 64 bytes)
+	truncatedSig := base64.RawURLEncoding.EncodeToString(sig[:32])
+	badTokenTruncated := fmt.Sprintf("%s.%s.%s", parts[0], parts[1], truncatedSig)
+	_, _, _, err = ParseToken(badTokenTruncated)
+	if err == nil || !errors.Is(err, ErrInvalidLicenseFormat) {
+		t.Fatalf("expected ErrInvalidLicenseFormat for truncated signature, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "signature length is 32 bytes, expected 64") {
+		t.Errorf("expected error message mentioning signature length, got: %v", err)
+	}
+
+	// 3. Extended signature (e.g. 70 bytes instead of 64 bytes)
+	extendedSigBytes := append(sig, []byte("123456")...)
+	extendedSig := base64.RawURLEncoding.EncodeToString(extendedSigBytes)
+	badTokenExtended := fmt.Sprintf("%s.%s.%s", parts[0], parts[1], extendedSig)
+	_, _, _, err = ParseToken(badTokenExtended)
+	if err == nil || !errors.Is(err, ErrInvalidLicenseFormat) {
+		t.Fatalf("expected ErrInvalidLicenseFormat for extended signature, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "signature length is 70 bytes, expected 64") {
+		t.Errorf("expected error message mentioning signature length, got: %v", err)
+	}
+
+	// Verify using Validator also fails with ErrInvalidLicenseFormat instead of passing to signature check
+	validator, err := NewValidator(pub, WithProduct("gitlab-fleet-governor"))
+	if err != nil {
+		t.Fatalf("NewValidator failed: %v", err)
+	}
+	_, err = validator.Verify(badTokenTruncated)
+	if err == nil || !errors.Is(err, ErrInvalidLicenseFormat) {
+		t.Fatalf("expected validator to reject truncated signature with ErrInvalidLicenseFormat, got: %v", err)
+	}
+}
+
+func TestConstantTimeFingerprintMatch(t *testing.T) {
+	tests := []struct {
+		a, b string
+		want bool
+	}{
+		{"sha256:abc123", "sha256:abc123", true},
+		{"sha256:abc123", "SHA256:ABC123", true},
+		{"SHA256:ABC123", "sha256:abc123", true},
+		{"sha256:abc123", "sha256:abc124", false},
+		{"sha256:abc123", "sha256:abc12", false},
+		{"", "", false},
+		{"sha256:abc123", "", false},
+		{"", "sha256:abc123", false},
+	}
+
+	for _, tc := range tests {
+		got := constantTimeFingerprintMatch(tc.a, tc.b)
+		if got != tc.want {
+			t.Errorf("constantTimeFingerprintMatch(%q, %q) = %v; want %v", tc.a, tc.b, got, tc.want)
+		}
+	}
+}
+
+func TestSigner_RandomIDGeneration(t *testing.T) {
+	pub, priv, err := GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("GenerateKeyPair failed: %v", err)
+	}
+
+	signer, err := NewSigner(priv)
+	if err != nil {
+		t.Fatalf("NewSigner failed: %v", err)
+	}
+
+	claims := sampleClaims()
+	claims.ID = "" // Leave ID empty to trigger generateRandomID
+
+	token, err := signer.Sign(claims)
+	if err != nil {
+		t.Fatalf("Sign failed: %v", err)
+	}
+
+	validator, err := NewValidator(pub, WithProduct("gitlab-fleet-governor"))
+	if err != nil {
+		t.Fatalf("NewValidator failed: %v", err)
+	}
+
+	res, err := validator.Verify(token)
+	if err != nil {
+		t.Fatalf("Verify failed: %v", err)
+	}
+
+	if res.ID == "" {
+		t.Fatal("expected non-empty random ID assigned by signer")
+	}
+	if len(res.ID) != 32 {
+		t.Errorf("expected 32-char hex random ID (16 bytes), got length %d: %q", len(res.ID), res.ID)
+	}
 }

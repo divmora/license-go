@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -106,5 +107,71 @@ func TestKeyFileOperations(t *testing.T) {
 	}
 	if !pub.Equal(loadedPub) {
 		t.Fatal("loaded public key does not match original")
+	}
+}
+
+func TestKeyFingerprint_128BitAndShort(t *testing.T) {
+	pub, _, err := GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("GenerateKeyPair failed: %v", err)
+	}
+
+	fp := KeyFingerprint(pub)
+	if !strings.HasPrefix(fp, "sha256:") {
+		t.Fatalf("expected sha256: prefix, got: %s", fp)
+	}
+	// "sha256:" is 7 chars. 16 bytes in hex is 32 chars -> total 39 chars (128 bits)
+	if len(fp) != 7+32 {
+		t.Errorf("expected 128-bit hex fingerprint length 39 (7+32), got %d (%s)", len(fp), fp)
+	}
+
+	shortFP := KeyFingerprintShort(pub)
+	if !strings.HasPrefix(shortFP, "sha256:") {
+		t.Fatalf("expected sha256: prefix, got: %s", shortFP)
+	}
+	// "sha256:" is 7 chars. 8 bytes in hex is 16 chars -> total 23 chars (64 bits)
+	if len(shortFP) != 7+16 {
+		t.Errorf("expected 64-bit hex fingerprint length 23 (7+16), got %d (%s)", len(shortFP), shortFP)
+	}
+
+	// shortFP should be prefix of fp
+	if !strings.HasPrefix(fp, shortFP) {
+		t.Errorf("expected %s to be a prefix of %s", shortFP, fp)
+	}
+
+	// Invalid pub key
+	if KeyFingerprint(nil) != "" {
+		t.Error("expected empty string for nil key")
+	}
+	if KeyFingerprintShort(nil) != "" {
+		t.Error("expected empty string for nil key")
+	}
+}
+
+func TestKeyRing_FingerprintCompatibilityLookup(t *testing.T) {
+	pub, _, err := GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("GenerateKeyPair failed: %v", err)
+	}
+
+	kr := NewKeyRing(pub)
+	entry := kr.Primary()
+
+	fp128 := KeyFingerprint(pub)
+	fp64 := KeyFingerprintShort(pub)
+
+	found128, ok := kr.FindKey(fp128)
+	if !ok || found128 != entry {
+		t.Errorf("failed to find key by 128-bit fingerprint %s", fp128)
+	}
+
+	found64, ok := kr.FindKey(fp64)
+	if !ok || found64 != entry {
+		t.Errorf("failed to find key by legacy 64-bit fingerprint %s", fp64)
+	}
+
+	foundByFP64, ok := kr.FindKeyByFingerprint(fp64)
+	if !ok || foundByFP64 != entry {
+		t.Errorf("failed to find key by FindKeyByFingerprint with 64-bit %s", fp64)
 	}
 }

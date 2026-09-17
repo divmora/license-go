@@ -83,7 +83,11 @@ func (s *Signer) Sign(claims Claims) (string, error) {
 
 	// Default ID if not provided
 	if claims.ID == "" {
-		claims.ID = generateRandomID()
+		id, err := generateRandomID()
+		if err != nil {
+			return "", err
+		}
+		claims.ID = id
 	}
 
 	// Default KeyID if configured on signer
@@ -137,11 +141,10 @@ func (s *Signer) SignToFile(claims Claims, filePath string, armored bool) error 
 }
 
 // generateRandomID produces a secure 16-byte random hex string.
-func generateRandomID() string {
+func generateRandomID() (string, error) {
 	bytes := make([]byte, 16)
 	if _, err := rand.Read(bytes); err != nil {
-		// Fallback timestamp if entropy fails
-		return fmt.Sprintf("%x", time.Now().UnixNano())
+		return "", fmt.Errorf("failed to generate random license ID: %w", err)
 	}
-	return hex.EncodeToString(bytes)
+	return hex.EncodeToString(bytes), nil
 }

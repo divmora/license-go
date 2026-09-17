@@ -369,3 +369,30 @@ func TestPerpetualLicense_LeadingVPrefix(t *testing.T) {
 		t.Errorf("expected v2.5.1 to be REJECTED on <=v2.5.0")
 	}
 }
+
+func TestPerpetualLicense_VersionPatternSegmentIsolation(t *testing.T) {
+	claims := license.Claims{
+		Product:         "gitlab-fleet-governor",
+		AllowedVersions: []string{"1.0.fix"},
+	}
+
+	if !claims.IsVersionAllowed("1.0.fix") {
+		t.Errorf("expected 1.0.fix to be allowed")
+	}
+	// x in "fix" should NOT be treated as a wildcard matching "fiy"
+	if claims.IsVersionAllowed("1.0.fiy") {
+		t.Errorf("expected 1.0.fiy to be REJECTED (x should not be treated as * inside words)")
+	}
+
+	// Standalone segment wildcards:
+	claimsWildcard := license.Claims{
+		Product:         "gitlab-fleet-governor",
+		AllowedVersions: []string{"1.x.fix", "2.X.0"},
+	}
+	if !claimsWildcard.IsVersionAllowed("1.2.fix") {
+		t.Errorf("expected 1.2.fix to be allowed with 1.x.fix")
+	}
+	if !claimsWildcard.IsVersionAllowed("2.5.0") {
+		t.Errorf("expected 2.5.0 to be allowed with 2.X.0")
+	}
+}

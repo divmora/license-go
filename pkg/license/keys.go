@@ -166,8 +166,19 @@ func LoadPublicKeyFromPEMFile(filePath string) (ed25519.PublicKey, error) {
 	return ParsePublicKeyFromPEM(data)
 }
 
-// KeyFingerprint computes a concise SHA-256 fingerprint for an Ed25519 public key (e.g. "sha256:7f9a1b2c3d4e5f6a").
+// KeyFingerprint computes a 128-bit (16-byte) SHA-256 fingerprint for an Ed25519 public key (e.g. "sha256:7f9a1b2c3d4e5f6a8b9c0d1e2f3a4b5c").
+// Uses 16 bytes for strong collision resistance.
 func KeyFingerprint(pub ed25519.PublicKey) string {
+	if len(pub) != ed25519.PublicKeySize {
+		return ""
+	}
+	h := sha256.Sum256(pub)
+	return "sha256:" + hex.EncodeToString(h[:16])
+}
+
+// KeyFingerprintShort computes a legacy 64-bit (8-byte) SHA-256 fingerprint for an Ed25519 public key (e.g. "sha256:7f9a1b2c3d4e5f6a").
+// Retained for backward compatibility with existing 8-byte fingerprint lookups.
+func KeyFingerprintShort(pub ed25519.PublicKey) string {
 	if len(pub) != ed25519.PublicKeySize {
 		return ""
 	}

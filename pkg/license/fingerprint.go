@@ -80,9 +80,9 @@ func (f *MachineFingerprint) Matches(claimed string) bool {
 	}
 
 	// 1. Direct match against Primary, CanonicalDigest, or ShortDigest
-	if strings.EqualFold(claimed, f.Primary) ||
-		strings.EqualFold(claimed, f.CanonicalDigest) ||
-		strings.EqualFold(claimed, f.ShortDigest) {
+	if constantTimeFingerprintMatch(claimed, f.Primary) ||
+		constantTimeFingerprintMatch(claimed, f.CanonicalDigest) ||
+		constantTimeFingerprintMatch(claimed, f.ShortDigest) {
 		return true
 	}
 
@@ -94,7 +94,7 @@ func (f *MachineFingerprint) Matches(claimed string) bool {
 			break
 		}
 	}
-	if strings.EqualFold(clean, f.CanonicalDigest) || strings.EqualFold(clean, f.ShortDigest) {
+	if constantTimeFingerprintMatch(clean, f.CanonicalDigest) || constantTimeFingerprintMatch(clean, f.ShortDigest) {
 		return true
 	}
 
@@ -106,10 +106,10 @@ func (f *MachineFingerprint) Matches(claimed string) bool {
 		}
 		// Match against system_uuid, machine_id, cluster_uid, instance_id, function_name, function_arn, cluster_ca_hash
 		if k == "system_uuid" || k == "machine_id" || k == "cluster_uid" || k == "instance_id" || k == "function_name" || k == "function_arn" || k == "cluster_ca_hash" {
-			if strings.EqualFold(claimed, val) || strings.EqualFold(clean, val) {
+			if constantTimeFingerprintMatch(claimed, val) || constantTimeFingerprintMatch(clean, val) {
 				return true
 			}
-			if strings.HasPrefix(strings.ToLower(val), "ca:") && strings.EqualFold(clean, val[3:]) {
+			if strings.HasPrefix(strings.ToLower(val), "ca:") && constantTimeFingerprintMatch(clean, val[3:]) {
 				return true
 			}
 		}

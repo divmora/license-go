@@ -1,6 +1,7 @@
 package license
 
 import (
+	"crypto/subtle"
 	"fmt"
 	"path"
 	"strconv"
@@ -641,9 +642,18 @@ func (c *Claims) IsBoundToFingerprint() bool {
 	return c.Fingerprint != ""
 }
 
+// constantTimeFingerprintMatch performs a constant-time case-insensitive string comparison
+// between two fingerprints to prevent timing side-channel attacks.
+func constantTimeFingerprintMatch(a, b string) bool {
+	if len(a) == 0 || len(b) == 0 {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(strings.ToLower(a)), []byte(strings.ToLower(b))) == 1
+}
+
 // MatchesFingerprint checks if the license fingerprint matches the provided host fingerprint.
 // Floating licenses (Fingerprint == "") return true for any host.
-// Node-locked licenses return true only if hostFingerprint matches case-insensitively.
+// Node-locked licenses return true only if hostFingerprint matches case-insensitively using constant-time comparison.
 func (c *Claims) MatchesFingerprint(hostFingerprint string) bool {
 	if c.Fingerprint == "" {
 		return true
@@ -651,7 +661,7 @@ func (c *Claims) MatchesFingerprint(hostFingerprint string) bool {
 	if hostFingerprint == "" {
 		return false
 	}
-	return strings.EqualFold(c.Fingerprint, hostFingerprint)
+	return constantTimeFingerprintMatch(c.Fingerprint, hostFingerprint)
 }
 
 // IsEnvironmentAllowed reports whether the target deployment environment is authorized.
@@ -1297,9 +1307,8 @@ func matchVersionPattern(pattern, version string) bool {
 		return true
 	}
 
-	// Convert "x" or "X" to "*"
-	p = strings.ReplaceAll(p, "x", "*")
-	p = strings.ReplaceAll(p, "X", "*")
+	// Convert standalone segment "x" or "X" to "*"
+	p = replaceWildcardSegments(p)
 
 	if strings.Contains(p, "*") {
 		if matched, err := path.Match(p, normV); err == nil && matched {
@@ -1311,6 +1320,18 @@ func matchVersionPattern(pattern, version string) bool {
 	}
 
 	return false
+}
+
+// replaceWildcardSegments converts standalone 'x' or 'X' segments (e.g. "1.x", "1.X.0") to '*'
+// without altering non-wildcard occurrences of 'x' inside words (e.g. "1.0.fix").
+func replaceWildcardSegments(versionStr string) string {
+	segments := strings.Split(versionStr, ".")
+	for i, seg := range segments {
+		if seg == "x" || seg == "X" {
+			segments[i] = "*"
+		}
+	}
+	return strings.Join(segments, ".")
 }
 
 // checkMaxVersion asserts that version does not exceed maxVersion.
@@ -1340,9 +1361,8 @@ func checkMaxVersion(maxVersion, version string) bool {
 		return false
 	}
 
-	// Normalize wildcards: replace 'x' or 'X' with '*'
-	normalizedMax := strings.ReplaceAll(maxClean, "x", "*")
-	normalizedMax = strings.ReplaceAll(normalizedMax, "X", "*")
+	// Normalize wildcards: replace standalone 'x' or 'X' segments with '*'
+	normalizedMax := replaceWildcardSegments(maxClean)
 
 	// If maxVersion contains wildcard '*'
 	if strings.Contains(normalizedMax, "*") {

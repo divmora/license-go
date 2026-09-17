@@ -139,6 +139,12 @@ func (r *KeyRing) indexEntry(entry *KeyEntry) {
 	if entry.Fingerprint != "" {
 		r.byFingerprint[entry.Fingerprint] = entry
 	}
+	if len(entry.PublicKey) == ed25519.PublicKeySize {
+		shortFP := KeyFingerprintShort(entry.PublicKey)
+		if shortFP != "" {
+			r.byFingerprint[shortFP] = entry
+		}
+	}
 }
 
 func (r *KeyRing) findEntryLocked(idOrFingerprint string) (*KeyEntry, bool) {
