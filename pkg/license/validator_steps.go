@@ -206,7 +206,7 @@ func (v *Validator) verifyClaimsWithDetails(payloadJSON []byte, now time.Time) (
 	}
 
 	// 7. Scope constraints check
-	if err := v.checkScopeWithFP(&claims, resolvedFP); err != nil {
+	if err := v.checkScope(&claims, resolvedFP); err != nil {
 		return nil, resolvedFP, fingerprintMatched, err
 	}
 
@@ -230,11 +230,7 @@ func (v *Validator) verifyClaimsWithDetails(payloadJSON []byte, now time.Time) (
 	return &claims, resolvedFP, fingerprintMatched, nil
 }
 
-func (v *Validator) checkScope(claims *Claims) error {
-	return v.checkScopeWithFP(claims, nil)
-}
-
-func (v *Validator) checkScopeWithFP(claims *Claims, resolvedFP *MachineFingerprint) error {
+func (v *Validator) checkScope(claims *Claims, resolvedFP *MachineFingerprint) error {
 	// 0. Enforce required scope dimensions if configured
 	if len(v.requireScopeDimensions) > 0 {
 		for _, dim := range v.requireScopeDimensions {
