@@ -58,7 +58,7 @@ The following types and functions have been removed from `pkg/license`:
 
 All public verification, claims evaluation, and daemon management APIs remain unchanged:
 - **Validators**: `NewValidator`, `NewValidatorFromPEM`, `NewValidatorFromPEMFile`, `NewValidatorFromEnv`, `NewValidatorFromEmbeddedPEM`, `NewValidatorWithFallbackKey`.
-- **Validation Methods**: `Verify`, `VerifyArmored`, `VerifyFromFile`, `VerifyEnv`, `VerifyResolved`.
+- **Validation Methods**: `Verify` (supports both compact tokens and armored PEM blocks), `VerifyFromFile`, `VerifyEnv`, `VerifyResolved`.
 - **Manager**: `NewManager`, `ManagerConfig`, `Start`, `Stop`, `Claims`, `HasFeature`, `AssertFeature`, `CheckLimit`.
 - **KeyRing**: `NewKeyRing`, `KeyRingFromPEM`, `ResolveKeyRing`, `ResolvePublicKey`.
 - **Claims & Scoping**: `Claims`, `Customer`, `Scope`, `Status`, feature checks, quota checks, version bounds.

@@ -114,3 +114,120 @@ func TestIssuer_SignRelease(t *testing.T) {
 		t.Errorf("product mismatch: got %s", verified.Product)
 	}
 }
+
+func TestIssuer_SignReleaseCompact(t *testing.T) {
+	pub, priv, err := GenerateKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	releaseClaims := license.ReleaseClaims{
+		Product:     "otel-aws-log-processor",
+		Version:     "v2.0.0",
+		BuildDate:   time.Now().UTC(),
+		ReleaseDate: time.Now().UTC(),
+	}
+
+	token, err := SignRelease(releaseClaims, priv, WithSignerKeyID("rel-compact-1"))
+	if err != nil {
+		t.Fatalf("SignRelease failed: %v", err)
+	}
+
+	ring := license.NewKeyRing(pub)
+	verified, _, err := license.VerifyRelease(token, ring)
+	if err != nil {
+		t.Fatalf("VerifyRelease failed: %v", err)
+	}
+
+	if verified.Product != "otel-aws-log-processor" {
+		t.Errorf("product mismatch: got %s", verified.Product)
+	}
+}
+
+func TestIssuer_SignerMethodsAndErrors(t *testing.T) {
+	pub, priv, err := GenerateKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Invalid private key size
+	if _, err := NewSigner([]byte("too-short")); err == nil {
+		t.Error("expected error for short private key, got nil")
+	}
+
+	// PEM encoding round-trip via NewSignerFromPEM
+	pemBytes, err := EncodePrivateKeyToPEM(priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signerFromPEM, err := NewSignerFromPEM(pemBytes, WithSignerKeyID("pem-kid"))
+	if err != nil {
+		t.Fatalf("NewSignerFromPEM failed: %v", err)
+	}
+
+	// Test NewSignerFromPEMFile
+	tmpDir := t.TempDir()
+	pemFile := filepath.Join(tmpDir, "priv.pem")
+	if err := SavePrivateKeyToPEMFile(priv, pemFile, 0600); err != nil {
+		t.Fatal(err)
+	}
+	signerFromFile, err := NewSignerFromPEMFile(pemFile)
+	if err != nil {
+		t.Fatalf("NewSignerFromPEMFile failed: %v", err)
+	}
+
+	// Test WithKeyID
+	signerWithKID := signerFromFile.WithKeyID("custom-kid")
+
+	// Missing customer
+	_, err = signerFromPEM.Sign(license.Claims{Product: "my-prod"})
+	if err == nil {
+		t.Error("expected error for empty customer name, got nil")
+	}
+
+	// Missing product
+	_, err = signerFromPEM.Sign(license.Claims{Customer: license.Customer{Name: "Acme"}})
+	if err == nil {
+		t.Error("expected error for empty product name, got nil")
+	}
+
+	// Valid claims with SignArmored
+	claims := license.Claims{
+		Customer: license.Customer{Name: "Acme Corp"},
+		Product:  "gitlab-fleet-governor",
+	}
+	armoredToken, err := signerWithKID.SignArmored(claims)
+	if err != nil {
+		t.Fatalf("SignArmored failed: %v", err)
+	}
+
+	validator, err := license.NewValidator(pub, license.WithProduct("gitlab-fleet-governor"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	vRes, err := validator.Verify(armoredToken)
+	if err != nil {
+		t.Fatalf("Verify failed: %v", err)
+	}
+	if vRes.KeyID != "custom-kid" {
+		t.Errorf("expected KeyID custom-kid, got %s", vRes.KeyID)
+	}
+
+	// Test SignToFile
+	outFileArmored := filepath.Join(tmpDir, "license.armored")
+	if err := signerWithKID.SignToFile(claims, outFileArmored, true); err != nil {
+		t.Fatalf("SignToFile (armored) failed: %v", err)
+	}
+	outFileCompact := filepath.Join(tmpDir, "license.compact")
+	if err := signerWithKID.SignToFile(claims, outFileCompact, false); err != nil {
+		t.Fatalf("SignToFile (compact) failed: %v", err)
+	}
+
+	// Verify from files
+	if _, err := validator.VerifyFromFile(outFileArmored); err != nil {
+		t.Fatalf("VerifyFromFile (armored) failed: %v", err)
+	}
+	if _, err := validator.VerifyFromFile(outFileCompact); err != nil {
+		t.Fatalf("VerifyFromFile (compact) failed: %v", err)
+	}
+}

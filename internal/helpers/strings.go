@@ -244,7 +244,7 @@ func CheckMaxVersion(maxVersion, version string) bool {
 		}
 
 		// Fallback to pattern match
-		return MatchVersionPattern(maxVersion, version)
+		return MatchVersionPattern(normalizedMax, version)
 	}
 
 	cmp, ok := CompareSemVer(vClean, maxClean)
