@@ -167,7 +167,15 @@ type Claims struct {
 
 	// Metadata contains arbitrary key-value custom properties.
 	Metadata map[string]string `json:"metadata,omitempty"`
+
+	// tierFeatures is an optional runtime mapping of plan names to entitled features,
+	// used to dynamically evaluate features based on plan tier. Not serialized in JSON.
+	tierFeatures TierFeatures `json:"-"`
 }
+
+// TierFeatures defines a mapping of subscription plan/tier names (case-insensitive) to their entitled feature flags.
+// Feature lists support exact feature names, wildcards ("*" or "all"), and glob patterns (e.g. "audit.*").
+type TierFeatures map[string][]string
 
 // isValidEmail validates an email address string against standard email format requirements.
 func isValidEmail(email string) bool {
@@ -514,19 +522,77 @@ func (c *Claims) IsValidForProduct(expectedProduct string) bool {
 	return false
 }
 
+// WithTierFeatures returns the Claims instance configured with a tier feature matrix.
+func (c *Claims) WithTierFeatures(tiers TierFeatures) *Claims {
+	if c != nil {
+		c.tierFeatures = tiers
+	}
+	return c
+}
+
+// SetTierFeatures attaches a tier feature matrix to this Claims instance.
+func (c *Claims) SetTierFeatures(tiers TierFeatures) {
+	if c != nil {
+		c.tierFeatures = tiers
+	}
+}
+
+// TierFeatures returns the currently attached tier feature matrix, if any.
+func (c *Claims) TierFeatures() TierFeatures {
+	if c == nil {
+		return nil
+	}
+	return c.tierFeatures
+}
+
 // HasFeature returns true if the specified feature flag is enabled in the license.
+// If a TierFeatures matrix is attached to Claims, it evaluates the customer's Plan tier first.
+// It also evaluates explicit features in Claims.Features (including exact, glob, and "*" wildcards).
 // It supports:
 //   - Exact match (case-insensitive, e.g. "ha" matches "HA")
-//   - Wildcards: "*" or "all" (case-insensitive) in Claims.Features matches any feature
+//   - Wildcards: "*" or "all" (case-insensitive) in Claims.Features or tier definition
 //   - Glob pattern matching: e.g. "audit:*", "s3_*", or "report:*" (via path.Match)
 func (c *Claims) HasFeature(feature string) bool {
+	if c == nil {
+		return false
+	}
 	featureLower := strings.ToLower(feature)
-	for _, f := range c.Features {
-		fLower := strings.ToLower(f)
-		if fLower == "*" || fLower == "all" {
-			return true
+	if len(c.tierFeatures) > 0 {
+		return c.HasFeatureWithTiers(featureLower, c.tierFeatures)
+	}
+	return c.hasFeatureInList(featureLower, c.Features)
+}
+
+// HasFeatureWithTiers reports whether the specified feature is enabled, evaluating:
+//  1. The tier feature matrix for Claims.Plan (case-insensitive plan name match)
+//  2. Explicit features granted in Claims.Features (including exact, glob, and "*" wildcards)
+func (c *Claims) HasFeatureWithTiers(feature string, tierMap TierFeatures) bool {
+	if c == nil {
+		return false
+	}
+	featureLower := strings.ToLower(feature)
+
+	// 1. Check plan tier matrix
+	if len(tierMap) > 0 && c.Plan != "" {
+		for planName, features := range tierMap {
+			if strings.EqualFold(planName, c.Plan) {
+				if c.hasFeatureInList(featureLower, features) {
+					return true
+				}
+				break
+			}
 		}
-		if fLower == featureLower {
+	}
+
+	// 2. Check explicit license features (add-ons and custom overrides)
+	return c.hasFeatureInList(featureLower, c.Features)
+}
+
+func (c *Claims) hasFeatureInList(feature string, list []string) bool {
+	featureLower := strings.ToLower(feature)
+	for _, f := range list {
+		fLower := strings.ToLower(f)
+		if fLower == "*" || fLower == "all" || fLower == featureLower {
 			return true
 		}
 		if strings.ContainsAny(fLower, "*?[") {
@@ -536,6 +602,52 @@ func (c *Claims) HasFeature(feature string) bool {
 		}
 	}
 	return false
+}
+
+// EffectiveFeatures returns the consolidated list of all entitled features,
+// combining the tier features configured for Claims.Plan with any explicit Claims.Features.
+// Deduplicates features while preserving definition order.
+func (c *Claims) EffectiveFeatures() []string {
+	if c == nil {
+		return nil
+	}
+	return c.EffectiveFeaturesWithTiers(c.tierFeatures)
+}
+
+// EffectiveFeaturesWithTiers returns the consolidated list of all entitled features
+// evaluated against the provided tier feature matrix and explicit Claims.Features.
+func (c *Claims) EffectiveFeaturesWithTiers(tierMap TierFeatures) []string {
+	if c == nil {
+		return nil
+	}
+	var combined []string
+	seen := make(map[string]bool)
+
+	add := func(f string) {
+		fTrimmed := strings.TrimSpace(f)
+		fLower := strings.ToLower(fTrimmed)
+		if fTrimmed != "" && !seen[fLower] {
+			seen[fLower] = true
+			combined = append(combined, fTrimmed)
+		}
+	}
+
+	if len(tierMap) > 0 && c.Plan != "" {
+		for planName, features := range tierMap {
+			if strings.EqualFold(planName, c.Plan) {
+				for _, f := range features {
+					add(f)
+				}
+				break
+			}
+		}
+	}
+
+	for _, f := range c.Features {
+		add(f)
+	}
+
+	return combined
 }
 
 // splitPathSegments splits a slash-delimited path into non-empty segments.

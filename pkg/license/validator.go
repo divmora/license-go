@@ -48,6 +48,7 @@ type Validator struct {
 	requireStrictBuildDate    bool
 	currentUsage              map[string]int64
 	currentFeatures           []string
+	tierFeatures              TierFeatures
 	allowEnvKeyOverride       bool
 	initErr                   error
 }
@@ -221,6 +222,16 @@ func WithCurrentUsage(usage map[string]int64) ValidatorOption {
 func WithCurrentFeatures(features ...string) ValidatorOption {
 	return func(v *Validator) {
 		v.currentFeatures = append(v.currentFeatures, features...)
+	}
+}
+
+// WithTierFeatures configures a subscription tier-to-features mapping matrix.
+// Verified Claims returned by this validator will automatically inherit the tier matrix,
+// allowing claims.HasFeature(feature) to evaluate both the Plan tier entitlements
+// and any token-level feature add-ons.
+func WithTierFeatures(tiers TierFeatures) ValidatorOption {
+	return func(v *Validator) {
+		v.tierFeatures = tiers
 	}
 }
 

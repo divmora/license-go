@@ -85,6 +85,10 @@ type ManagerConfig struct {
 	// Defaults to false to prevent accidental license bypass in mission-critical environments.
 	AllowWarnOnlyInProduction bool
 
+	// TierFeatures defines an optional mapping of plan/tier names to entitled features.
+	// If omitted, it automatically inherits from Validator if WithTierFeatures was configured.
+	TierFeatures TierFeatures
+
 	// CheckInterval configures how often the license status and file are checked.
 	// Defaults to 1 hour if not specified.
 	CheckInterval time.Duration
@@ -154,6 +158,14 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 	// In PolicyDegraded or PolicyWarnOnly, populate default community claims if none provided
 	if (cfg.Policy == PolicyDegraded || cfg.Policy == PolicyWarnOnly) && cfg.FallbackClaims == nil {
 		cfg.FallbackClaims = DefaultCommunityClaims(cfg.Validator.ExpectedProduct())
+	}
+
+	// Inherit TierFeatures from Validator if not explicitly configured on ManagerConfig
+	if cfg.TierFeatures == nil && cfg.Validator != nil && len(cfg.Validator.tierFeatures) > 0 {
+		cfg.TierFeatures = cfg.Validator.tierFeatures
+	}
+	if len(cfg.TierFeatures) > 0 && cfg.FallbackClaims != nil {
+		cfg.FallbackClaims.tierFeatures = cfg.TierFeatures
 	}
 
 	// In PolicyDegraded, default DegradedReadOnly to true to protect against unauthorized mutations unless explicitly overridden
@@ -592,6 +604,9 @@ func (m *Manager) transitionToDegraded(reason error) {
 }
 
 func (m *Manager) transitionToRecovered(newClaims *Claims, oldClaims *Claims) {
+	if newClaims != nil && newClaims.tierFeatures == nil && len(m.cfg.TierFeatures) > 0 {
+		newClaims.tierFeatures = m.cfg.TierFeatures
+	}
 	m.mu.Lock()
 	wasDegraded := m.isDegraded
 	m.isDegraded = false
@@ -698,6 +713,9 @@ func (m *Manager) loadAndVerify(initial bool) error {
 	m.mu.Unlock()
 
 	if initial {
+		if newClaims != nil && newClaims.tierFeatures == nil && len(m.cfg.TierFeatures) > 0 {
+			newClaims.tierFeatures = m.cfg.TierFeatures
+		}
 		m.mu.Lock()
 		m.currentClaims = newClaims
 		m.isDegraded = false

@@ -243,6 +243,10 @@ func (v *Validator) verifyClaimsWithDetails(payloadJSON []byte, now time.Time) (
 		}
 	}
 
+	if len(v.tierFeatures) > 0 {
+		claims.tierFeatures = v.tierFeatures
+	}
+
 	return &claims, resolvedFP, fingerprintMatched, nil
 }
 
