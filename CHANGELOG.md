@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.1.0](https://github.com/divmora/license-go/compare/v1.0.0...v1.1.0) (2026-09-18)
+
+
+### Features
+
+* **claims:** add first-class tier-to-features matrix resolution ([881b799](https://github.com/divmora/license-go/commit/881b799e984ccf52b7220eed6b5c03818ea6d6f6))
+
+
+### Bug Fixes
+
+* **scope:** auto-resolve platform identity for non-fingerprinted licenses ([#53](https://github.com/divmora/license-go/issues/53)) ([b319c0f](https://github.com/divmora/license-go/commit/b319c0fc45faf9a385355d23bb508cd0ee088cd2))
+* **security:** AWS Lambda fingerprint spoofing and scope bypass via unauthenticated env vars ([#45](https://github.com/divmora/license-go/issues/45)) ([36cebb4](https://github.com/divmora/license-go/commit/36cebb4e3b944c1948fb9684dfdd53510237dd08))
+
 ## [1.0.0](https://github.com/divmora/license-go/compare/v0.7.0...v1.0.0) (2026-09-17)
 
 
