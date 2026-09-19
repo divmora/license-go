@@ -433,9 +433,11 @@ func TestManager_PolicyDegraded_BSLConversionRecovery(t *testing.T) {
 		ChangePeriodYears: 3,
 	}
 
+	now := time.Now()
 	validator, err := license.NewValidator(pub,
 		license.WithProduct("gitlab-fleet-governor"),
 		license.WithBSLPolicy(bslPolicy),
+		license.WithServerTimeAttestation(now, 1*time.Hour),
 	)
 	if err != nil {
 		t.Fatalf("NewValidator failed: %v", err)

@@ -322,7 +322,7 @@ func TestManager_BSLConversionClockDefense(t *testing.T) {
 	validator, err := NewValidator(pub,
 		WithProduct("gitlab-fleet-governor"),
 		WithBSLPolicy(bslPolicy),
-		WithAuthoritativeTime(authTime),
+		WithServerTimeAttestation(authTime, 1*time.Hour),
 		WithStrictClockDefense(false),
 	)
 	if err != nil {
@@ -360,7 +360,7 @@ func TestManager_BSLConversionClockDefense(t *testing.T) {
 	validatorConverted, _ := NewValidator(pub,
 		WithProduct("gitlab-fleet-governor"),
 		WithBSLPolicy(bslPolicy),
-		WithAuthoritativeTime(changeDate.Add(24*time.Hour)),
+		WithServerTimeAttestation(changeDate.Add(24*time.Hour), 1*time.Hour),
 	)
 	mgrConverted, err := NewManager(ManagerConfig{
 		Validator:     validatorConverted,
