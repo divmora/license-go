@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.0](https://github.com/divmora/license-go/compare/v1.1.0...v1.2.0) (2026-09-19)
+
+
+### Features
+
+* **crl:** add offline cryptographically signed revocation lists ([8106d04](https://github.com/divmora/license-go/commit/8106d04a197587618cbf6b5123250799906d8fb3))
+
 ## [1.1.0](https://github.com/divmora/license-go/compare/v1.0.0...v1.1.0) (2026-09-18)
 
 
