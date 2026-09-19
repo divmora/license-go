@@ -17,7 +17,8 @@ This document tracks upcoming capabilities, planned optimizations, and ecosystem
 - [ ] *(Additional multi-tenancy capabilities will be tracked here)*
 
 ### 🛡️ Validation & Diagnostic Reporting
-- [ ] *(Active security and validation hardening tasks are tracked directly in GitHub Issues)*
+- [ ] **Strict CRL Enforcement Policy**: Provide `WithRequireRevocationList(true)` and `license-cli verify -require-crl` for zero-trust / regulated deployments that mandate proof of non-revocation (`ErrCRLMissing` when absent).
+- [ ] **Validator Auto-Resolved CRL Option**: Provide `WithAutoResolvedRevocationList(require ...bool)` to automatically discover and attach CRLs from standard environment (`DIVMORA_CRL`, `DIVMORA_CRL_FILE`) and filesystem locations.
 
 ### 🖥️ Developer Experience & CLI Tooling
 - [ ] *(Additional CLI capabilities will be tracked here)*
