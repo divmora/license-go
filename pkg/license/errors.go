@@ -104,6 +104,12 @@ var (
 
 	// ErrCRLExpired is returned when a CRL has exceeded its NextUpdate validity cutoff.
 	ErrCRLExpired = errors.New("license: certificate revocation list has expired")
+
+	// ErrCRLMissing is returned when a Certificate Revocation List is required by policy but not provided or resolved.
+	ErrCRLMissing = errors.New("license: certificate revocation list required by policy but not found")
+
+	// ErrCRLSyncFailed is returned when remote Certificate Revocation List synchronization fails and no valid cache exists.
+	ErrCRLSyncFailed = errors.New("license: certificate revocation list sync failed")
 )
 
 // LimitExceededError provides structured detail when a quota is exceeded.
@@ -279,4 +285,26 @@ func (e *LicenseRevokedError) Error() string {
 
 func (e *LicenseRevokedError) Is(target error) bool {
 	return target == ErrLicenseRevoked
+}
+
+// CRLSyncError provides structured diagnostic context when remote Certificate Revocation List synchronization fails.
+type CRLSyncError struct {
+	URL        string
+	StatusCode int
+	Err        error
+}
+
+func (e *CRLSyncError) Error() string {
+	if e.StatusCode > 0 {
+		return fmt.Sprintf("license: crl sync failed for %s (HTTP %d): %v", e.URL, e.StatusCode, e.Err)
+	}
+	return fmt.Sprintf("license: crl sync failed for %s: %v", e.URL, e.Err)
+}
+
+func (e *CRLSyncError) Unwrap() error {
+	return e.Err
+}
+
+func (e *CRLSyncError) Is(target error) bool {
+	return target == ErrCRLSyncFailed
 }

@@ -499,11 +499,26 @@ license-cli crl check -crl ./crl.divcrl -id "lic-corp-1234"
 # 4. Verify CRL cryptographic signature against KeyRing:
 license-cli crl verify -crl ./crl.divcrl -public-key ./keys/public.pem
 
-# 5. Enforce CRL during license verification:
+# 5. Fetch, verify, and cache CRL from a remote distribution point:
+license-cli crl sync \
+  -url "https://crl.divmora.com/gitlab-fleet-governor.divcrl" \
+  -public-key ./keys/public.pem \
+  -cache-file /var/lib/divmora/crl.cache \
+  -out ./crl.divcrl \
+  -verbose
+
+# 6. Enforce local CRL during license verification:
 license-cli verify \
   -product "gitlab-fleet-governor" \
   -license ./acme.license.key \
   -crl ./crl.divcrl
+
+# 7. Dynamically fetch, verify, and enforce CRL with strict non-revocation requirement:
+license-cli verify \
+  -product "gitlab-fleet-governor" \
+  -license ./acme.license.key \
+  -crl-url "https://crl.divmora.com/gitlab-fleet-governor.divcrl" \
+  -require-crl
 ```
 
 ---

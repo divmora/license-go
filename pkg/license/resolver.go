@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 )
@@ -41,6 +42,18 @@ const (
 
 	// DefaultCRLPath is the standard Linux/container filesystem path for Divmora CRLs.
 	DefaultCRLPath = "/etc/divmora/crl.divcrl"
+
+	// EnvCRLURL is the environment variable containing the remote CRL distribution URL.
+	EnvCRLURL = "DIVMORA_CRL_URL"
+
+	// EnvCRLCacheFile is the environment variable containing the path to the local CRL cache file.
+	EnvCRLCacheFile = "DIVMORA_CRL_CACHE_FILE"
+
+	// DefaultCRLCachePath is the standard Linux/container filesystem path for cached CRLs.
+	DefaultCRLCachePath = "/etc/divmora/crl.cache"
+
+	// DefaultCRLBaseURL is the standard Divmora CDN endpoint for CRL distribution.
+	DefaultCRLBaseURL = "https://crl.divmora.com"
 )
 
 var (
@@ -595,4 +608,46 @@ func ResolveCRL(explicitSource ...string) (*ResolvedCRL, error) {
 	}
 
 	return nil, errors.New("license: crl not found")
+}
+
+// ResolveCRLURL retrieves the remote CRL URL following the 4-tier resolution hierarchy:
+//  1. Explicit URL parameter (if provided).
+//  2. DIVMORA_CRL_URL environment variable.
+//  3. Product-specific CDN endpoint (https://crl.divmora.com/{product}.divcrl) if product is non-empty.
+//  4. Global fallback CDN endpoint (https://crl.divmora.com/global.divcrl).
+func ResolveCRLURL(product string, explicitURL ...string) string {
+	for _, raw := range explicitURL {
+		if trimmed := strings.TrimSpace(raw); trimmed != "" {
+			return trimmed
+		}
+	}
+	if envVal := strings.TrimSpace(os.Getenv(EnvCRLURL)); envVal != "" {
+		return envVal
+	}
+	p := strings.TrimSpace(product)
+	if p != "" && p != "*" {
+		return fmt.Sprintf("%s/%s.divcrl", DefaultCRLBaseURL, p)
+	}
+	return fmt.Sprintf("%s/global.divcrl", DefaultCRLBaseURL)
+}
+
+// ResolveCRLCacheFile retrieves the local cache path following the resolution hierarchy:
+//  1. Explicit path parameter (if provided).
+//  2. DIVMORA_CRL_CACHE_FILE environment variable.
+//  3. Default system cache path (/etc/divmora/crl.cache) if the parent directory exists.
+//  4. Fallback to os.TempDir()/divmora-crl.cache if DefaultCRLCachePath parent directory is not present/accessible.
+func ResolveCRLCacheFile(explicitPath ...string) string {
+	for _, raw := range explicitPath {
+		if trimmed := strings.TrimSpace(raw); trimmed != "" {
+			return trimmed
+		}
+	}
+	if envVal := strings.TrimSpace(os.Getenv(EnvCRLCacheFile)); envVal != "" {
+		return envVal
+	}
+	dir := filepath.Dir(DefaultCRLCachePath)
+	if fi, err := os.Stat(dir); err == nil && fi.IsDir() {
+		return DefaultCRLCachePath
+	}
+	return filepath.Join(os.TempDir(), "divmora-crl.cache")
 }

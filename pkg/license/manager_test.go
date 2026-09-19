@@ -3,6 +3,8 @@ package license
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sync"
@@ -538,5 +540,106 @@ func TestManager_DegradedModeDefaultsAndDefense(t *testing.T) {
 	}
 	if err := mgrMutable.CanMutate(); err != nil {
 		t.Errorf("expected CanMutate to succeed when AllowDegradedMutations is true, got: %v", err)
+	}
+}
+
+func TestManager_DynamicCRLSync(t *testing.T) {
+	pub, priv, err := GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("GenerateKeyPair failed: %v", err)
+	}
+
+	validator, err := NewValidator(pub, WithProduct("gitlab-fleet-governor"))
+	if err != nil {
+		t.Fatalf("NewValidator failed: %v", err)
+	}
+
+	now := time.Now().UTC()
+	licID := "lic-manager-dyn-crl"
+	signer, _ := NewSigner(priv)
+	licToken, err := signer.Sign(Claims{
+		ID:       licID,
+		Customer: Customer{Name: "Fleet User"},
+		Product:  "gitlab-fleet-governor",
+		Plan:     "enterprise",
+		IssuedAt: now,
+	})
+	if err != nil {
+		t.Fatalf("signer.Sign failed: %v", err)
+	}
+
+	// 1. Initial CRL: empty (no revocations)
+	crlInitial := RevocationListClaims{
+		ID:       "crl-mgr-1",
+		IssuedAt: now,
+		Entries:  []RevocationEntry{},
+	}
+	crlTokenInitial, _ := SignCRL(crlInitial, priv)
+
+	var currentCRL atomic.Value
+	currentCRL.Store(crlTokenInitial)
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("ETag", `"mgr-etag"`)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(currentCRL.Load().(string)))
+	}))
+	defer ts.Close()
+
+	var crlUpdatedCalled atomic.Bool
+	cacheFile := filepath.Join(t.TempDir(), "mgr-crl.cache")
+
+	mgr, err := NewManager(ManagerConfig{
+		Validator:       validator,
+		LicenseString:   licToken,
+		CRLURL:          ts.URL,
+		CRLCacheFile:    cacheFile,
+		CRLSyncInterval: 50 * time.Millisecond,
+		Policy:          PolicyDegraded,
+		OnCRLUpdated: func(crl *RevocationListClaims) {
+			crlUpdatedCalled.Store(true)
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewManager failed: %v", err)
+	}
+
+	if mgr.IsDegraded() {
+		t.Errorf("manager should not be degraded initially")
+	}
+	if !mgr.IsActive() {
+		t.Errorf("manager should be active initially")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	mgr.Start(ctx)
+	defer mgr.Stop()
+
+	// 2. Issue updated CRL revoking the license
+	crlRevoked := RevocationListClaims{
+		ID:       "crl-mgr-2",
+		IssuedAt: now,
+		Entries: []RevocationEntry{
+			{ID: licID, RevokedAt: now, Reason: "payment default"},
+		},
+	}
+	crlTokenRevoked, _ := SignCRL(crlRevoked, priv)
+	currentCRL.Store(crlTokenRevoked)
+
+	// Trigger immediate sync
+	if _, err := mgr.SyncCRLNow(ctx); err != nil {
+		t.Fatalf("SyncCRLNow failed: %v", err)
+	}
+
+	// Assert manager detected revocation and transitioned to degraded
+	if !mgr.IsDegraded() {
+		t.Errorf("expected manager to transition to degraded mode upon CRL revocation")
+	}
+	if !errors.Is(mgr.DegradedReason(), ErrLicenseRevoked) {
+		t.Errorf("expected DegradedReason to wrap ErrLicenseRevoked, got: %v", mgr.DegradedReason())
+	}
+	if !crlUpdatedCalled.Load() {
+		t.Errorf("expected OnCRLUpdated callback to be invoked")
 	}
 }

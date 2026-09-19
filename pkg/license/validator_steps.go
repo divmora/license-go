@@ -144,7 +144,7 @@ func (v *Validator) verifyClaimsWithDetails(payloadJSON []byte, now time.Time) (
 	}
 
 	// 2b. Check against Certificate Revocation List (CRL) if configured
-	if _, err := v.EvaluateCRL(); err != nil {
+	if _, err := v.EvaluateCRL(&claims); err != nil {
 		return nil, nil, false, err
 	}
 	if v.crl != nil {

@@ -49,6 +49,10 @@ This document defines the **Divmora License Protocol (`DIV1`)**, an enterprise-g
     - [11.3 Revocation Entry Specification](#113-revocation-entry-specification)
     - [11.4 Verification & Temporal Validity](#114-verification--temporal-validity)
     - [11.5 Air-Gapped Resolution Hierarchy](#115-air-gapped-resolution-hierarchy)
+    - [11.6 Dynamic CRL Synchronization (`DIVCRL1` over HTTPS)](#116-dynamic-crl-synchronization-divcrl1-over-https)
+    - [11.7 HTTP Caching Semantics (`ETag` & `304 Not Modified`)](#117-http-caching-semantics-etag--304-not-modified)
+    - [11.8 4-Tier CRL Distribution Point (`CRLURL`) Resolution Hierarchy](#118-4-tier-crl-distribution-point-crlurl-resolution-hierarchy)
+    - [11.9 Local Atomic Disk Caching & Air-Gap Resilience](#119-local-atomic-disk-caching--air-gap-resilience)
 
 ---
 
@@ -224,6 +228,7 @@ All `DIV1` licenses unpack to a JSON object adhering to the following schema:
       "items": { "type": "string" }
     },
     "maintenance_expires_at": { "type": "string", "format": "date-time" },
+    "crl_url": { "type": "string", "format": "uri" },
     "metadata": {
       "type": "object",
       "additionalProperties": { "type": "string" }
@@ -270,6 +275,7 @@ All `DIV1` licenses unpack to a JSON object adhering to the following schema:
 | `max_version` | `string` | No | Maximum authorized SemVer bound (e.g. `1.*`, `<=2.5.0`) for perpetual licenses. |
 | `allowed_versions`| `[]string`| No | Explicit allowlist of SemVer version globs (e.g. `["1.*", "2.0.*"]`). |
 | `maintenance_expires_at`| `RFC3339`| No | Cutoff date for software upgrades. Releases built after this date return `ErrMaintenanceExpired`. |
+| `crl_url` | `string` | No | Remote HTTPS CRL distribution point (`DIVCRL1`) for revocation checks. |
 | `metadata` | `map[string]string`| No | Arbitrary custom metadata key-value pairs. |
 
 ### 4.3 Infrastructure Scoping (`Scope`)
@@ -591,3 +597,39 @@ Consuming applications resolve CRL data using standard resolution precedence:
 | **2** | `DIVMORA_CRL` | Environment variable containing raw compact token or armored PEM text. |
 | **3** | `DIVMORA_CRL_FILE` | Environment variable containing filesystem path to `.divcrl` file. |
 | **4** | `/etc/divmora/crl.divcrl` | Standard Linux / container filesystem location if file exists on disk. |
+
+### 11.6 Dynamic CRL Synchronization (`DIVCRL1` over HTTPS)
+
+For connected deployments and multi-tenant cloud microservices, `license-go` provides unidirectional, privacy-preserving dynamic CRL fetching from public or corporate distribution points:
+
+- **Protocol**: Standard HTTPS `GET` requests.
+- **Privacy Guarantee**: 100% private. The client sends **zero** customer identifiers, telemetry, or license payloads to the server.
+- **Zero-Trust Verification**: Downloaded CRLs are never trusted implicitly. Every payload must be verified against the trusted Ed25519 `KeyRing` via `VerifyCRL`.
+
+### 11.7 HTTP Caching Semantics (`ETag` & `304 Not Modified`)
+
+To minimize network bandwidth and unnecessary cryptographic re-computations:
+
+- **Entity Tags (`ETag`)**: On initial fetch, the HTTP `ETag` is saved. Subsequent sync requests transmit `If-None-Match: <etag>`.
+- **Modification Timestamps**: The `Last-Modified` header is tracked and sent via `If-Modified-Since`.
+- **HTTP 304 Response**: When the server responds with `304 Not Modified`, the syncer immediately returns existing in-memory claims without payload transfer or cryptographic verification.
+
+### 11.8 4-Tier CRL Distribution Point (`CRLURL`) Resolution Hierarchy
+
+The authoritative CRL distribution URL is resolved using a 4-tier precedence model:
+
+| Tier | Priority | Source | Use Case |
+| :--- | :--- | :--- | :--- |
+| **1** | **Highest** | `DIVMORA_CRL_URL` or `-crl-url` CLI flag | Infrastructure operator overrides for air-gapped corporate mirrors, internal Nexus/Artifactory repositories, or VPC proxies. |
+| **2** | **Secondary** | `WithCRLURL(...)` / `ManagerConfig.CRLURL` | Downstream service code (e.g. `gitlab-fleet-governor` or `otel-aws-log-processor`). |
+| **3** | **Tertiary** | `claims.CRLURL` or `claims.Metadata["crl_url"]` | Cryptographically signed distribution point embedded inside the license token by vendor. |
+| **4** | **Default** | `https://crl.divmora.com/{product}.divcrl` | Zero-configuration canonical CDN endpoint for all Divmora products. |
+
+### 11.9 Local Atomic Disk Caching & Air-Gap Resilience
+
+To ensure that distributed services survive transient network dropouts or upstream CDN maintenance:
+
+- **Atomic Writes**: Downloaded CRLs are written to a temporary file (`.crl-tmp-*`) within the target directory, chmodded to `0644`, and atomically renamed (`os.Rename`) to prevent partial or corrupt cache reads.
+- **Symlink Defense**: Syncer checks `os.Lstat` and rejects symlinked cache targets (`ErrSymlinkNotAllowed`) to protect against path traversal attacks.
+- **Automatic Fallback**: If the network connection fails (DNS resolution failure, timeout, 5xx), the syncer automatically falls back to reading and verifying the local disk cache without interrupting service operations.
+

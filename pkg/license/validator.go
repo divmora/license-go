@@ -1,9 +1,11 @@
 package license
 
 import (
+	"context"
 	"crypto/ed25519"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -56,6 +58,10 @@ type Validator struct {
 	crlStrictExpiry           bool
 	crlVerifiedKeyID          string
 	crlVerifiedKeyStatus      KeyStatus
+	requireRevocationList     bool
+	autoResolveCRL            bool
+	crlSyncer                 *CRLSyncer
+	crlSyncerCfg              *CRLSyncConfig
 	initErr                   error
 }
 
@@ -462,27 +468,203 @@ func WithCRLStrictExpiry(strict bool) ValidatorOption {
 	}
 }
 
-// EvaluateCRL verifies the cryptographic signature of the attached CRL against the KeyRing and returns the claims.
-func (v *Validator) EvaluateCRL() (*RevocationListClaims, error) {
+// WithRequireRevocationList enforces that valid non-revocation proof (CRL) must be provided, resolved, or synced.
+// If no CRL is configured or resolvable, validation fails with ErrCRLMissing.
+func WithRequireRevocationList(require bool) ValidatorOption {
+	return func(v *Validator) {
+		v.requireRevocationList = require
+	}
+}
+
+// WithAutoResolvedRevocationList automatically discovers and attaches CRLs from standard environment
+// (DIVMORA_CRL, DIVMORA_CRL_FILE) and system filesystem locations (/etc/divmora/crl.divcrl).
+// If require is true (or passed as true), validation fails with ErrCRLMissing if no CRL can be resolved.
+func WithAutoResolvedRevocationList(require ...bool) ValidatorOption {
+	return func(v *Validator) {
+		v.autoResolveCRL = true
+		if len(require) > 0 && require[0] {
+			v.requireRevocationList = true
+		}
+	}
+}
+
+// CRLSyncOption configures optional parameters when attaching a remote CRL distribution point.
+type CRLSyncOption func(*CRLSyncConfig)
+
+// WithCRLSyncCacheFile sets the local disk cache path for remote CRL synchronization.
+func WithCRLSyncCacheFile(path string) CRLSyncOption {
+	return func(cfg *CRLSyncConfig) {
+		cfg.CacheFile = path
+	}
+}
+
+// WithCRLSyncTimeout sets the HTTP timeout for remote CRL synchronization.
+func WithCRLSyncTimeout(d time.Duration) CRLSyncOption {
+	return func(cfg *CRLSyncConfig) {
+		cfg.Timeout = d
+	}
+}
+
+// WithCRLSyncHTTPClient injects a custom HTTP client for remote CRL synchronization.
+func WithCRLSyncHTTPClient(client *http.Client) CRLSyncOption {
+	return func(cfg *CRLSyncConfig) {
+		cfg.HTTPClient = client
+	}
+}
+
+// WithCRLSyncStrictExpiry enforces that an expired remote or cached CRL fails with ErrCRLExpired.
+func WithCRLSyncStrictExpiry(strict bool) CRLSyncOption {
+	return func(cfg *CRLSyncConfig) {
+		cfg.StrictExpiry = strict
+	}
+}
+
+// WithCRLURL configures dynamic Certificate Revocation List synchronization from a remote HTTPS endpoint.
+func WithCRLURL(url string, opts ...CRLSyncOption) ValidatorOption {
+	return func(v *Validator) {
+		cfg := CRLSyncConfig{
+			URL:             url,
+			ExpectedProduct: v.expectedProduct,
+		}
+		for _, opt := range opts {
+			opt(&cfg)
+		}
+		v.crlSyncerCfg = &cfg
+	}
+}
+
+// WithCRLSyncer attaches a pre-configured CRLSyncer directly to the validator.
+func WithCRLSyncer(syncer *CRLSyncer) ValidatorOption {
+	return func(v *Validator) {
+		v.crlSyncer = syncer
+	}
+}
+
+// EvaluateCRL verifies the cryptographic signature of the attached or synced CRL against the KeyRing and returns the claims.
+// If claimsHint is provided (from the parsed license token), any embedded claims.CRLURL is used in URL resolution
+// following the 4-tier hierarchy.
+func (v *Validator) EvaluateCRL(claimsHint ...*Claims) (*RevocationListClaims, error) {
 	if v.initErr != nil {
 		return nil, v.initErr
 	}
 	if v.crl != nil {
 		return v.crl, nil
 	}
-	if strings.TrimSpace(v.crlRaw) == "" {
-		return nil, nil
+
+	var targetClaims *Claims
+	if len(claimsHint) > 0 && claimsHint[0] != nil {
+		targetClaims = claimsHint[0]
 	}
-	claims, matchedKey, err := VerifyCRL(v.crlRaw, v.keyRing)
-	if err != nil {
-		return nil, err
+
+	var claimsCRLURL string
+	if targetClaims != nil {
+		claimsCRLURL = targetClaims.GetCRLURL()
 	}
-	v.crl = claims
-	if matchedKey != nil {
-		v.crlVerifiedKeyID = matchedKey.ID
-		v.crlVerifiedKeyStatus = matchedKey.Status
+
+	// 1. If CRL syncer config was provided, lazily initialize syncer
+	if v.crlSyncer == nil && v.crlSyncerCfg != nil {
+		cfg := *v.crlSyncerCfg
+		if cfg.KeyRing == nil {
+			cfg.KeyRing = v.keyRing
+		}
+		if cfg.ExpectedProduct == "" {
+			cfg.ExpectedProduct = v.expectedProduct
+		}
+		if cfg.CacheFile == "" {
+			cfg.CacheFile = ResolveCRLCacheFile()
+		}
+		if cfg.URL == "" {
+			cfg.URL = ResolveCRLURL(cfg.ExpectedProduct, claimsCRLURL)
+		}
+		syncer, err := NewCRLSyncer(cfg)
+		if err != nil {
+			return nil, err
+		}
+		v.crlSyncer = syncer
 	}
-	return v.crl, nil
+
+	// 1b. If auto-resolve is enabled and no explicit syncer or raw CRL is present,
+	// check if local CRL file exists first; if not, check if remote URL can be synced.
+	if v.crlSyncer == nil && strings.TrimSpace(v.crlRaw) == "" && v.autoResolveCRL {
+		if res, err := ResolveCRL(); err == nil && res != nil {
+			v.crlRaw = res.Content
+		} else if claimsCRLURL != "" || strings.TrimSpace(os.Getenv(EnvCRLURL)) != "" || v.requireRevocationList {
+			// Resolve remote CRL URL when token has crl_url, env has DIVMORA_CRL_URL, or CRL is required
+			remoteURL := ResolveCRLURL(v.expectedProduct, claimsCRLURL)
+			if remoteURL != "" {
+				cfg := CRLSyncConfig{
+					URL:             remoteURL,
+					CacheFile:       ResolveCRLCacheFile(),
+					KeyRing:         v.keyRing,
+					ExpectedProduct: v.expectedProduct,
+					StrictExpiry:    v.crlStrictExpiry,
+				}
+				if syncer, err := NewCRLSyncer(cfg); err == nil {
+					v.crlSyncer = syncer
+				}
+			}
+		}
+	}
+
+	// 2. If CRL syncer is present, synchronize or load from cache
+	if v.crlSyncer != nil {
+		res, err := v.crlSyncer.Sync(context.Background())
+		if err != nil {
+			if v.requireRevocationList {
+				if v.crlSyncer.Claims() == nil {
+					return nil, fmt.Errorf("%w: %v", ErrCRLMissing, err)
+				}
+				return nil, err
+			}
+			// If explicit CRLURL was passed, propagate sync error
+			if v.crlSyncerCfg != nil {
+				return nil, err
+			}
+			// For optional auto-resolved CRL, continue without CRL if network is unreachable
+		} else if res != nil && res.Claims != nil {
+			v.crl = res.Claims
+			v.crlRaw = v.crlSyncer.Raw()
+			return v.crl, nil
+		}
+	}
+
+	// 3. If auto-resolve is enabled and no explicit raw CRL was provided
+	if strings.TrimSpace(v.crlRaw) == "" && v.autoResolveCRL {
+		if res, err := ResolveCRL(); err == nil && res != nil {
+			v.crlRaw = res.Content
+		}
+	}
+
+	// 4. If raw CRL token or PEM is present, verify against KeyRing
+	if strings.TrimSpace(v.crlRaw) != "" {
+		claims, matchedKey, err := VerifyCRL(v.crlRaw, v.keyRing)
+		if err != nil {
+			return nil, err
+		}
+		v.crl = claims
+		if matchedKey != nil {
+			v.crlVerifiedKeyID = matchedKey.ID
+			v.crlVerifiedKeyStatus = matchedKey.Status
+		}
+		return v.crl, nil
+	}
+
+	// 5. If revocation list is strictly required by policy but not found
+	if v.requireRevocationList {
+		return nil, ErrCRLMissing
+	}
+
+	return nil, nil
+}
+
+// RequireRevocationList reports whether revocation list evaluation is required by policy.
+func (v *Validator) RequireRevocationList() bool {
+	return v.requireRevocationList
+}
+
+// CRLSyncer returns the CRLSyncer attached to the validator, or nil if none is configured.
+func (v *Validator) CRLSyncer() *CRLSyncer {
+	return v.crlSyncer
 }
 
 // PublicKey returns the primary public key in the validator's KeyRing, or nil if none is configured.

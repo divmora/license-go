@@ -165,6 +165,10 @@ type Claims struct {
 	// Binaries built after this date require a maintenance renewal.
 	MaintenanceExpiresAt time.Time `json:"maintenance_expires_at,omitempty"`
 
+	// CRLURL specifies an optional remote HTTPS distribution point where revocation lists (DIVCRL1)
+	// for this product/license are published.
+	CRLURL string `json:"crl_url,omitempty"`
+
 	// Metadata contains arbitrary key-value custom properties.
 	Metadata map[string]string `json:"metadata,omitempty"`
 
@@ -218,6 +222,23 @@ func ValidateClaimsPayloadJSON(data []byte) error {
 // IsPerpetual reports whether the license has no expiration date.
 func (c *Claims) IsPerpetual() bool {
 	return c.ExpiresAt.IsZero()
+}
+
+// GetCRLURL returns the remote CRL distribution point HTTPS URL from Claims.CRLURL,
+// or falls back to Metadata["crl_url"] if defined. Returns empty string if none is configured.
+func (c *Claims) GetCRLURL() string {
+	if c == nil {
+		return ""
+	}
+	if trimmed := strings.TrimSpace(c.CRLURL); trimmed != "" {
+		return trimmed
+	}
+	if c.Metadata != nil {
+		if trimmed := strings.TrimSpace(c.Metadata["crl_url"]); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
 }
 
 // EffectiveExpiration returns the absolute cutoff timestamp after which the license

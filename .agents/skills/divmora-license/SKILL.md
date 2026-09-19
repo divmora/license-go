@@ -603,15 +603,43 @@ license-cli crl check -crl ./crl.divcrl -id "lic-uuid-1"
 
 # 5. Verify a customer license with local CRL enforcement:
 license-cli verify -public-key /path/to/public.pem -license ./license.key -crl ./crl.divcrl
+
+# 6. Fetch, verify, and cache CRL from a remote distribution point:
+license-cli crl sync \
+  -url "https://crl.divmora.com/gitlab-fleet-governor.divcrl" \
+  -public-key /path/to/public.pem \
+  -cache-file /var/lib/divmora/crl.cache \
+  -out ./crl.divcrl \
+  -verbose
+
+# 7. Dynamically verify license with remote CRL and require non-revocation proof:
+license-cli verify \
+  -public-key /path/to/public.pem \
+  -product "<product-name>" \
+  -crl-url "https://crl.divmora.com/<product-name>.divcrl" \
+  -require-crl
 ```
 
 In Go services or background daemons:
 
 ```go
+// 1. Static or auto-resolved CRL:
 validator, err := license.NewValidatorWithFallbackKey(
 	defaultPublicKeyBase64,
 	license.WithProduct("gitlab-fleet-governor"),
-	license.WithRevocationListFile("/etc/divmora/crl.divcrl"),
+	license.WithAutoResolvedRevocationList(true), // Resolves DIVMORA_CRL / DIVMORA_CRL_FILE / /etc/divmora/crl.divcrl
+)
+
+// 2. Dynamic CRL synchronization with local disk cache fallback:
+validator, err := license.NewValidatorWithFallbackKey(
+	defaultPublicKeyBase64,
+	license.WithProduct("gitlab-fleet-governor"),
+	license.WithCRLURL(
+		"https://crl.divmora.com/gitlab-fleet-governor.divcrl",
+		license.WithCRLSyncCacheFile("/var/lib/divmora/crl.cache"),
+		license.WithCRLSyncStrictExpiry(true),
+	),
+	license.WithRequireRevocationList(true), // Fails with ErrCRLMissing if absent
 )
 if err != nil {
 	log.Fatal(err)
@@ -624,6 +652,18 @@ if errors.Is(err, license.ErrLicenseRevoked) {
 		log.Fatalf("License %s has been revoked on %s: %s", revErr.LicenseID, revErr.RevokedAt, revErr.Reason)
 	}
 }
+
+// 3. Background Daemon Manager with dynamic CRL polling:
+mgr, err := license.NewManager(license.ManagerConfig{
+	Validator:       validator,
+	CRLURL:          "https://crl.divmora.com/gitlab-fleet-governor.divcrl",
+	CRLCacheFile:    "/var/lib/divmora/crl.cache",
+	CRLSyncInterval: 6 * time.Hour,
+	RequireCRL:      true,
+	OnCRLUpdated: func(crl *license.RevocationListClaims) {
+		log.Printf("[LICENSE] Synced fresh CRL %s (%d revoked licenses)", crl.ID, crl.Count())
+	},
+})
 ```
 
 ---
@@ -637,6 +677,8 @@ if errors.Is(err, license.ErrLicenseRevoked) {
 | `ErrLicenseRevoked` | License ID is listed in the Certificate Revocation List (CRL) | The customer's license was compromised, refunded, or terminated. Re-issue a replacement license. |
 | `ErrInvalidCRL` | CRL token format, signature, or payload schema is invalid | Ensure the CRL was signed by an authorized key in the KeyRing. |
 | `ErrCRLExpired` | CRL has passed its `NextUpdate` validity cutoff date under strict policy | Download and distribute an updated CRL snapshot. |
+| `ErrCRLMissing` | CRL is required by policy (`WithRequireRevocationList`) but not found or resolvable | Attach a signed CRL file, configure `WithCRLURL`, or provide `DIVMORA_CRL`. |
+| `ErrCRLSyncFailed` | Remote CRL synchronization failed and no valid local cache exists | Check network connectivity, endpoint availability, or ensure a valid local cache file exists. |
 | `ErrProductMismatch` | License was issued for a different Divmora product | Check that `-product` in the license matches the service product name. |
 | `ErrExpired` | Current time is past `ExpiresAt` + clock skew tolerance | Re-issue a renewed license. |
 | `ErrNotYetValid` | `NotBefore` is in the future | Check server system time / NTP sync. |

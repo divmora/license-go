@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -344,5 +345,105 @@ func runCheckCRL(args []string) error {
 
 	fmt.Printf("✓ ACTIVE: License %q is NOT revoked in CRL %s (%d total entries)\n",
 		*licenseID, claims.ID, claims.Count())
+	return nil
+}
+
+func runSyncCRL(args []string) error {
+	fs := flag.NewFlagSet("crl sync", flag.ExitOnError)
+	urlFlag := fs.String("url", "", "Remote CRL distribution URL (optional; falls back to DIVMORA_CRL_URL or default CDN endpoint)")
+	product := fs.String("product", "", "Expected product name to scope the CRL and resolve default URL")
+	pubKeyPath := fs.String("public-key", "", "Path to Ed25519 public key file or base64 key string (optional; auto-resolves via environment)")
+	outFile := fs.String("out", "", "Output path to write downloaded CRL token (prints to stdout if omitted)")
+	cacheFile := fs.String("cache-file", "", "Local cache file path for offline/air-gap fallback (optional)")
+	timeoutFlag := fs.Duration("timeout", 10*time.Second, "HTTP timeout duration (e.g. 10s)")
+	strictExpiry := fs.Bool("strict-expiry", false, "Reject CRL if past NextUpdate")
+	verbose := fs.Bool("verbose", false, "Print detailed synchronization diagnostics")
+
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	var ring *license.KeyRing
+	if *pubKeyPath != "" {
+		r, err := license.ParseKeyRingFromString(*pubKeyPath)
+		if err != nil {
+			return fmt.Errorf("failed to load public key from %s: %w", *pubKeyPath, err)
+		}
+		ring = r
+	} else {
+		resolvedKey, err := license.ResolveKeyRingWithSource()
+		if err != nil {
+			return fmt.Errorf("public verification key required: %w (pass -public-key or set %s / %s)", err, license.EnvPublicKey, license.EnvPublicKeysPEM)
+		}
+		ring = resolvedKey.KeyRing
+	}
+
+	resolvedURL := license.ResolveCRLURL(*product, *urlFlag)
+	resolvedCache := *cacheFile
+	if resolvedCache == "" {
+		resolvedCache = license.ResolveCRLCacheFile()
+	}
+
+	syncer, err := license.NewCRLSyncer(license.CRLSyncConfig{
+		URL:             resolvedURL,
+		KeyRing:         ring,
+		CacheFile:       resolvedCache,
+		Timeout:         *timeoutFlag,
+		StrictExpiry:    *strictExpiry,
+		ExpectedProduct: *product,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to initialize crl syncer: %w", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), *timeoutFlag+5*time.Second)
+	defer cancel()
+
+	result, err := syncer.Sync(ctx)
+	if err != nil {
+		return fmt.Errorf("crl synchronization failed: %w", err)
+	}
+
+	if *outFile != "" {
+		if err := os.WriteFile(*outFile, []byte(syncer.Raw()), 0644); err != nil {
+			return fmt.Errorf("failed to write output crl to %s: %w", *outFile, err)
+		}
+	}
+
+	claims := result.Claims
+	fmt.Printf("✓ CRL synchronized successfully (%s)\n", result.Source)
+	fmt.Printf("  CRL ID:          %s\n", claims.ID)
+	if claims.Issuer != "" {
+		fmt.Printf("  Issuer:          %s\n", claims.Issuer)
+	}
+	if claims.Product != "" {
+		fmt.Printf("  Product Scope:   %s\n", claims.Product)
+	}
+	if !claims.NextUpdate.IsZero() {
+		fmt.Printf("  Next Update:     %s\n", claims.NextUpdate.UTC().Format(time.RFC3339))
+	}
+	fmt.Printf("  Revoked Entries: %d\n", claims.Count())
+	if resolvedCache != "" {
+		fmt.Printf("  Local Cache:     %s\n", resolvedCache)
+	}
+
+	if *verbose {
+		fmt.Println()
+		if result.ETag != "" {
+			fmt.Printf("  HTTP ETag:       %s\n", result.ETag)
+		}
+		if result.LastModified != "" {
+			fmt.Printf("  Last-Modified:   %s\n", result.LastModified)
+		}
+		if result.NetworkError != nil {
+			fmt.Printf("  Network Warning: %v (used cache fallback)\n", result.NetworkError)
+		}
+	}
+
+	if *outFile == "" && !*verbose {
+		fmt.Println()
+		fmt.Println(syncer.Raw())
+	}
+
 	return nil
 }

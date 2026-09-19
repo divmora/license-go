@@ -4,6 +4,8 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -393,5 +395,268 @@ func TestCRL_FormatInspect(t *testing.T) {
 	}
 	if !strings.Contains(inspectOutput, "crl-inspect-view") || !strings.Contains(inspectOutput, "stolen key") {
 		t.Fatalf("expected CRL ID and reason in inspect output, got:\n%s", inspectOutput)
+	}
+}
+
+func TestValidator_RequireRevocationList(t *testing.T) {
+	pub, priv := generateCRLTestKeyPair(t)
+	ring := NewKeyRing(pub)
+
+	now := time.Now().UTC()
+	licClaims := Claims{
+		ID:       "lic-require-crl-1",
+		Customer: Customer{Name: "Acme Corp"},
+		Product:  "app",
+		Plan:     "enterprise",
+		IssuedAt: now,
+	}
+	signer, _ := NewSigner(priv)
+	licToken, err := signer.Sign(licClaims)
+	if err != nil {
+		t.Fatalf("signer.Sign failed: %v", err)
+	}
+
+	// 1. WithRequireRevocationList(true) when NO CRL is configured -> fails with ErrCRLMissing
+	vMissing, err := NewValidatorWithKeyRing(
+		ring,
+		WithProduct("app"),
+		WithRequireRevocationList(true),
+	)
+	if err != nil {
+		t.Fatalf("NewValidatorWithKeyRing failed: %v", err)
+	}
+	if _, err := vMissing.Verify(licToken); !errors.Is(err, ErrCRLMissing) {
+		t.Fatalf("expected ErrCRLMissing, got: %v", err)
+	}
+
+	// 2. With CRL provided -> succeeds
+	crlClaims := RevocationListClaims{
+		ID:       "crl-valid-1",
+		IssuedAt: now,
+		Entries:  []RevocationEntry{},
+	}
+	crlToken, _ := SignCRL(crlClaims, priv)
+
+	vPresent, err := NewValidatorWithKeyRing(
+		ring,
+		WithProduct("app"),
+		WithRevocationList(crlToken),
+		WithRequireRevocationList(true),
+	)
+	if err != nil {
+		t.Fatalf("NewValidatorWithKeyRing failed: %v", err)
+	}
+	if _, err := vPresent.Verify(licToken); err != nil {
+		t.Fatalf("expected verification success when required CRL is present, got: %v", err)
+	}
+}
+
+func TestValidator_AutoResolveRevocationList(t *testing.T) {
+	pub, priv := generateCRLTestKeyPair(t)
+	ring := NewKeyRing(pub)
+
+	now := time.Now().UTC()
+	revokedID := "lic-auto-resolve-revoked"
+	crlClaims := RevocationListClaims{
+		ID:       "crl-auto-resolved",
+		IssuedAt: now,
+		Entries: []RevocationEntry{
+			{ID: revokedID, RevokedAt: now, Reason: "compromised"},
+		},
+	}
+	crlToken, _ := SignCRL(crlClaims, priv)
+
+	// Set environment variable DIVMORA_CRL
+	t.Setenv(EnvCRL, crlToken)
+
+	signer, _ := NewSigner(priv)
+	licToken, err := signer.Sign(Claims{
+		ID:       revokedID,
+		Customer: Customer{Name: "Acme Corp"},
+		Product:  "app",
+		Plan:     "enterprise",
+		IssuedAt: now,
+	})
+	if err != nil {
+		t.Fatalf("signer.Sign failed: %v", err)
+	}
+
+	vAuto, err := NewValidatorWithKeyRing(
+		ring,
+		WithProduct("app"),
+		WithAutoResolvedRevocationList(true),
+	)
+	if err != nil {
+		t.Fatalf("NewValidatorWithKeyRing failed: %v", err)
+	}
+
+	_, err = vAuto.Verify(licToken)
+	if !errors.Is(err, ErrLicenseRevoked) {
+		t.Fatalf("expected ErrLicenseRevoked via auto-resolved CRL, got: %v", err)
+	}
+}
+
+func TestValidator_WithCRLURL(t *testing.T) {
+	pub, priv := generateCRLTestKeyPair(t)
+	ring := NewKeyRing(pub)
+
+	now := time.Now().UTC()
+	revokedID := "lic-dynamic-crl-revoked"
+	validID := "lic-dynamic-crl-valid"
+
+	crlClaims := RevocationListClaims{
+		ID:       "crl-endpoint-test",
+		IssuedAt: now,
+		Entries: []RevocationEntry{
+			{ID: revokedID, RevokedAt: now, Reason: "fraudulent chargeback"},
+		},
+	}
+	crlToken, _ := SignCRL(crlClaims, priv)
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("ETag", `"crl-endpoint-etag"`)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(crlToken))
+	}))
+	defer ts.Close()
+
+	cacheFile := filepath.Join(t.TempDir(), "dynamic-crl.cache")
+
+	v, err := NewValidatorWithKeyRing(
+		ring,
+		WithProduct("app"),
+		WithCRLURL(ts.URL, WithCRLSyncCacheFile(cacheFile)),
+		WithRequireRevocationList(true),
+	)
+	if err != nil {
+		t.Fatalf("NewValidatorWithKeyRing failed: %v", err)
+	}
+
+	signer, _ := NewSigner(priv)
+
+	// 1. Verify revoked license is rejected
+	revokedToken, err := signer.Sign(Claims{
+		ID:       revokedID,
+		Customer: Customer{Name: "Acme Corp"},
+		Product:  "app",
+		Plan:     "enterprise",
+		IssuedAt: now,
+	})
+	if err != nil {
+		t.Fatalf("signer.Sign failed: %v", err)
+	}
+	if _, err := v.Verify(revokedToken); !errors.Is(err, ErrLicenseRevoked) {
+		t.Fatalf("expected ErrLicenseRevoked for revoked token, got: %v", err)
+	}
+
+	// 2. Verify valid license passes
+	validToken, err := signer.Sign(Claims{
+		ID:       validID,
+		Customer: Customer{Name: "Acme Corp"},
+		Product:  "app",
+		Plan:     "enterprise",
+		IssuedAt: now,
+	})
+	if err != nil {
+		t.Fatalf("signer.Sign failed: %v", err)
+	}
+	if _, err := v.Verify(validToken); err != nil {
+		t.Fatalf("expected valid token to pass, got: %v", err)
+	}
+}
+
+func TestValidator_ClaimsEmbeddedCRLURL(t *testing.T) {
+	pub, priv := generateCRLTestKeyPair(t)
+	ring := NewKeyRing(pub)
+
+	now := time.Now().UTC()
+	revokedID := "lic-claims-crl-revoked"
+	validID := "lic-claims-crl-valid"
+
+	crlClaims := RevocationListClaims{
+		ID:       "crl-claims-test",
+		IssuedAt: now,
+		Entries: []RevocationEntry{
+			{ID: revokedID, RevokedAt: now, Reason: "license terms breached"},
+		},
+	}
+	crlToken, err := SignCRL(crlClaims, priv)
+	if err != nil {
+		t.Fatalf("SignCRL failed: %v", err)
+	}
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("ETag", `"crl-claims-etag"`)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(crlToken))
+	}))
+	defer ts.Close()
+
+	signer, err := NewSigner(priv)
+	if err != nil {
+		t.Fatalf("NewSigner failed: %v", err)
+	}
+
+	// 1. Issue a license embedding the CRLURL directly in its claims
+	revokedToken, err := signer.Sign(Claims{
+		ID:       revokedID,
+		Customer: Customer{Name: "Acme Corp"},
+		Product:  "app",
+		Plan:     "enterprise",
+		IssuedAt: now,
+		CRLURL:   ts.URL,
+	})
+	if err != nil {
+		t.Fatalf("signer.Sign failed: %v", err)
+	}
+
+	// 2. Validate with auto-resolve enabled: should automatically use claims.CRLURL (Tier 3)
+	v, err := NewValidatorWithKeyRing(
+		ring,
+		WithProduct("app"),
+		WithAutoResolvedRevocationList(true),
+	)
+	if err != nil {
+		t.Fatalf("NewValidatorWithKeyRing failed: %v", err)
+	}
+
+	_, err = v.Verify(revokedToken)
+	if !errors.Is(err, ErrLicenseRevoked) {
+		t.Fatalf("expected ErrLicenseRevoked via claims.CRLURL, got: %v", err)
+	}
+
+	// 3. Issue valid license with CRLURL
+	validToken, err := signer.Sign(Claims{
+		ID:       validID,
+		Customer: Customer{Name: "Acme Corp"},
+		Product:  "app",
+		Plan:     "enterprise",
+		IssuedAt: now,
+		CRLURL:   ts.URL,
+	})
+	if err != nil {
+		t.Fatalf("signer.Sign failed: %v", err)
+	}
+
+	claims, err := v.Verify(validToken)
+	if err != nil {
+		t.Fatalf("expected valid token to pass, got: %v", err)
+	}
+	if claims.GetCRLURL() != ts.URL {
+		t.Fatalf("expected GetCRLURL() == %q, got: %q", ts.URL, claims.GetCRLURL())
+	}
+
+	// 4. Verify FormatInspect includes CRL Distribution URL
+	inspectOutput := claims.FormatInspect()
+	if !strings.Contains(inspectOutput, "CRL Distribution URL:") || !strings.Contains(inspectOutput, ts.URL) {
+		t.Fatalf("expected FormatInspect to include CRL Distribution URL, got:\n%s", inspectOutput)
+	}
+
+	// 5. Test Metadata["crl_url"] fallback
+	metaClaims := &Claims{
+		Metadata: map[string]string{"crl_url": "https://meta.example.com/crl"},
+	}
+	if metaClaims.GetCRLURL() != "https://meta.example.com/crl" {
+		t.Fatalf("expected GetCRLURL to fallback to metadata, got: %s", metaClaims.GetCRLURL())
 	}
 }

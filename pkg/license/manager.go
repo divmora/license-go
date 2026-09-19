@@ -62,6 +62,27 @@ type ManagerConfig struct {
 	// CRLString is the raw compact token or armored PEM CRL string.
 	CRLString string
 
+	// CRLURL specifies a remote HTTPS distribution point to periodically sync CRLs.
+	CRLURL string
+
+	// CRLCacheFile specifies a local path to cache downloaded CRLs for air-gap fallback.
+	CRLCacheFile string
+
+	// CRLSyncInterval specifies how often the remote CRL is checked.
+	// Defaults to 6 hours if CRLURL or CRLSyncer is provided.
+	CRLSyncInterval time.Duration
+
+	// CRLSyncer allows injecting a pre-configured CRLSyncer.
+	CRLSyncer *CRLSyncer
+
+	// RequireCRL enforces zero-trust non-revocation proof.
+	// If true and no CRL is found or sync fails without cache, manager initialization fails (PolicyStrict)
+	// or transitions to degraded mode.
+	RequireCRL bool
+
+	// AutoResolveCRL automatically discovers local CRL from environment/default paths if CRLFile/CRLURL not set.
+	AutoResolveCRL bool
+
 	// Policy defines the operational enforcement mode (PolicyStrict, PolicyDegraded, PolicyWarnOnly).
 	// Defaults to PolicyStrict if not specified.
 	Policy EnforcementPolicy
@@ -124,6 +145,9 @@ type ManagerConfig struct {
 	// OnBSLConverted is called when the BSL 1.1 Change Date arrives and the service converts to Apache 2.0.
 	OnBSLConverted func(claims *Claims)
 
+	// OnCRLUpdated is called when a fresh Certificate Revocation List (CRL) is fetched or synced.
+	OnCRLUpdated func(crl *RevocationListClaims)
+
 	// OnError is called if periodic validation or file reloading encounters an error.
 	OnError func(err error)
 }
@@ -141,6 +165,7 @@ type Manager struct {
 	isDegraded       bool
 	degradedReason   error
 	lastWarnedDays   int
+	crlSyncer        *CRLSyncer
 
 	stopChan chan struct{}
 	wg       sync.WaitGroup
@@ -215,18 +240,41 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 		WithRevocationListFile(cfg.CRLFile)(cfg.Validator)
 	} else if cfg.CRLString != "" {
 		WithRevocationList(cfg.CRLString)(cfg.Validator)
+	} else if cfg.AutoResolveCRL {
+		WithAutoResolvedRevocationList(cfg.RequireCRL)(cfg.Validator)
+	}
+
+	if cfg.RequireCRL {
+		WithRequireRevocationList(true)(cfg.Validator)
+	}
+
+	if cfg.CRLSyncer != nil {
+		WithCRLSyncer(cfg.CRLSyncer)(cfg.Validator)
+	} else if cfg.CRLURL != "" {
+		cacheFile := cfg.CRLCacheFile
+		if cacheFile == "" {
+			cacheFile = ResolveCRLCacheFile()
+		}
+		WithCRLURL(cfg.CRLURL, WithCRLSyncCacheFile(cacheFile))(cfg.Validator)
+	}
+
+	if (cfg.CRLURL != "" || cfg.CRLSyncer != nil) && cfg.CRLSyncInterval <= 0 {
+		cfg.CRLSyncInterval = 6 * time.Hour
 	}
 
 	m := &Manager{
 		cfg:            cfg,
 		stopChan:       make(chan struct{}),
 		lastWarnedDays: -1,
+		crlSyncer:      cfg.Validator.CRLSyncer(),
 	}
 
 	// Initial load and verification
 	if err := m.loadAndVerify(true); err != nil {
 		return nil, fmt.Errorf("initial license verification failed: %w", err)
 	}
+
+	m.crlSyncer = m.cfg.Validator.CRLSyncer()
 
 	return m, nil
 }
@@ -474,6 +522,14 @@ func (m *Manager) run(ctx context.Context) {
 	ticker := time.NewTicker(m.cfg.CheckInterval)
 	defer ticker.Stop()
 
+	var crlTicker *time.Ticker
+	var crlChan <-chan time.Time
+	if m.crlSyncer != nil && m.cfg.CRLSyncInterval > 0 {
+		crlTicker = time.NewTicker(m.cfg.CRLSyncInterval)
+		defer crlTicker.Stop()
+		crlChan = crlTicker.C
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -482,8 +538,84 @@ func (m *Manager) run(ctx context.Context) {
 			return
 		case <-ticker.C:
 			m.check()
+		case <-crlChan:
+			m.syncCRL(ctx)
 		}
 	}
+}
+
+// syncCRL performs dynamic CRL synchronization and handles any newly revoked licenses.
+func (m *Manager) syncCRL(ctx context.Context) {
+	if m.crlSyncer == nil {
+		return
+	}
+	res, err := m.crlSyncer.Sync(ctx)
+	if err != nil {
+		if m.cfg.OnError != nil {
+			m.cfg.OnError(err)
+		}
+		if m.cfg.RequireCRL && m.crlSyncer.Claims() == nil {
+			if m.cfg.Policy == PolicyDegraded {
+				m.transitionToDegraded(ErrCRLMissing)
+			}
+		}
+		return
+	}
+
+	if res != nil && res.Claims != nil {
+		WithCRLClaims(res.Claims)(m.cfg.Validator)
+
+		if res.Source == SyncSourceRemote && m.cfg.OnCRLUpdated != nil {
+			m.cfg.OnCRLUpdated(res.Claims)
+		}
+
+		// Check if active running license has been revoked
+		m.mu.RLock()
+		currentID := ""
+		if m.currentClaims != nil {
+			currentID = m.currentClaims.ID
+		}
+		m.mu.RUnlock()
+
+		if currentID != "" {
+			if entry, revoked := res.Claims.IsRevoked(currentID); revoked {
+				revErr := &LicenseRevokedError{
+					LicenseID: currentID,
+					RevokedAt: entry.RevokedAt,
+					Reason:    entry.Reason,
+					CRLID:     res.Claims.ID,
+				}
+				if m.cfg.Policy == PolicyStrict {
+					if m.cfg.OnError != nil {
+						m.cfg.OnError(revErr)
+					}
+					if m.cfg.OnExpired != nil {
+						m.cfg.OnExpired(m.Claims())
+					}
+					m.transitionToDegraded(revErr)
+				} else if m.cfg.Policy == PolicyDegraded {
+					m.transitionToDegraded(revErr)
+				} else if m.cfg.Policy == PolicyWarnOnly {
+					log.Printf("[SECURITY ALERT] Active license %s has been REVOKED in CRL %s (reason: %s)",
+						currentID, res.Claims.ID, entry.Reason)
+				}
+			}
+		}
+	}
+}
+
+// SyncCRLNow triggers a CRL synchronization cycle immediately and applies any revocation updates.
+func (m *Manager) SyncCRLNow(ctx context.Context) (*RevocationListClaims, error) {
+	if m.crlSyncer == nil {
+		return nil, errors.New("license: no CRL syncer configured on manager")
+	}
+	m.syncCRL(ctx)
+	return m.crlSyncer.Claims(), nil
+}
+
+// CRLSyncer returns the active CRLSyncer used by the manager, or nil if none is configured.
+func (m *Manager) CRLSyncer() *CRLSyncer {
+	return m.crlSyncer
 }
 
 // check executes periodic inspection, checking for file updates, BSL conversion, and expiration triggers.

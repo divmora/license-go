@@ -182,6 +182,12 @@ func (c *Claims) FormatInspectAt(t time.Time) string {
 		}
 	}
 
+	// Revocation List Distribution Point
+	if c.GetCRLURL() != "" {
+		b.WriteString("\nREVOCATION LIST\n")
+		fmt.Fprintf(&b, "  %-22s %s\n", "CRL Distribution URL:", c.GetCRLURL())
+	}
+
 	// Custom Metadata
 	if len(c.Metadata) > 0 {
 		b.WriteString("\nMETADATA\n")

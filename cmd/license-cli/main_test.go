@@ -1,6 +1,8 @@
 package main
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -1434,5 +1436,166 @@ func TestCLI_CRLCommands(t *testing.T) {
 	}
 	if err := runCLI([]string{"check-crl", "-crl", crlFlatPath, "-id", "id-123"}); err == nil {
 		t.Fatalf("expected check-crl to report revoked for id-123")
+	}
+}
+
+func TestCLI_CRLSyncAndDynamicVerify(t *testing.T) {
+	tmpDir := t.TempDir()
+	pubKeyPath := filepath.Join(tmpDir, "public.pem")
+	privKeyPath := filepath.Join(tmpDir, "private.pem")
+	goodLicensePath := filepath.Join(tmpDir, "good.key")
+	revokedLicensePath := filepath.Join(tmpDir, "revoked.key")
+	syncedCRLPath := filepath.Join(tmpDir, "synced.crl")
+	cacheCRLPath := filepath.Join(tmpDir, "cache.crl")
+
+	// 1. Generate KeyPair
+	if err := runCLI([]string{"keygen", "-out-dir", tmpDir}); err != nil {
+		t.Fatalf("keygen failed: %v", err)
+	}
+
+	// 2. Issue valid license
+	if err := runCLI([]string{
+		"issue",
+		"-private-key", privKeyPath,
+		"-product", "cloud-app",
+		"-customer", "Cloud Customer",
+		"-out", goodLicensePath,
+	}); err != nil {
+		t.Fatalf("issue good license failed: %v", err)
+	}
+
+	// 3. Issue revoked license
+	if err := runCLI([]string{
+		"issue",
+		"-private-key", privKeyPath,
+		"-product", "cloud-app",
+		"-customer", "Revoked Customer",
+		"-out", revokedLicensePath,
+	}); err != nil {
+		t.Fatalf("issue revoked license failed: %v", err)
+	}
+
+	revokedClaims, err := license.InspectFromFile(revokedLicensePath)
+	if err != nil {
+		t.Fatalf("inspect revoked license failed: %v", err)
+	}
+
+	// 4. Mint signed CRL
+	localCRLPath := filepath.Join(tmpDir, "origin.crl")
+	if err := runCLI([]string{
+		"crl", "sign",
+		"-private-key", privKeyPath,
+		"-id", "crl-sync-cli-test",
+		"-entries", revokedClaims.ID + "=compromised_key",
+		"-out", localCRLPath,
+		"-armored",
+	}); err != nil {
+		t.Fatalf("crl sign failed: %v", err)
+	}
+
+	crlBytes, err := os.ReadFile(localCRLPath)
+	if err != nil {
+		t.Fatalf("failed to read origin CRL: %v", err)
+	}
+
+	// 5. Host CRL on httptest.Server
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("ETag", `"cli-test-etag"`)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(crlBytes)
+	}))
+	defer ts.Close()
+
+	// 6. Test crl sync command
+	if err := runCLI([]string{
+		"crl", "sync",
+		"-url", ts.URL,
+		"-public-key", pubKeyPath,
+		"-out", syncedCRLPath,
+		"-cache-file", cacheCRLPath,
+		"-verbose",
+	}); err != nil {
+		t.Fatalf("crl sync failed: %v", err)
+	}
+
+	if _, err := os.Stat(syncedCRLPath); err != nil {
+		t.Fatalf("expected synced CRL file to exist at %s: %v", syncedCRLPath, err)
+	}
+	if _, err := os.Stat(cacheCRLPath); err != nil {
+		t.Fatalf("expected cache CRL file to exist at %s: %v", cacheCRLPath, err)
+	}
+
+	// 7. Verify good license with -crl-url and -require-crl -> succeeds
+	if err := runCLI([]string{
+		"verify",
+		"-public-key", pubKeyPath,
+		"-license", goodLicensePath,
+		"-product", "cloud-app",
+		"-crl-url", ts.URL,
+		"-require-crl",
+	}); err != nil {
+		t.Fatalf("verify good license with -crl-url failed: %v", err)
+	}
+
+	// 8. Verify revoked license with -crl-url -> fails with revocation error
+	err = runCLI([]string{
+		"verify",
+		"-public-key", pubKeyPath,
+		"-license", revokedLicensePath,
+		"-product", "cloud-app",
+		"-crl-url", ts.URL,
+	})
+	if err == nil {
+		t.Fatalf("expected verify of revoked license with -crl-url to fail, got nil")
+	}
+	if !strings.Contains(err.Error(), "revoked") {
+		t.Fatalf("expected error to mention revoked, got: %v", err)
+	}
+
+	// 9. Verify good license with -require-crl and -auto-crl=false without any CRL -> fails with ErrCRLMissing
+	err = runCLI([]string{
+		"verify",
+		"-public-key", pubKeyPath,
+		"-license", goodLicensePath,
+		"-product", "cloud-app",
+		"-require-crl",
+		"-auto-crl=false",
+	})
+	if err == nil {
+		t.Fatalf("expected verify with -require-crl and no CRL to fail, got nil")
+	}
+
+	// 10. Issue license with embedded -crl-url, inspect it, and verify with -auto-crl
+	embeddedLicPath := filepath.Join(tmpDir, "embedded-crl.key")
+	if err := runCLI([]string{
+		"issue",
+		"-private-key", privKeyPath,
+		"-product", "cloud-app",
+		"-customer", "Embedded Acme",
+		"-crl-url", ts.URL,
+		"-out", embeddedLicPath,
+	}); err != nil {
+		t.Fatalf("issue with -crl-url failed: %v", err)
+	}
+
+	// Inspect the issued license and ensure CRL URL is present
+	inspectedClaims, err := license.InspectFromFile(embeddedLicPath)
+	if err != nil {
+		t.Fatalf("InspectFromFile failed: %v", err)
+	}
+	if inspectedClaims.CRLURL != ts.URL {
+		t.Fatalf("expected inspected Claims.CRLURL == %q, got: %q", ts.URL, inspectedClaims.CRLURL)
+	}
+
+	// Verify using -auto-crl (which discovers the CRL URL from the token itself!)
+	if err := runCLI([]string{
+		"verify",
+		"-public-key", pubKeyPath,
+		"-license", embeddedLicPath,
+		"-product", "cloud-app",
+		"-auto-crl",
+		"-require-crl",
+	}); err != nil {
+		t.Fatalf("verify with token-embedded crl-url and -auto-crl failed: %v", err)
 	}
 }

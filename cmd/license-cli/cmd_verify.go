@@ -38,6 +38,10 @@ func runVerify(args []string) error {
 	binaryPath := fs.String("binary", "", "Path to running binary executable to assert SHA-256 digest against release attestation")
 	autoFingerprint := fs.Bool("auto-fingerprint", true, "Automatically resolve and match machine/cluster fingerprint for node-locked licenses (default: true)")
 	crlFlag := fs.String("crl", "", "Path to signed Certificate Revocation List (CRL) file or raw DIVCRL1 token")
+	crlURLFlag := fs.String("crl-url", "", "Remote HTTPS endpoint to fetch, verify, and sync CRL")
+	crlCacheFlag := fs.String("crl-cache", "", "Local cache file path for remote CRL synchronization")
+	requireCRL := fs.Bool("require-crl", false, "Require a valid Certificate Revocation List (fail with ErrCRLMissing if absent)")
+	autoCRL := fs.Bool("auto-crl", true, "Automatically discover and attach CRL from environment or default system path")
 	strictCRL := fs.Bool("strict-crl", false, "Fail verification if CRL is expired past NextUpdate")
 
 	if err := fs.Parse(args); err != nil {
@@ -168,15 +172,25 @@ func runVerify(args []string) error {
 	if *binaryPath != "" {
 		opts = append(opts, license.WithBinaryPath(*binaryPath))
 	}
-	if *crlFlag != "" {
+	if *crlURLFlag != "" {
+		cachePath := *crlCacheFlag
+		if cachePath == "" {
+			cachePath = license.ResolveCRLCacheFile()
+		}
+		opts = append(opts, license.WithCRLURL(*crlURLFlag, license.WithCRLSyncCacheFile(cachePath)))
+	} else if *crlFlag != "" {
 		data, err := os.ReadFile(*crlFlag)
 		if err == nil {
 			opts = append(opts, license.WithRevocationList(string(data)))
 		} else {
 			opts = append(opts, license.WithRevocationList(*crlFlag))
 		}
-	} else if res, err := license.ResolveCRL(); err == nil {
-		opts = append(opts, license.WithRevocationList(res.Content))
+	} else if *autoCRL {
+		opts = append(opts, license.WithAutoResolvedRevocationList(*requireCRL))
+	}
+
+	if *requireCRL {
+		opts = append(opts, license.WithRequireRevocationList(true))
 	}
 	if *strictCRL {
 		opts = append(opts, license.WithCRLStrictExpiry(true))

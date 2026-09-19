@@ -74,6 +74,8 @@ func runCLI(args []string) error {
 		return runInspectCRL(subArgs)
 	case "check-crl":
 		return runCheckCRL(subArgs)
+	case "sync-crl":
+		return runSyncCRL(subArgs)
 
 	// Global help
 	case "help", "-h", "--help", "-help":
@@ -185,6 +187,8 @@ func dispatchCRL(args []string) error {
 		return runInspectCRL(subArgs)
 	case "check", "check-crl":
 		return runCheckCRL(subArgs)
+	case "sync", "sync-crl":
+		return runSyncCRL(subArgs)
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown crl command %q\n\n", subcmd)
 		printCRLUsage()
@@ -306,6 +310,7 @@ Available Commands:
   verify          Verify CRL signature and validity against trusted KeyRing
   inspect         Decode and inspect revoked license IDs and metadata
   check           Check whether a specific license ID is revoked in a CRL
+  sync            Fetch, verify, and cache CRL from a remote HTTPS endpoint
 
 Use "license-cli crl <command> -help" for more information about a command.`)
 }

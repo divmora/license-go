@@ -17,8 +17,7 @@ This document tracks upcoming capabilities, planned optimizations, and ecosystem
 - [ ] *(Additional multi-tenancy capabilities will be tracked here)*
 
 ### 🛡️ Validation & Diagnostic Reporting
-- [ ] **Strict CRL Enforcement Policy**: Provide `WithRequireRevocationList(true)` and `license-cli verify -require-crl` for zero-trust / regulated deployments that mandate proof of non-revocation (`ErrCRLMissing` when absent).
-- [ ] **Validator Auto-Resolved CRL Option**: Provide `WithAutoResolvedRevocationList(require ...bool)` to automatically discover and attach CRLs from standard environment (`DIVMORA_CRL`, `DIVMORA_CRL_FILE`) and filesystem locations.
+- [ ] *(Additional validation capabilities will be tracked here)*
 
 ### 🖥️ Developer Experience & CLI Tooling
 - [ ] *(Additional CLI capabilities will be tracked here)*
@@ -36,7 +35,6 @@ This document tracks upcoming capabilities, planned optimizations, and ecosystem
 
 ### 🌐 Online Activation & Centralized Revocation
 - [ ] Optional HTTP client middleware for periodic online heartbeat / activation checks against a centralized Divmora licensing server.
-- [ ] Centralized Cryptographic Revocation List (CRL) fetching and background caching.
 
 ### 📑 Ecosystem & Cross-Language Parity
 - [ ] *(Cross-language SDKs and SDK parity tasks will be tracked here)*

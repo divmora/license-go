@@ -39,6 +39,7 @@ func runIssue(args []string) error {
 	maxVersion := fs.String("max-version", "", "Maximum authorized software version for perpetual license (e.g. '1.*', '2.4.0')")
 	allowedVersionsFlag := fs.String("allowed-versions", "", "Comma-separated authorized versions or patterns (e.g. '1.*,2.0.*')")
 	maintenanceDays := fs.Int("maintenance-days", 0, "Maintenance/update entitlement duration in days from issue date")
+	crlURL := fs.String("crl-url", "", "Optional remote CRL distribution point HTTPS URL to embed in claims")
 	reqPath := fs.String("request", "", "Path to air-gapped license request file (.divreq or PEM) to fulfill")
 
 	if err := fs.Parse(args); err != nil {
@@ -176,6 +177,7 @@ func runIssue(args []string) error {
 		MaxVersion:           *maxVersion,
 		AllowedVersions:      parseSlice(*allowedVersionsFlag),
 		MaintenanceExpiresAt: maintenanceExpiresAt,
+		CRLURL:               *crlURL,
 		Metadata:             meta,
 	}
 
