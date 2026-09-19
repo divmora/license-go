@@ -322,7 +322,7 @@ func TestManager_BSLConversionClockDefense(t *testing.T) {
 	validator, err := NewValidator(pub,
 		WithProduct("gitlab-fleet-governor"),
 		WithBSLPolicy(bslPolicy),
-		WithAuthoritativeTime(authTime),
+		WithServerTimeAttestation(authTime, 1*time.Hour),
 		WithStrictClockDefense(false),
 	)
 	if err != nil {
@@ -356,15 +356,19 @@ func TestManager_BSLConversionClockDefense(t *testing.T) {
 		t.Error("claims should not have converted to open-source")
 	}
 
-	// Now update validator with authoritative time PAST changeDate
+	// Now update validator with authoritative time PAST changeDate and unexpired token
+	claimsValidConverted := sampleClaims()
+	claimsValidConverted.Product = "gitlab-fleet-governor"
+	claimsValidConverted.ExpiresAt = changeDate.Add(48 * time.Hour)
+	tokenValidConverted, _ := signer.SignArmored(claimsValidConverted)
 	validatorConverted, _ := NewValidator(pub,
 		WithProduct("gitlab-fleet-governor"),
 		WithBSLPolicy(bslPolicy),
-		WithAuthoritativeTime(changeDate.Add(24*time.Hour)),
+		WithServerTimeAttestation(changeDate.Add(24*time.Hour), 1*time.Hour),
 	)
 	mgrConverted, err := NewManager(ManagerConfig{
 		Validator:     validatorConverted,
-		LicenseString: token,
+		LicenseString: tokenValidConverted,
 		OnBSLConverted: func(c *Claims) {
 			bslConvertedCalled = true
 		},

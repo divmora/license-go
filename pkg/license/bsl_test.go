@@ -161,9 +161,18 @@ func TestValidator_BSLConversionWorkflow(t *testing.T) {
 		t.Fatalf("expected commercial feature to be present")
 	}
 
-	// 3. After Change Date: Empty license token automatically succeeds with open-source entitlements
+	// 3. After Change Date: Empty license token automatically succeeds with open-source entitlements when authoritative time is attested!
 	afterDate := changeDate.AddDate(0, 1, 0) // 2028-02-01
-	openRes, err := validator.VerifyWithResultAt("", afterDate)
+	validatorAttested, err := license.NewValidator(pub,
+		license.WithProduct("gitlab-fleet-governor"),
+		license.WithBSLPolicy(bslPolicy),
+		license.WithServerTimeAttestation(afterDate, 1*time.Hour),
+	)
+	if err != nil {
+		t.Fatalf("failed to create attested validator: %v", err)
+	}
+
+	openRes, err := validatorAttested.VerifyWithResultAt("", afterDate)
 	if err != nil {
 		t.Fatalf("expected empty license to succeed after Change Date, got: %v", err)
 	}
@@ -180,8 +189,8 @@ func TestValidator_BSLConversionWorkflow(t *testing.T) {
 		t.Fatalf("expected wildcard features in open-source claims")
 	}
 
-	// 4. After Change Date: Even an expired commercial token succeeds
-	expiredRes, err := validator.VerifyWithResultAt(token, afterDate)
+	// 4. After Change Date: Even an expired commercial token succeeds with attested time
+	expiredRes, err := validatorAttested.VerifyWithResultAt(token, afterDate)
 	if err != nil {
 		t.Fatalf("expected expired token to succeed after Change Date, got: %v", err)
 	}
@@ -259,6 +268,69 @@ func TestValidator_ClockTamperingDefense(t *testing.T) {
 	}
 	if res.EffectiveLicense != "BSL-1.1" {
 		t.Fatalf("expected BSL-1.1 license, got %s", res.EffectiveLicense)
+	}
+}
+
+func TestValidator_ForwardClockTamperingBSLConversionDefeated(t *testing.T) {
+	t.Parallel()
+
+	pub, _, err := license.GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("failed to generate key pair: %v", err)
+	}
+
+	releaseDate := time.Date(2025, time.January, 1, 0, 0, 0, 0, time.UTC)
+	bslPolicy := license.BSLPolicy{
+		ReleaseDate:       releaseDate,
+		ChangePeriodYears: 3,
+	}
+
+	// 1. Unauthenticated forward clock tampering without authoritative time:
+	// Attacker advances local host clock to 2029 (4 years in future, claiming BSL conversion)
+	tamperedHostTime := releaseDate.AddDate(4, 0, 0) // 2029-01-01
+
+	validatorUnauthenticated, err := license.NewValidator(pub,
+		license.WithProduct("gitlab-fleet-governor"),
+		license.WithBSLPolicy(bslPolicy),
+	)
+	if err != nil {
+		t.Fatalf("failed to create validator: %v", err)
+	}
+
+	// Evaluating empty license token when local clock is tampered forward past ChangeDate:
+	// Validator MUST reject with ClockTamperingError!
+	_, err = validatorUnauthenticated.VerifyWithResultAt("", tamperedHostTime)
+	if !errors.Is(err, license.ErrClockTamperingDetected) {
+		t.Fatalf("expected ErrClockTamperingDetected on forward clock tampering, got: %v", err)
+	}
+
+	var clockErr *license.ClockTamperingError
+	if !errors.As(err, &clockErr) {
+		t.Fatalf("expected error to be *ClockTamperingError, got: %T", err)
+	}
+	if !strings.Contains(clockErr.Reason, "offline forward clock tampering detected") {
+		t.Errorf("unexpected clock tampering reason: %s", clockErr.Reason)
+	}
+
+	// 2. Legitimate BSL conversion when server time is attested past ChangeDate:
+	validatorAttested, err := license.NewValidator(pub,
+		license.WithProduct("gitlab-fleet-governor"),
+		license.WithBSLPolicy(bslPolicy),
+		license.WithServerTimeAttestation(tamperedHostTime, 1*time.Hour),
+	)
+	if err != nil {
+		t.Fatalf("failed to create attested validator: %v", err)
+	}
+
+	res, err := validatorAttested.VerifyWithResultAt("", tamperedHostTime)
+	if err != nil {
+		t.Fatalf("expected BSL conversion to succeed with attested server time, got: %v", err)
+	}
+	if !res.BSLConverted {
+		t.Fatalf("expected BSLConverted to be true when server time is attested")
+	}
+	if res.EffectiveLicense != "Apache-2.0" {
+		t.Errorf("expected EffectiveLicense Apache-2.0, got %s", res.EffectiveLicense)
 	}
 }
 

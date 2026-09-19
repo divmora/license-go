@@ -423,7 +423,7 @@ func (v *Validator) VerifyWithResultAt(rawLicense string, now time.Time) (*Verif
 	}
 
 	// 0. Automatic BSL 1.1 Change Date Check
-	if effectiveBSL != nil && effectiveBSL.IsConverted(evalTime) {
+	if !tampered && (v.serverTimeAttested || !v.authoritativeTime.IsZero()) && effectiveBSL != nil && effectiveBSL.IsConverted(evalTime) {
 		if strings.TrimSpace(rawLicense) == "" {
 			claims := &Claims{
 				Product:  v.expectedProduct,
