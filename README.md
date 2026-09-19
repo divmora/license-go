@@ -18,8 +18,10 @@
   - **Armored Text Blocks**: Human-friendly files with boundary headers (`-----BEGIN DIVMORA LICENSE KEY-----`).
   - **Compact Tokens**: Single-line `DIV1.<payload>.<signature>` strings for environment variables and CLI arguments.
 - **Rich Claims Schema**: Supports customer details, product targeting, subscription tiers (`community`, `starter`, `pro`, `enterprise`, `trial`), expiration dates, feature flags, numerical quotas/limits, and custom key-value metadata.
+- **Offline Revocation Lists (CRL)**: Support cryptographically signed revocation lists (`crl.divcrl`) to invalidate compromised, leaked, or refunded licenses in air-gapped environments without network access.
+- **Cryptographic Release Attestation**: Cryptographically seal release binaries with Ed25519 signatures, commit hashes, build dates, and SHA-256 digests (`release.sig`).
 - **Background Daemon Manager**: Built-in `Manager` for long-running services with hot-reloading from disk and automated expiration warnings.
-- **CLI Included**: `cmd/license-cli` provides instant `keygen`, `issue`, `verify`, and `inspect` subcommands for CI/CD and administration.
+- **CLI Included**: `cmd/license-cli` provides instant `keygen`, `issue`, `verify`, `inspect`, `crl`, and release attestation subcommands for CI/CD and administration.
 
 ---
 
@@ -117,6 +119,15 @@ func main() {
 | **5** | `/etc/divmora/public.pem` | Default Linux/container filesystem location if file exists. |
 | **6** | Fallback Keys (Opt-In Override) | Used when `WithAllowEnvKeyOverride(true)` or `SetAllowEnvKeyOverride(true)` is enabled and no environment variables are set. |
 
+#### Offline Revocation List (CRL) Resolution Hierarchy
+
+| Priority | Source | Description |
+| :--- | :--- | :--- |
+| **1** | Explicit Argument / Option | Direct path or raw token passed to `WithRevocationList(...)`, `WithRevocationListFile(...)`, `ResolveRevocationList(path)`, or `-crl` CLI flag. |
+| **2** | `DIVMORA_CRL` | Environment variable containing raw compact token (`DIVCRL1...`) or armored PEM block text. Ideal for Docker, Lambda, and air-gapped environments. |
+| **3** | `DIVMORA_CRL_FILE` | Environment variable containing filesystem path to revocation list file (`.divcrl`). |
+| **4** | `/etc/divmora/crl.divcrl` | Default Linux/container filesystem location if file exists. |
+
 > [!IMPORTANT]
 > **Trust Root Spoofing Defense**: To prevent attackers in untrusted container/Kubernetes environments from replacing the vendor's public key with a forged key via `DIVMORA_PUBLIC_KEY`, `NewValidatorWithFallbackKey(vendorKey)` and `ResolveKeyRing(vendorKey)` treat explicit embedded keys as authoritative by default. Use `WithAllowEnvKeyOverride(true)` only if you intentionally wish to allow environment variables to override embedded keys (e.g. in staging/dev environments).
 
@@ -125,16 +136,25 @@ func main() {
 token, err := license.ResolveToken() // Returns license token string from env/file
 resolved, err := license.ResolveLicense() // Returns content + FilePath for hot reloading
 
+// Offline Certificate Revocation List (CRL) resolution:
+crl, err := license.ResolveRevocationList("") // Auto-resolves from DIVMORA_CRL / DIVMORA_CRL_FILE / /etc/divmora/crl.divcrl
+
 // Public verification KeyRing resolution:
 ring, err := license.ResolveKeyRing(embeddedFallbackKey) // Resolves trusted KeyRing
 pubKey, err := license.ResolvePublicKey(embeddedFallbackKey) // Resolves primary public key
 
-// Zero-boilerplate validator initialization:
-validator, err := license.NewValidatorFromEnv(license.WithProduct("gitlab-fleet-governor"))
+// Zero-boilerplate validator initialization with auto-resolved CRL:
+validator, err := license.NewValidatorFromEnv(
+	license.WithProduct("gitlab-fleet-governor"),
+	license.WithAutoResolvedRevocationList(),
+)
 // Or compile-time //go:embed helper:
 // //go:embed public.pem
 // var embeddedPublicKey []byte
-validator, err := license.NewValidatorFromEmbeddedPEM(embeddedPublicKey, license.WithProduct("gitlab-fleet-governor"))
+validator, err := license.NewValidatorFromEmbeddedPEM(embeddedPublicKey, 
+	license.WithProduct("gitlab-fleet-governor"),
+	license.WithAutoResolvedRevocationList(),
+)
 ```
 
 ---
@@ -455,6 +475,35 @@ license-cli inspect-release -attestation ./bin/release.sig
 
 # Or output raw JSON:
 license-cli inspect-release -attestation ./bin/release.sig -json
+```
+
+### 10. Offline Certificate Revocation Lists (`license-cli crl`)
+
+Manage and enforce cryptographically signed Revocation Lists (`DIVCRL1`) for air-gapped environments without network connectivity:
+
+```bash
+# 1. Mint a signed CRL (inline entries or via JSON entries file):
+license-cli crl sign \
+  -private-key ./keys/private.pem \
+  -entries "lic-corp-1234=compromised,lic-corp-5678=refunded" \
+  -next-update "30d" \
+  -product "gitlab-fleet-governor" \
+  -out ./crl.divcrl
+
+# 2. Inspect revoked entries in a CRL (no key required):
+license-cli crl inspect -crl ./crl.divcrl
+
+# 3. Check whether a specific license ID is revoked:
+license-cli crl check -crl ./crl.divcrl -id "lic-corp-1234"
+
+# 4. Verify CRL cryptographic signature against KeyRing:
+license-cli crl verify -crl ./crl.divcrl -public-key ./keys/public.pem
+
+# 5. Enforce CRL during license verification:
+license-cli verify \
+  -product "gitlab-fleet-governor" \
+  -license ./acme.license.key \
+  -crl ./crl.divcrl
 ```
 
 ---

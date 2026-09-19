@@ -1,7 +1,7 @@
 # Divmora License Protocol Specification (DIV1)
 
-- **Document Version**: 1.1.0
-- **Protocol Identifier**: `DIV1`
+- **Document Version**: 1.2.0
+- **Protocol Identifier**: `DIV1` / `DIVCRL1` / `DIVREL1`
 - **Status**: Stable / Standard RFC
 - **Authors**: Divmora Engineering Team (<engineering@divmora.com>)
 - **Repository**: [github.com/divmora/license-go](https://github.com/divmora/license-go)
@@ -10,7 +10,7 @@
 
 ## Abstract
 
-This document defines the **Divmora License Protocol (`DIV1`)**, an enterprise-grade, cryptographically secure software licensing format and evaluation standard. `DIV1` provides asymmetric digital signatures using Ed25519, compact single-line and armored PEM serialization formats, hierarchical infrastructure scoping, perpetual license version locking, Business Source License (BSL 1.1) autonomous open-source conversion, authoritative clock tampering defense, and multi-key rotation and revocation semantics.
+This document defines the **Divmora License Protocol (`DIV1`)**, an enterprise-grade, cryptographically secure software licensing format and evaluation standard. `DIV1` provides asymmetric digital signatures using Ed25519, compact single-line and armored PEM serialization formats, hierarchical infrastructure scoping, perpetual license version locking, Business Source License (BSL 1.1) autonomous open-source conversion, authoritative clock tampering defense, offline cryptographically signed revocation lists (`DIVCRL1`), release provenance attestations (`DIVREL1`), and multi-key rotation and revocation semantics.
 
 ---
 
@@ -43,6 +43,12 @@ This document defines the **Divmora License Protocol (`DIV1`)**, an enterprise-g
 8. [Standard Error Codes & Failure Modes](#8-standard-error-codes--failure-modes)
 9. [Cross-Language Interoperability Guidelines](#9-cross-language-interoperability-guidelines)
 10. [Cryptographic Release Attestation & Provenance Engine (`DIVREL1`)](#10-cryptographic-release-attestation--provenance-engine-divrel1)
+11. [Offline Certificate Revocation Lists (`DIVCRL1`)](#11-offline-certificate-revocation-lists-divcrl1)
+    - [11.1 Format & Wire Protocol](#111-format--wire-protocol)
+    - [11.2 Revocation List Claims Schema](#112-revocation-list-claims-schema)
+    - [11.3 Revocation Entry Specification](#113-revocation-entry-specification)
+    - [11.4 Verification & Temporal Validity](#114-verification--temporal-validity)
+    - [11.5 Air-Gapped Resolution Hierarchy](#115-air-gapped-resolution-hierarchy)
 
 ---
 
@@ -402,12 +408,16 @@ Any conforming `DIV1` verification implementation MUST execute the security chec
 4. **Step 3 (Cryptographic Signature Verification)**: Verify Ed25519 signature over `DIV1.<payloadB64>` against the trusted `KeyRing`. Reject immediately if the key is untrusted or marked `REVOKED`.
 5. **Step 4 (JSON Payload Unmarshaling)**: Decode UTF-8 JSON claims payload.
 6. **Step 5 (Product Identity Match)**: Assert `claims.Product` matches target product (supports exact match, suite match `divmora-suite`, comma-separated lists, and wildcard `*`).
-7. **Step 6 (Fingerprint Binding Match)**: If `claims.Fingerprint` or validator mandates node-locking, verify machine/cluster identity.
-8. **Step 7 (Temporal Validity Checks)**:
+7. **Step 5b (Offline Revocation List Evaluation)**: If an Offline Certificate Revocation List (CRL) is configured or auto-resolved (`DIVMORA_CRL`, `DIVMORA_CRL_FILE`, `/etc/divmora/crl.divcrl`):
+   - Verify CRL cryptographic signature against the trusted `KeyRing`.
+   - Validate CRL freshness: reject if expired (`Now > NextUpdate + ClockSkew`) under strict policy.
+   - Assert `claims.ID` is NOT present in the CRL's revoked entries list. If revoked, halt evaluation immediately with `ErrLicenseRevoked` (`DIV_ERR_LICENSE_REVOKED`).
+8. **Step 6 (Fingerprint Binding Match)**: If `claims.Fingerprint` or validator mandates node-locking, verify machine/cluster identity.
+9. **Step 7 (Temporal Validity Checks)**:
    - Check `NotBefore`: Reject if $\text{Now} < \text{NotBefore} - \text{ClockSkew}$.
    - Check `ExpiresAt`: If not perpetual, verify $\text{Now} \le \text{ExpiresAt} + \text{GracePeriod} + \text{ClockSkew}$.
-9. **Step 8 (Scope Constraints Evaluation)**: Verify deployment boundaries (environments, accounts, regions, clusters, namespaces, hostnames, and custom dimensions).
-10. **Step 9 (Version & Maintenance Cutoff Check)**:
+10. **Step 8 (Scope Constraints Evaluation)**: Verify deployment boundaries (environments, accounts, regions, clusters, namespaces, hostnames, and custom dimensions).
+11. **Step 9 (Version & Maintenance Cutoff Check)**:
     - Check `MaxVersion` and `AllowedVersions` against current running software version.
     - Check `MaintenanceExpiresAt` against current binary build timestamp.
 
@@ -424,6 +434,9 @@ Conforming implementations MUST distinguish the following typed error conditions
 | `ErrKeyRevoked` | `DIV_ERR_KEY_REVOKED` | Signing key is explicitly marked as revoked in KeyRing. |
 | `ErrKeyNotFound` | `DIV_ERR_KEY_NOT_FOUND` | Specified `kid` was not found in trusted KeyRing. |
 | `ErrMissingPublicKey` | `DIV_ERR_MISSING_KEY` | No public keys configured in KeyRing for verification. |
+| `ErrLicenseRevoked` | `DIV_ERR_LICENSE_REVOKED` | License ID is explicitly revoked in Certificate Revocation List (CRL). |
+| `ErrInvalidCRL` | `DIV_ERR_INVALID_CRL` | CRL token format, magic prefix, or cryptographic signature is invalid. |
+| `ErrCRLExpired` | `DIV_ERR_CRL_EXPIRED` | CRL has passed its `next_update` expiration date under strict policy. |
 | `ErrExpired` | `DIV_ERR_EXPIRED` | License expiration date (and grace period) has passed. |
 | `ErrNotYetValid` | `DIV_ERR_NOT_YET_VALID` | Current time is before `not_before` activation timestamp. |
 | `ErrProductMismatch` | `DIV_ERR_PRODUCT_MISMATCH` | License product does not authorize this application. |
@@ -497,3 +510,84 @@ When release attestation is evaluated via `EvaluateProvenance`:
 5. **Build & Release Date Pinning**: If local runtime claims a build or release date earlier than the attested timestamps (>24h drift), tampering is flagged (`ErrReleaseTampered`).
 6. **Binary Checksum Verification**: If binary bytes or path are provided, computed SHA-256 must match `claims.binary_digest`.
 7. **BSL 1.1 Change Date Anchoring**: The attested `claims.release_date` overrides compile-time flags, preventing attackers from forging dates to trigger premature Apache 2.0 conversion.
+
+---
+
+## 11. Offline Certificate Revocation Lists (`DIVCRL1`)
+
+### 11.1 Format & Wire Protocol
+
+The **Divmora Revocation List Protocol (`DIVCRL1`)** defines a cryptographically verifiable mechanism to invalidate compromised, leaked, or refunded license IDs in air-gapped environments without outbound network calls or OCSP/cloud polling:
+
+- **Protocol Magic Prefix**: `DIVCRL1`
+- **Canonical Signed Data**: `DIVCRL1.<payloadB64>` signed with Ed25519
+- **Compact Token Wire Format**:
+  $$\text{CompactCRL} = \text{"DIVCRL1"} \mathbin{\Vert} \text{"."} \mathbin{\Vert} \text{Base64URL}(\text{JSON Payload}) \mathbin{\Vert} \text{"."} \mathbin{\Vert} \text{Base64URL}(\text{Signature}_{64})$$
+- **Armored PEM Format**:
+  ```pem
+  -----BEGIN DIVMORA REVOCATION LIST-----
+  RElWQ1JMMTtleUpwWkNJNklt...<base64>...
+  -----END DIVMORA REVOCATION LIST-----
+  ```
+
+### 11.2 Revocation List Claims Schema
+
+The authenticated JSON payload encodes the revocation list metadata and entry inventory:
+
+```json
+{
+  "id": "crl-20260919-e0f35491c743924f",
+  "issuer": "divmora.com/crl",
+  "product": "gitlab-fleet-governor",
+  "kid": "lic-root-2026",
+  "issued_at": "2026-09-19T10:42:17Z",
+  "next_update": "2026-10-19T10:42:17Z",
+  "entries": [
+    {
+      "id": "lic-corp-1234-uuid",
+      "revoked_at": "2026-09-19T10:00:00Z",
+      "reason": "compromised"
+    },
+    {
+      "id": "lic-corp-5678-uuid",
+      "revoked_at": "2026-09-19T10:30:00Z",
+      "reason": "refunded"
+    }
+  ],
+  "metadata": {
+    "security_ticket": "SEC-8821"
+  }
+}
+```
+
+### 11.3 Revocation Entry Specification
+
+Each record within the `entries` array represents an invalidated license:
+
+| Field | Type | Required | Description |
+| :--- | :--- | :--- | :--- |
+| `id` | `string` | **Yes** | Unique identifier (UUID or custom string) matching `claims.ID` of the revoked license. |
+| `revoked_at` | `string` | **Yes** | ISO-8601 / RFC3339 timestamp recording when revocation was officially enacted. |
+| `reason` | `string` | No | Operational cause (e.g. `compromised`, `refunded`, `superseded`, `payment_failed`, `license_fraud`). |
+
+### 11.4 Verification & Temporal Validity
+
+During license evaluation (Step 5b in Section 7.2):
+
+1. **Digital Signature Verification**: The CRL signature over `DIVCRL1.<payloadB64>` is verified against the trusted public `KeyRing`. Reject with `ErrInvalidCRL` if untrusted or malformed.
+2. **Freshness & Staleness**: If `next_update` is present and non-zero, assert $\text{Now} \le \text{NextUpdate} + \text{ClockSkew}$. If expired, reject with `ErrCRLExpired` under strict validation modes.
+3. **Product Scope Filtering**: If `product` is populated, the CRL applies exclusively to the designated product (or all products if empty or `*`).
+4. **Revocation Assertion**: Check `claims.ID` against `entries`:
+   - If found: Verification halts immediately and returns `ErrLicenseRevoked` wrapping structured `*LicenseRevokedError` containing revocation timestamp and reason.
+   - If not found: Evaluation proceeds to subsequent entitlement steps.
+
+### 11.5 Air-Gapped Resolution Hierarchy
+
+Consuming applications resolve CRL data using standard resolution precedence:
+
+| Priority | Source | Description |
+| :--- | :--- | :--- |
+| **1** | Explicit Argument / Option | `WithRevocationList(...)`, `WithRevocationListFile(...)`, `ResolveRevocationList(path)`, or `-crl` flag. |
+| **2** | `DIVMORA_CRL` | Environment variable containing raw compact token or armored PEM text. |
+| **3** | `DIVMORA_CRL_FILE` | Environment variable containing filesystem path to `.divcrl` file. |
+| **4** | `/etc/divmora/crl.divcrl` | Standard Linux / container filesystem location if file exists on disk. |

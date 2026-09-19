@@ -16,6 +16,7 @@ license-go/
 │       ├── envelope.go         # Token parsing, unmarshaling & armored PEM block unwrapping
 │       ├── keyring.go          # KeyRing multi-key rotation, bundle management & revocation
 │       ├── bsl.go              # BSL 1.1 Change Date, Apache 2.0 conversion & clock defense
+│       ├── crl.go              # Offline Certificate Revocation Lists (DIVCRL1) & air-gapped invalidation
 │       ├── validator.go              # Validator struct, options, VerificationResult & accessors
 │       ├── validator_constructors.go # Constructor variants (NewValidator*) & key resolution
 │       ├── validator_clock.go        # Authoritative time, clock skew & tampering defense
@@ -28,6 +29,7 @@ license-go/
 │       ├── keys_test.go        # Key generation & PEM round-trip tests
 │       ├── keyring_test.go     # KeyRing rotation, revocation & multi-key tests
 │       ├── bsl_test.go         # BSL 1.1 conversion & clock tampering defense tests
+│       ├── crl_test.go         # Offline Certificate Revocation List tests
 │       ├── license_test.go     # Signing, verification, tampering, expiration tests
 │       ├── provenance_test.go  # Release attestation & binary checksum verification tests
 │       ├── status_formatter_test.go # Status banner & quota table tests
@@ -50,6 +52,7 @@ license-go/
 │       ├── cmd_verify.go       # verify subcommand
 │       ├── cmd_inspect.go      # inspect subcommand
 │       ├── cmd_status.go       # status subcommand
+│       ├── cmd_crl.go          # crl subcommand (sign, verify, inspect, check)
 │       ├── cmd_bsl_eval.go     # bsl-eval subcommand
 │       ├── cmd_sign_release.go # sign-release subcommand
 │       ├── cmd_verify_release.go # verify-release subcommand
@@ -75,10 +78,11 @@ license-go/
   4. Cryptographic signature verification against KeyRing with canonical data `DIV1.<payloadB64>`
   5. JSON payload unmarshaling
   6. Product identity match
-  7. Machine/cluster fingerprint match (if applicable)
-  8. NotBefore & Expiration checks (accounting for clock skew and grace periods)
-  9. Scope constraints check (environments, accounts, regions, clusters, namespaces, hosts)
-  10. Version constraints check (`MaxVersion` / `AllowedVersions`) and maintenance cutoff (`MaintenanceExpiresAt`)
+  7. Offline Revocation List (CRL) check (`WithRevocationList` / `DIVMORA_CRL` / `DIVMORA_CRL_FILE`): reject if license ID is revoked
+  8. Machine/cluster fingerprint match (if applicable)
+  9. NotBefore & Expiration checks (accounting for clock skew and grace periods)
+  10. Scope constraints check (environments, accounts, regions, clusters, namespaces, hosts)
+  11. Version constraints check (`MaxVersion` / `AllowedVersions`) and maintenance cutoff (`MaintenanceExpiresAt`)
 
 ---
 

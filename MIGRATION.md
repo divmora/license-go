@@ -62,6 +62,7 @@ All public verification, claims evaluation, and daemon management APIs remain un
 - **Manager**: `NewManager`, `ManagerConfig`, `Start`, `Stop`, `Claims`, `HasFeature`, `AssertFeature`, `CheckLimit`.
 - **KeyRing**: `NewKeyRing`, `KeyRingFromPEM`, `ResolveKeyRing`, `ResolvePublicKey`.
 - **Claims & Scoping**: `Claims`, `Customer`, `Scope`, `Status`, feature checks, quota checks, version bounds.
+- **Offline Revocation Lists (CRL) (v1.2.0+)**: `RevocationListClaims`, `RevocationEntry`, `ParseRevocationList`, `ResolveRevocationList`, `WithRevocationList`, `WithRevocationListFile`, `WithAutoResolvedRevocationList`.
 - **BSL 1.1**: `BSLPolicy`, `BSLAdditionalUseGrant`, `NewNonProductionGrant`, `NewFreeTierGrant`.
 - **Release Attestation**: `VerifyRelease`, `VerifyReleaseArmored`, `VerifyReleaseBinary`, `EvaluateProvenance`.
 - **Hardware Fingerprint**: `MachineFingerprint`, `Platform`, `DetectEnvironment`, `AutoDetectResolver`.
@@ -75,8 +76,32 @@ All public verification, claims evaluation, and daemon management APIs remain un
 If your service only verifies licenses using public keys, **no code changes are required**. Update your `go.mod` dependency as normal:
 
 ```bash
-go get github.com/divmora/license-go@latest
+go get github.com/divmora/license-go@v1.2.0
 ```
+
+### Adopting Offline Revocation Lists (CRL) (v1.2.0+)
+
+To protect air-gapped deployments against compromised or refunded license keys:
+
+1. In your validator constructor, enable auto-resolution of CRLs:
+```go
+validator, err := license.NewValidatorWithFallbackKey(
+    embeddedPublicKey,
+    license.WithProduct("gitlab-fleet-governor"),
+    license.WithAutoResolvedRevocationList(),
+)
+```
+2. Handle the typed revocation error during verification:
+```go
+claims, err := validator.VerifyEnv()
+if errors.Is(err, license.ErrLicenseRevoked) {
+    var revErr *license.LicenseRevokedError
+    if errors.As(err, &revErr) {
+        log.Fatalf("License %s was revoked on %s: %s", revErr.LicenseID, revErr.RevokedAt, revErr.Reason)
+    }
+}
+```
+3. Operators in air-gapped environments can supply CRL files via `/etc/divmora/crl.divcrl`, `DIVMORA_CRL_FILE`, or `DIVMORA_CRL`.
 
 ### For Unit Tests in Downstream Services
 
