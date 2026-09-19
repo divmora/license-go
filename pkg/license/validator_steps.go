@@ -423,9 +423,77 @@ func (v *Validator) VerifyWithResultAt(rawLicense string, now time.Time) (*Verif
 	}
 
 	// 0. Automatic BSL 1.1 Change Date Check
-	if !tampered && (v.serverTimeAttested || !v.authoritativeTime.IsZero()) && effectiveBSL != nil && effectiveBSL.IsConverted(evalTime) {
-		if strings.TrimSpace(rawLicense) == "" {
-			claims := &Claims{
+	if effectiveBSL != nil && effectiveBSL.IsConverted(evalTime) {
+		if !v.serverTimeAttested && v.authoritativeTime.IsZero() {
+			if strings.TrimSpace(rawLicense) == "" {
+				skewTolerance := v.clockSkew
+				if skewTolerance < 0 {
+					skewTolerance = 0
+				}
+				buildTime := v.effectiveBuildDateWithProv(prov)
+				drift := time.Duration(0)
+				serverAnchor := time.Time{}
+				if !buildTime.IsZero() {
+					drift = evalTime.UTC().Sub(buildTime)
+					serverAnchor = buildTime.UTC()
+				} else if !changeDate.IsZero() {
+					drift = evalTime.UTC().Sub(changeDate)
+				}
+				return nil, &ClockTamperingError{
+					LocalTime:      evalTime.UTC(),
+					ServerTime:     serverAnchor,
+					Skew:           drift,
+					MaxAllowedSkew: skewTolerance,
+					Reason:         fmt.Sprintf("offline forward clock tampering detected: evaluation time %s claims BSL Change Date %s has arrived without authoritative time attestation", evalTime.UTC().Format(time.RFC3339), changeDate.Format(time.RFC3339)),
+				}
+			}
+			// If rawLicense != "", do not grant BSL conversion; fall through to steps 1-11 to validate commercial license
+		} else {
+			if strings.TrimSpace(rawLicense) == "" {
+				claims := &Claims{
+					Product:  v.expectedProduct,
+					Plan:     "open-source",
+					Customer: Customer{Name: "Open Source Community"},
+					Features: []string{"*"},
+					Limits:   map[string]int64{},
+				}
+				return &VerificationResult{
+					Claims:             claims,
+					Status:             StatusActive,
+					BSLConverted:       true,
+					EffectiveLicense:   effectiveLic,
+					ChangeDate:         changeDate,
+					ClockTampered:      tampered,
+					ServerTimeAttested: v.serverTimeAttested || !v.authoritativeTime.IsZero(),
+					ServerTime:         v.authoritativeTime.UTC(),
+					ClockSkew:          skew,
+					ClockSkewTolerance: v.clockSkew,
+					EvaluationTime:     evalTime,
+					Provenance:         prov,
+				}, nil
+			}
+
+			vCopy := *v
+			vCopy.allowExpired = true
+			claims, err := vCopy.verifyTokenPayload(rawLicense, evalTime)
+			if err == nil {
+				return &VerificationResult{
+					Claims:             claims,
+					Status:             StatusActive,
+					BSLConverted:       true,
+					EffectiveLicense:   effectiveLic,
+					ChangeDate:         changeDate,
+					ClockTampered:      tampered,
+					ServerTimeAttested: v.serverTimeAttested || !v.authoritativeTime.IsZero(),
+					ServerTime:         v.authoritativeTime.UTC(),
+					ClockSkew:          skew,
+					ClockSkewTolerance: v.clockSkew,
+					EvaluationTime:     evalTime,
+					Provenance:         prov,
+				}, nil
+			}
+
+			claims = &Claims{
 				Product:  v.expectedProduct,
 				Plan:     "open-source",
 				Customer: Customer{Name: "Open Source Community"},
@@ -447,48 +515,6 @@ func (v *Validator) VerifyWithResultAt(rawLicense string, now time.Time) (*Verif
 				Provenance:         prov,
 			}, nil
 		}
-
-		vCopy := *v
-		vCopy.allowExpired = true
-		claims, err := vCopy.verifyTokenPayload(rawLicense, evalTime)
-		if err == nil {
-			return &VerificationResult{
-				Claims:             claims,
-				Status:             StatusActive,
-				BSLConverted:       true,
-				EffectiveLicense:   effectiveLic,
-				ChangeDate:         changeDate,
-				ClockTampered:      tampered,
-				ServerTimeAttested: v.serverTimeAttested || !v.authoritativeTime.IsZero(),
-				ServerTime:         v.authoritativeTime.UTC(),
-				ClockSkew:          skew,
-				ClockSkewTolerance: v.clockSkew,
-				EvaluationTime:     evalTime,
-				Provenance:         prov,
-			}, nil
-		}
-
-		claims = &Claims{
-			Product:  v.expectedProduct,
-			Plan:     "open-source",
-			Customer: Customer{Name: "Open Source Community"},
-			Features: []string{"*"},
-			Limits:   map[string]int64{},
-		}
-		return &VerificationResult{
-			Claims:             claims,
-			Status:             StatusActive,
-			BSLConverted:       true,
-			EffectiveLicense:   effectiveLic,
-			ChangeDate:         changeDate,
-			ClockTampered:      tampered,
-			ServerTimeAttested: v.serverTimeAttested || !v.authoritativeTime.IsZero(),
-			ServerTime:         v.authoritativeTime.UTC(),
-			ClockSkew:          skew,
-			ClockSkewTolerance: v.clockSkew,
-			EvaluationTime:     evalTime,
-			Provenance:         prov,
-		}, nil
 	}
 
 	if strings.TrimSpace(rawLicense) == "" {

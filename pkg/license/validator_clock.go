@@ -168,29 +168,6 @@ func (v *Validator) resolveEvaluationTimeWithProv(localNow time.Time, prov *Rele
 			}
 		}
 
-		// Offline / air-gapped clock defense: autonomous BSL 1.1 open-source conversion
-		// cannot be granted based solely on an unauthenticated local system clock.
-		if v.bslPolicy != nil && v.bslPolicy.IsConverted(localUTC) && !v.serverTimeAttested {
-			drift := time.Duration(0)
-			serverAnchor := time.Time{}
-			if !buildTime.IsZero() {
-				drift = localUTC.Sub(buildTime)
-				serverAnchor = buildTime.UTC()
-			} else {
-				changeDate := v.bslPolicy.ChangeDate()
-				if !changeDate.IsZero() {
-					drift = localUTC.Sub(changeDate)
-				}
-			}
-			return localNow, true, drift, &ClockTamperingError{
-				LocalTime:      localUTC,
-				ServerTime:     serverAnchor,
-				Skew:           drift,
-				MaxAllowedSkew: skewTolerance,
-				Reason:         fmt.Sprintf("offline forward clock tampering detected: evaluation time %s claims BSL Change Date %s has arrived without authoritative time attestation", localUTC.Format(time.RFC3339), v.bslPolicy.ChangeDate().Format(time.RFC3339)),
-			}
-		}
-
 		return evalTime, false, 0, nil
 	}
 
