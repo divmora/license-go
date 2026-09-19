@@ -56,6 +56,12 @@ type ManagerConfig struct {
 	// LicenseString is the raw license token or armored block (used if LicenseFile is empty).
 	LicenseString string
 
+	// CRLFile is the filesystem path to a signed Certificate Revocation List (CRL).
+	CRLFile string
+
+	// CRLString is the raw compact token or armored PEM CRL string.
+	CRLString string
+
 	// Policy defines the operational enforcement mode (PolicyStrict, PolicyDegraded, PolicyWarnOnly).
 	// Defaults to PolicyStrict if not specified.
 	Policy EnforcementPolicy
@@ -203,6 +209,12 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 				cfg.LicenseString = resolved.Content
 			}
 		}
+	}
+
+	if cfg.CRLFile != "" {
+		WithRevocationListFile(cfg.CRLFile)(cfg.Validator)
+	} else if cfg.CRLString != "" {
+		WithRevocationList(cfg.CRLString)(cfg.Validator)
 	}
 
 	m := &Manager{

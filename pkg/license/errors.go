@@ -95,6 +95,15 @@ var (
 
 	// ErrSymlinkNotAllowed is returned when a license or key file is a symbolic link.
 	ErrSymlinkNotAllowed = errors.New("license: symbolic links are not permitted for security")
+
+	// ErrLicenseRevoked is returned when a license has been explicitly invalidated by a Certificate Revocation List (CRL).
+	ErrLicenseRevoked = errors.New("license: license has been revoked")
+
+	// ErrInvalidCRL is returned when a CRL token format, signature, or payload schema is invalid.
+	ErrInvalidCRL = errors.New("license: invalid certificate revocation list format or signature")
+
+	// ErrCRLExpired is returned when a CRL has exceeded its NextUpdate validity cutoff.
+	ErrCRLExpired = errors.New("license: certificate revocation list has expired")
 )
 
 // LimitExceededError provides structured detail when a quota is exceeded.
@@ -244,4 +253,30 @@ func (e *CommercialLicenseRequiredError) Error() string {
 
 func (e *CommercialLicenseRequiredError) Is(target error) bool {
 	return target == ErrCommercialLicenseRequired || target == ErrLicenseNotFound
+}
+
+// LicenseRevokedError provides structured details when a license has been invalidated by a CRL.
+type LicenseRevokedError struct {
+	LicenseID string
+	RevokedAt time.Time
+	Reason    string
+	CRLID     string
+}
+
+func (e *LicenseRevokedError) Error() string {
+	msg := fmt.Sprintf("license: license %q has been revoked", e.LicenseID)
+	if !e.RevokedAt.IsZero() {
+		msg += fmt.Sprintf(" on %s", e.RevokedAt.UTC().Format(time.RFC3339))
+	}
+	if e.Reason != "" {
+		msg += fmt.Sprintf(" (reason: %s)", e.Reason)
+	}
+	if e.CRLID != "" {
+		msg += fmt.Sprintf(" [crl: %s]", e.CRLID)
+	}
+	return msg
+}
+
+func (e *LicenseRevokedError) Is(target error) bool {
+	return target == ErrLicenseRevoked
 }

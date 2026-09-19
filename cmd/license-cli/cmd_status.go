@@ -28,6 +28,7 @@ func runStatus(args []string) error {
 	noFeatures := fs.Bool("no-features", false, "Omit entitled features list")
 	noScopes := fs.Bool("no-scopes", false, "Omit operational scope constraints")
 	noProvenance := fs.Bool("no-provenance", false, "Omit release provenance attestation details")
+	crlFlag := fs.String("crl", "", "Path to signed Certificate Revocation List (CRL) file or raw DIVCRL1 token")
 
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -116,6 +117,15 @@ func runStatus(args []string) error {
 		}
 		if *binaryPath != "" {
 			valOpts = append(valOpts, license.WithBinaryPath(*binaryPath))
+		}
+		if *crlFlag != "" {
+			if data, err := os.ReadFile(*crlFlag); err == nil {
+				valOpts = append(valOpts, license.WithRevocationList(string(data)))
+			} else {
+				valOpts = append(valOpts, license.WithRevocationList(*crlFlag))
+			}
+		} else if res, err := license.ResolveCRL(); err == nil {
+			valOpts = append(valOpts, license.WithRevocationList(res.Content))
 		}
 
 		validator, err := license.NewValidatorWithKeyRing(ring, valOpts...)

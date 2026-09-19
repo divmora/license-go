@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -50,6 +51,11 @@ type Validator struct {
 	currentFeatures           []string
 	tierFeatures              TierFeatures
 	allowEnvKeyOverride       bool
+	crl                       *RevocationListClaims
+	crlRaw                    string
+	crlStrictExpiry           bool
+	crlVerifiedKeyID          string
+	crlVerifiedKeyStatus      KeyStatus
 	initErr                   error
 }
 
@@ -414,6 +420,71 @@ func (v *Validator) EvaluateProvenance() (*ReleaseProvenance, error) {
 	return EvaluateProvenance(v.releaseAttestation, v.keyRing, params)
 }
 
+// WithRevocationList attaches a cryptographically signed CRL token or armored PEM block.
+func WithRevocationList(rawOrArmoredCRL string) ValidatorOption {
+	return func(v *Validator) {
+		v.crlRaw = rawOrArmoredCRL
+	}
+}
+
+// WithRevocationListFile loads a cryptographically signed CRL from a file on disk.
+func WithRevocationListFile(filePath string) ValidatorOption {
+	return func(v *Validator) {
+		fi, err := os.Lstat(filePath)
+		if err != nil {
+			v.initErr = fmt.Errorf("failed to stat crl file: %w", err)
+			return
+		}
+		if fi.Mode()&os.ModeSymlink != 0 {
+			v.initErr = fmt.Errorf("%w: crl file %s is a symlink", ErrSymlinkNotAllowed, filePath)
+			return
+		}
+		data, err := os.ReadFile(filePath)
+		if err != nil {
+			v.initErr = fmt.Errorf("failed to read crl file: %w", err)
+			return
+		}
+		v.crlRaw = string(data)
+	}
+}
+
+// WithCRLClaims configures pre-verified RevocationListClaims directly on the validator.
+func WithCRLClaims(claims *RevocationListClaims) ValidatorOption {
+	return func(v *Validator) {
+		v.crl = claims
+	}
+}
+
+// WithCRLStrictExpiry enforces that an expired CRL (past NextUpdate) causes validation to fail with ErrCRLExpired.
+func WithCRLStrictExpiry(strict bool) ValidatorOption {
+	return func(v *Validator) {
+		v.crlStrictExpiry = strict
+	}
+}
+
+// EvaluateCRL verifies the cryptographic signature of the attached CRL against the KeyRing and returns the claims.
+func (v *Validator) EvaluateCRL() (*RevocationListClaims, error) {
+	if v.initErr != nil {
+		return nil, v.initErr
+	}
+	if v.crl != nil {
+		return v.crl, nil
+	}
+	if strings.TrimSpace(v.crlRaw) == "" {
+		return nil, nil
+	}
+	claims, matchedKey, err := VerifyCRL(v.crlRaw, v.keyRing)
+	if err != nil {
+		return nil, err
+	}
+	v.crl = claims
+	if matchedKey != nil {
+		v.crlVerifiedKeyID = matchedKey.ID
+		v.crlVerifiedKeyStatus = matchedKey.Status
+	}
+	return v.crl, nil
+}
+
 // PublicKey returns the primary public key in the validator's KeyRing, or nil if none is configured.
 func (v *Validator) PublicKey() ed25519.PublicKey {
 	if v.keyRing != nil && v.keyRing.Primary() != nil {
@@ -520,6 +591,18 @@ type VerificationResult struct {
 
 	// FingerprintMatched reports whether the license's node-lock fingerprint was matched.
 	FingerprintMatched bool
+
+	// Revoked reports whether the license was invalidated by a Certificate Revocation List (CRL).
+	Revoked bool
+
+	// RevocationReason provides the stated cause for revocation (e.g. "compromised", "refunded").
+	RevocationReason string
+
+	// RevocationDate is the timestamp when the license was revoked according to the CRL.
+	RevocationDate time.Time
+
+	// CRLID identifies the specific Revocation List that invalidated the license.
+	CRLID string
 }
 
 // StatusMessage returns a standardized human-readable description of the verification result.
@@ -528,6 +611,18 @@ type VerificationResult struct {
 func (r *VerificationResult) StatusMessage() string {
 	if r == nil {
 		return "No verification result"
+	}
+
+	if r.Revoked || r.Status == StatusRevoked {
+		dateStr := ""
+		if !r.RevocationDate.IsZero() {
+			dateStr = fmt.Sprintf(" on %s", r.RevocationDate.Format("2006-01-02"))
+		}
+		reasonStr := ""
+		if r.RevocationReason != "" {
+			reasonStr = fmt.Sprintf(" (Reason: %s)", r.RevocationReason)
+		}
+		return fmt.Sprintf("REVOKED: License has been revoked%s%s", dateStr, reasonStr)
 	}
 
 	if r.BSLConverted {

@@ -578,12 +578,65 @@ if err != nil {
 
 ---
 
+### Workflow M: Offline Certificate Revocation Lists (CRL)
+
+In air-gapped or disconnected enterprise environments without internet access, invalidate compromised, leaked, or refunded license IDs using cryptographically signed Revocation Lists (`.divcrl`):
+
+```bash
+# 1. Mint a signed CRL in the licensing backoffice:
+license-cli crl sign \
+  -private-key /path/to/private.pem \
+  -id "crl-2026-001" \
+  -next-update 30d \
+  -entries "lic-uuid-1=compromised,lic-uuid-2=refunded" \
+  -out ./crl.divcrl \
+  -armored
+
+# 2. Verify CRL signature against trusted public key:
+license-cli crl verify -public-key /path/to/public.pem -crl ./crl.divcrl
+
+# 3. Inspect CRL contents without verification:
+license-cli crl inspect -crl ./crl.divcrl
+
+# 4. Check if a specific license ID is revoked:
+license-cli crl check -crl ./crl.divcrl -id "lic-uuid-1"
+
+# 5. Verify a customer license with local CRL enforcement:
+license-cli verify -public-key /path/to/public.pem -license ./license.key -crl ./crl.divcrl
+```
+
+In Go services or background daemons:
+
+```go
+validator, err := license.NewValidatorWithFallbackKey(
+	defaultPublicKeyBase64,
+	license.WithProduct("gitlab-fleet-governor"),
+	license.WithRevocationListFile("/etc/divmora/crl.divcrl"),
+)
+if err != nil {
+	log.Fatal(err)
+}
+
+claims, err := validator.VerifyEnv()
+if errors.Is(err, license.ErrLicenseRevoked) {
+	var revErr *license.LicenseRevokedError
+	if errors.As(err, &revErr) {
+		log.Fatalf("License %s has been revoked on %s: %s", revErr.LicenseID, revErr.RevokedAt, revErr.Reason)
+	}
+}
+```
+
+---
+
 ## 4. Troubleshooting & Sentinel Errors
 
 | Error | Cause | Resolution |
 | :--- | :--- | :--- |
 | `ErrInvalidSignature` | License payload or signature was altered or signed by an untrusted key | Verify that the license was signed with a trusted private key in the validator's KeyRing. |
 | `ErrKeyRevoked` | License was signed by a key explicitly marked as `REVOKED` | The key has been compromised or retired. Re-issue the license using an active signing key. |
+| `ErrLicenseRevoked` | License ID is listed in the Certificate Revocation List (CRL) | The customer's license was compromised, refunded, or terminated. Re-issue a replacement license. |
+| `ErrInvalidCRL` | CRL token format, signature, or payload schema is invalid | Ensure the CRL was signed by an authorized key in the KeyRing. |
+| `ErrCRLExpired` | CRL has passed its `NextUpdate` validity cutoff date under strict policy | Download and distribute an updated CRL snapshot. |
 | `ErrProductMismatch` | License was issued for a different Divmora product | Check that `-product` in the license matches the service product name. |
 | `ErrExpired` | Current time is past `ExpiresAt` + clock skew tolerance | Re-issue a renewed license. |
 | `ErrNotYetValid` | `NotBefore` is in the future | Check server system time / NTP sync. |

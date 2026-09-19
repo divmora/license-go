@@ -143,6 +143,24 @@ func (v *Validator) verifyClaimsWithDetails(payloadJSON []byte, now time.Time) (
 		return nil, nil, false, err
 	}
 
+	// 2b. Check against Certificate Revocation List (CRL) if configured
+	if _, err := v.EvaluateCRL(); err != nil {
+		return nil, nil, false, err
+	}
+	if v.crl != nil {
+		if v.crlStrictExpiry && v.crl.IsExpiredAt(now.Add(v.clockSkew)) {
+			return nil, nil, false, ErrCRLExpired
+		}
+		if entry, revoked := v.crl.IsRevoked(claims.ID); revoked {
+			return nil, nil, false, &LicenseRevokedError{
+				LicenseID: claims.ID,
+				RevokedAt: entry.RevokedAt,
+				Reason:    entry.Reason,
+				CRLID:     v.crl.ID,
+			}
+		}
+	}
+
 	// 3. Product match check
 	if v.expectedProduct != "" && !claims.IsValidForProduct(v.expectedProduct) {
 		return nil, nil, false, fmt.Errorf("%w: expected %q, got %q", ErrProductMismatch, v.expectedProduct, claims.Product)

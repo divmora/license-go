@@ -31,7 +31,6 @@ This document tracks upcoming capabilities, planned optimizations, and ecosystem
 - [ ] **gRPC Interceptors**: Provide `UnaryServerInterceptor` and `StreamServerInterceptor` for Go microservices.
 
 ### 📦 Air-Gapped & Enterprise Workflows
-- [ ] **Offline Revocation Lists (CRL)**: Support local cryptographically signed revocation lists to invalidate compromised or leaked license IDs in air-gapped environments without network access.
 - [ ] **Signed Audit & Compliance Receipts**: Offline usage snapshot generator that outputs cryptographically signed receipts to verify historical compliance during vendor audits.
 
 ### 🌐 Online Activation & Centralized Revocation

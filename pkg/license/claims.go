@@ -332,6 +332,8 @@ const (
 	StatusExpired Status = "EXPIRED"
 	// StatusNotYetValid indicates the license NotBefore timestamp is in the future.
 	StatusNotYetValid Status = "NOT_YET_VALID"
+	// StatusRevoked indicates the license has been invalidated by a Certificate Revocation List (CRL).
+	StatusRevoked Status = "REVOKED"
 )
 
 // Status returns the operational lifecycle Status of the license at the current time.

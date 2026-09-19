@@ -36,6 +36,8 @@ func runCLI(args []string) error {
 		return dispatchKey(subArgs)
 	case "bsl":
 		return dispatchBSL(subArgs)
+	case "crl":
+		return dispatchCRL(subArgs)
 
 	// Standalone utility commands
 	case "fingerprint":
@@ -64,6 +66,14 @@ func runCLI(args []string) error {
 		return runInspectRelease(subArgs)
 	case "bsl-eval":
 		return runBSLEval(subArgs)
+	case "sign-crl":
+		return runSignCRL(subArgs)
+	case "verify-crl":
+		return runVerifyCRL(subArgs)
+	case "inspect-crl":
+		return runInspectCRL(subArgs)
+	case "check-crl":
+		return runCheckCRL(subArgs)
 
 	// Global help
 	case "help", "-h", "--help", "-help":
@@ -159,6 +169,29 @@ func dispatchBSL(args []string) error {
 	}
 }
 
+func dispatchCRL(args []string) error {
+	if len(args) == 0 || isHelp(args[0]) {
+		printCRLUsage()
+		return nil
+	}
+	subcmd := args[0]
+	subArgs := args[1:]
+	switch subcmd {
+	case "sign", "sign-crl":
+		return runSignCRL(subArgs)
+	case "verify", "verify-crl":
+		return runVerifyCRL(subArgs)
+	case "inspect", "inspect-crl":
+		return runInspectCRL(subArgs)
+	case "check", "check-crl":
+		return runCheckCRL(subArgs)
+	default:
+		fmt.Fprintf(os.Stderr, "Unknown crl command %q\n\n", subcmd)
+		printCRLUsage()
+		return fmt.Errorf("unknown crl command %q", subcmd)
+	}
+}
+
 func isHelp(s string) bool {
 	return s == "help" || s == "-h" || s == "--help" || s == "-help"
 }
@@ -190,12 +223,19 @@ Command Groups:
   bsl             Business Source License (BSL 1.1) entitlement and conversion
     eval            Evaluate BSL 1.1 dual-licensing entitlement and Additional Use Grants
 
+  crl             Certificate Revocation Lists (CRL) for air-gapped license invalidation
+    sign            Mint and sign a new Certificate Revocation List (DIVCRL1)
+    verify          Verify CRL signature and validity against trusted KeyRing
+    inspect         Decode and inspect revoked license IDs and metadata
+    check           Check whether a specific license ID is revoked in a CRL
+
 Utility Commands:
   fingerprint     Inspect deterministic machine/cluster hardware fingerprint
 
 Common Shortcuts (Backward-Compatible):
   issue, verify, inspect, status, request, keygen, keyring,
-  sign-release, verify-release, inspect-release, bsl-eval
+  sign-release, verify-release, inspect-release, bsl-eval,
+  sign-crl, verify-crl, inspect-crl, check-crl
 
 Use "license-cli <group> -help" or "license-cli <command> -help" for more information.`)
 }
@@ -253,4 +293,19 @@ Available Commands:
   eval            Evaluate BSL 1.1 dual-licensing entitlement and Additional Use Grants
 
 Use "license-cli bsl <command> -help" for more information about a command.`)
+}
+
+func printCRLUsage() {
+	fmt.Println(`license-cli crl - Certificate Revocation Lists (CRL) for air-gapped license invalidation
+
+Usage:
+  license-cli crl <command> [arguments]
+
+Available Commands:
+  sign            Mint and sign a new Certificate Revocation List (DIVCRL1)
+  verify          Verify CRL signature and validity against trusted KeyRing
+  inspect         Decode and inspect revoked license IDs and metadata
+  check           Check whether a specific license ID is revoked in a CRL
+
+Use "license-cli crl <command> -help" for more information about a command.`)
 }

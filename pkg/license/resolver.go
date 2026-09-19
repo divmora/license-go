@@ -32,6 +32,15 @@ const (
 
 	// DefaultPublicKeyPath is the standard Linux/container filesystem path for Divmora trusted public keys.
 	DefaultPublicKeyPath = "/etc/divmora/public.pem"
+
+	// EnvCRL is the environment variable containing a raw compact token or armored PEM Certificate Revocation List.
+	EnvCRL = "DIVMORA_CRL"
+
+	// EnvCRLFile is the environment variable containing the filesystem path to a signed CRL file.
+	EnvCRLFile = "DIVMORA_CRL_FILE"
+
+	// DefaultCRLPath is the standard Linux/container filesystem path for Divmora CRLs.
+	DefaultCRLPath = "/etc/divmora/crl.divcrl"
 )
 
 var (
@@ -486,4 +495,104 @@ func ResolvePublicKey(fallbackKeys ...string) (ed25519.PublicKey, error) {
 		return nil, ErrMissingPublicKey
 	}
 	return ring.Primary().PublicKey, nil
+}
+
+// ResolvedCRL contains the resolved CRL token text and origin metadata.
+type ResolvedCRL struct {
+	Content  string
+	FilePath string
+	Source   string
+}
+
+// ResolveCRL locates and reads a Divmora CRL following the standard resolution hierarchy:
+//  1. Explicit source argument (if provided): existing file or inline token.
+//  2. DIVMORA_CRL environment variable.
+//  3. DIVMORA_CRL_FILE environment variable.
+//  4. Default system path (/etc/divmora/crl.divcrl).
+func ResolveCRL(explicitSource ...string) (*ResolvedCRL, error) {
+	for _, rawSrc := range explicitSource {
+		src := strings.TrimSpace(rawSrc)
+		if src == "" {
+			continue
+		}
+		if fi, err := os.Lstat(src); err == nil && !fi.IsDir() {
+			if fi.Mode()&os.ModeSymlink != 0 {
+				return nil, fmt.Errorf("%w: crl file %s is a symlink", ErrSymlinkNotAllowed, src)
+			}
+			data, err := os.ReadFile(src)
+			if err != nil {
+				return nil, fmt.Errorf("failed to read crl file %s: %w", src, err)
+			}
+			return &ResolvedCRL{
+				Content:  string(data),
+				FilePath: src,
+				Source:   "explicit_file",
+			}, nil
+		}
+		if strings.HasPrefix(src, ProtocolPrefixCRL+".") || strings.Contains(src, PEMTypeRevocationList) {
+			return &ResolvedCRL{
+				Content:  src,
+				FilePath: "",
+				Source:   "explicit_token",
+			}, nil
+		}
+		return nil, fmt.Errorf("crl file not found: %s", src)
+	}
+
+	if envVal := strings.TrimSpace(os.Getenv(EnvCRL)); envVal != "" {
+		if fi, err := os.Lstat(envVal); err == nil && !fi.IsDir() {
+			if fi.Mode()&os.ModeSymlink != 0 {
+				return nil, fmt.Errorf("%w: crl file %s is a symlink", ErrSymlinkNotAllowed, envVal)
+			}
+			data, err := os.ReadFile(envVal)
+			if err != nil {
+				return nil, fmt.Errorf("failed to read crl file from %s (%s): %w", EnvCRL, envVal, err)
+			}
+			return &ResolvedCRL{
+				Content:  string(data),
+				FilePath: envVal,
+				Source:   "env:" + EnvCRL,
+			}, nil
+		}
+		return &ResolvedCRL{
+			Content:  envVal,
+			FilePath: "",
+			Source:   "env:" + EnvCRL,
+		}, nil
+	}
+
+	if envFile := strings.TrimSpace(os.Getenv(EnvCRLFile)); envFile != "" {
+		fi, err := os.Lstat(envFile)
+		if err != nil {
+			return nil, fmt.Errorf("crl file specified in %s (%s) not found: %w", EnvCRLFile, envFile, err)
+		}
+		if fi.Mode()&os.ModeSymlink != 0 {
+			return nil, fmt.Errorf("%w: crl file %s is a symlink", ErrSymlinkNotAllowed, envFile)
+		}
+		data, err := os.ReadFile(envFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read crl file from %s (%s): %w", EnvCRLFile, envFile, err)
+		}
+		return &ResolvedCRL{
+			Content:  string(data),
+			FilePath: envFile,
+			Source:   "env:" + EnvCRLFile,
+		}, nil
+	}
+
+	if fi, err := os.Lstat(DefaultCRLPath); err == nil && !fi.IsDir() {
+		if fi.Mode()&os.ModeSymlink != 0 {
+			return nil, fmt.Errorf("%w: default crl file %s is a symlink", ErrSymlinkNotAllowed, DefaultCRLPath)
+		}
+		data, err := os.ReadFile(DefaultCRLPath)
+		if err == nil {
+			return &ResolvedCRL{
+				Content:  string(data),
+				FilePath: DefaultCRLPath,
+				Source:   "default_file",
+			}, nil
+		}
+	}
+
+	return nil, errors.New("license: crl not found")
 }

@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -1318,4 +1319,120 @@ func TestCLI_IssueFlagsAndErrors(t *testing.T) {
 	}
 
 	_ = pubKeyPath
+}
+
+func TestCLI_CRLCommands(t *testing.T) {
+	tmpDir := t.TempDir()
+	privKeyPath := filepath.Join(tmpDir, "priv.pem")
+	pubKeyPath := filepath.Join(tmpDir, "pub.pem")
+	crlPath := filepath.Join(tmpDir, "revocations.crl")
+	goodLicensePath := filepath.Join(tmpDir, "good.key")
+	revokedLicensePath := filepath.Join(tmpDir, "revoked.key")
+
+	// 1. Generate keys
+	if err := runKeygen([]string{"-out-dir", tmpDir, "-priv-name", "priv.pem", "-pub-name", "pub.pem"}); err != nil {
+		t.Fatalf("keygen failed: %v", err)
+	}
+
+	// 2. Issue good license
+	if err := runIssue([]string{
+		"-private-key", privKeyPath,
+		"-product", "test-app",
+		"-customer", "Valid Customer",
+		"-out", goodLicensePath,
+	}); err != nil {
+		t.Fatalf("issue good license failed: %v", err)
+	}
+
+	// 3. Issue license to be revoked (we inspect its ID)
+	if err := runIssue([]string{
+		"-private-key", privKeyPath,
+		"-product", "test-app",
+		"-customer", "Leaked Customer",
+		"-out", revokedLicensePath,
+	}); err != nil {
+		t.Fatalf("issue revoked license failed: %v", err)
+	}
+
+	revokedClaims, err := license.InspectFromFile(revokedLicensePath)
+	if err != nil {
+		t.Fatalf("inspect revoked license failed: %v", err)
+	}
+
+	// 4. Sign CRL revoking the leaked license
+	err = runCLI([]string{
+		"crl", "sign",
+		"-private-key", privKeyPath,
+		"-id", "crl-test-cli",
+		"-issuer", "divmora.com/crl",
+		"-next-update", "30d",
+		"-entries", revokedClaims.ID + "=compromised_key",
+		"-out", crlPath,
+		"-armored",
+	})
+	if err != nil {
+		t.Fatalf("crl sign failed: %v", err)
+	}
+
+	// 5. Verify CRL via CLI
+	if err := runCLI([]string{"crl", "verify", "-public-key", pubKeyPath, "-crl", crlPath}); err != nil {
+		t.Fatalf("crl verify failed: %v", err)
+	}
+
+	// 6. Inspect CRL via CLI
+	if err := runCLI([]string{"crl", "inspect", "-crl", crlPath}); err != nil {
+		t.Fatalf("crl inspect failed: %v", err)
+	}
+
+	// 7. Check CRL: revoked license returns error
+	if err := runCLI([]string{"crl", "check", "-crl", crlPath, "-id", revokedClaims.ID}); err == nil {
+		t.Fatalf("expected crl check to fail for revoked license ID %s", revokedClaims.ID)
+	}
+
+	// 8. Check CRL: unrevoked ID passes
+	if err := runCLI([]string{"crl", "check", "-crl", crlPath, "-id", "unrevoked-id-000"}); err != nil {
+		t.Fatalf("crl check failed for unrevoked license: %v", err)
+	}
+
+	// 9. Verify good license with CRL: passes
+	err = runCLI([]string{
+		"verify",
+		"-public-key", pubKeyPath,
+		"-license", goodLicensePath,
+		"-product", "test-app",
+		"-crl", crlPath,
+	})
+	if err != nil {
+		t.Fatalf("verify good license with CRL failed: %v", err)
+	}
+
+	// 10. Verify revoked license with CRL: fails with revocation error
+	err = runCLI([]string{
+		"verify",
+		"-public-key", pubKeyPath,
+		"-license", revokedLicensePath,
+		"-product", "test-app",
+		"-crl", crlPath,
+	})
+	if err == nil {
+		t.Fatalf("expected verify of revoked license with CRL to fail, got nil")
+	}
+	if !strings.Contains(err.Error(), "revoked") {
+		t.Fatalf("expected error to mention revoked, got: %v", err)
+	}
+
+	// 11. Test flat shortcut: sign-crl
+	crlFlatPath := filepath.Join(tmpDir, "flat.crl")
+	if err := runCLI([]string{"sign-crl", "-private-key", privKeyPath, "-entries", "id-123=test", "-out", crlFlatPath}); err != nil {
+		t.Fatalf("sign-crl shortcut failed: %v", err)
+	}
+	if err := runCLI([]string{"verify-crl", "-public-key", pubKeyPath, "-crl", crlFlatPath}); err != nil {
+		t.Fatalf("verify-crl shortcut failed: %v", err)
+	}
+	if err := runCLI([]string{"inspect-crl", "-crl", crlFlatPath}); err != nil {
+		t.Fatalf("inspect-crl shortcut failed: %v", err)
+	}
+	if err := runCLI([]string{"check-crl", "-crl", crlFlatPath, "-id", "id-123"}); err == nil {
+		t.Fatalf("expected check-crl to report revoked for id-123")
+	}
 }

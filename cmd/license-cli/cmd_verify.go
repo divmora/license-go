@@ -37,6 +37,8 @@ func runVerify(args []string) error {
 	gitCommit := fs.String("git-commit", "", "Current git commit SHA to assert against release attestation")
 	binaryPath := fs.String("binary", "", "Path to running binary executable to assert SHA-256 digest against release attestation")
 	autoFingerprint := fs.Bool("auto-fingerprint", true, "Automatically resolve and match machine/cluster fingerprint for node-locked licenses (default: true)")
+	crlFlag := fs.String("crl", "", "Path to signed Certificate Revocation List (CRL) file or raw DIVCRL1 token")
+	strictCRL := fs.Bool("strict-crl", false, "Fail verification if CRL is expired past NextUpdate")
 
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -165,6 +167,19 @@ func runVerify(args []string) error {
 	}
 	if *binaryPath != "" {
 		opts = append(opts, license.WithBinaryPath(*binaryPath))
+	}
+	if *crlFlag != "" {
+		data, err := os.ReadFile(*crlFlag)
+		if err == nil {
+			opts = append(opts, license.WithRevocationList(string(data)))
+		} else {
+			opts = append(opts, license.WithRevocationList(*crlFlag))
+		}
+	} else if res, err := license.ResolveCRL(); err == nil {
+		opts = append(opts, license.WithRevocationList(res.Content))
+	}
+	if *strictCRL {
+		opts = append(opts, license.WithCRLStrictExpiry(true))
 	}
 
 	validator, err := license.NewValidatorWithKeyRing(ring, opts...)
