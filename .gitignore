@@ -12,6 +12,7 @@ bin/
 *.lic
 *.bak
 test-keys/
+keys/
 
 # IDE & OS
 .DS_Store
