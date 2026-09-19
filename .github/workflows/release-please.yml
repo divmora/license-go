@@ -4,6 +4,23 @@ on:
   push:
     branches:
       - main
+  workflow_dispatch:
+    inputs:
+      force-release:
+        description: 'Force GoReleaser execution (bypass Release Please check)'
+        type: boolean
+        required: false
+        default: false
+      tag-name:
+        description: 'Git tag to release (e.g. v1.2.0)'
+        type: string
+        required: false
+        default: ''
+      version:
+        description: 'Version string without leading v (e.g. 1.2.0)'
+        type: string
+        required: false
+        default: ''
 
 permissions:
   contents: write
@@ -13,4 +30,8 @@ permissions:
 jobs:
   release:
     uses: divmora/.github/.github/workflows/go-release.yml@main
+    with:
+      force-release: ${{ inputs.force-release || false }}
+      tag-name: ${{ inputs.tag-name || '' }}
+      version: ${{ inputs.version || '' }}
     secrets: inherit
