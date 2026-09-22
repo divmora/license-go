@@ -161,9 +161,18 @@ func TestValidator_BSLConversionWorkflow(t *testing.T) {
 		t.Fatalf("expected commercial feature to be present")
 	}
 
-	// 3. After Change Date: Empty license token automatically succeeds with open-source entitlements
+	// 3. After Change Date: Empty license token automatically succeeds with open-source entitlements when authoritative time is attested!
 	afterDate := changeDate.AddDate(0, 1, 0) // 2028-02-01
-	openRes, err := validator.VerifyWithResultAt("", afterDate)
+	validatorAttested, err := license.NewValidator(pub,
+		license.WithProduct("gitlab-fleet-governor"),
+		license.WithBSLPolicy(bslPolicy),
+		license.WithServerTimeAttestation(afterDate, 1*time.Hour),
+	)
+	if err != nil {
+		t.Fatalf("failed to create attested validator: %v", err)
+	}
+
+	openRes, err := validatorAttested.VerifyWithResultAt("", afterDate)
 	if err != nil {
 		t.Fatalf("expected empty license to succeed after Change Date, got: %v", err)
 	}
@@ -180,8 +189,8 @@ func TestValidator_BSLConversionWorkflow(t *testing.T) {
 		t.Fatalf("expected wildcard features in open-source claims")
 	}
 
-	// 4. After Change Date: Even an expired commercial token succeeds
-	expiredRes, err := validator.VerifyWithResultAt(token, afterDate)
+	// 4. After Change Date: Even an expired commercial token succeeds with attested time
+	expiredRes, err := validatorAttested.VerifyWithResultAt(token, afterDate)
 	if err != nil {
 		t.Fatalf("expected expired token to succeed after Change Date, got: %v", err)
 	}
@@ -259,6 +268,113 @@ func TestValidator_ClockTamperingDefense(t *testing.T) {
 	}
 	if res.EffectiveLicense != "BSL-1.1" {
 		t.Fatalf("expected BSL-1.1 license, got %s", res.EffectiveLicense)
+	}
+}
+
+func TestValidator_ForwardClockTamperingBSLConversionDefeated(t *testing.T) {
+	t.Parallel()
+
+	pub, priv, err := license.GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("failed to generate key pair: %v", err)
+	}
+	signer, err := license.NewSigner(priv)
+	if err != nil {
+		t.Fatalf("failed to create signer: %v", err)
+	}
+
+	releaseDate := time.Date(2025, time.January, 1, 0, 0, 0, 0, time.UTC)
+	bslPolicy := license.BSLPolicy{
+		ReleaseDate:       releaseDate,
+		ChangePeriodYears: 3,
+	}
+
+	// Attacker advances local host clock to 2029 (4 years in future, claiming BSL conversion)
+	tamperedHostTime := releaseDate.AddDate(4, 0, 0) // 2029-01-01
+
+	validatorUnauthenticated, err := license.NewValidator(pub,
+		license.WithProduct("gitlab-fleet-governor"),
+		license.WithBSLPolicy(bslPolicy),
+	)
+	if err != nil {
+		t.Fatalf("failed to create validator: %v", err)
+	}
+
+	// 1. Empty license token past ChangeDate without authoritative time -> Rejected with ClockTamperingError
+	_, err = validatorUnauthenticated.VerifyWithResultAt("", tamperedHostTime)
+	if !errors.Is(err, license.ErrClockTamperingDetected) {
+		t.Fatalf("expected ErrClockTamperingDetected on forward clock tampering with empty license, got: %v", err)
+	}
+
+	var clockErr *license.ClockTamperingError
+	if !errors.As(err, &clockErr) {
+		t.Fatalf("expected error to be *ClockTamperingError, got: %T", err)
+	}
+	if !strings.Contains(clockErr.Reason, "offline forward clock tampering detected") {
+		t.Errorf("unexpected clock tampering reason: %s", clockErr.Reason)
+	}
+
+	// 2. Valid, unexpired commercial license succeeds past ChangeDate without authoritative time
+	validClaims := license.Claims{
+		Product:   "gitlab-fleet-governor",
+		Plan:      "enterprise",
+		Customer:  license.Customer{Name: "Enterprise Customer"},
+		IssuedAt:  releaseDate,
+		ExpiresAt: tamperedHostTime.AddDate(1, 0, 0), // Valid at tamperedHostTime
+	}
+	validToken, err := signer.Sign(validClaims)
+	if err != nil {
+		t.Fatalf("failed to sign valid token: %v", err)
+	}
+
+	validRes, err := validatorUnauthenticated.VerifyWithResultAt(validToken, tamperedHostTime)
+	if err != nil {
+		t.Fatalf("expected valid unexpired commercial license to succeed past ChangeDate without authoritative time, got: %v", err)
+	}
+	if validRes.BSLConverted {
+		t.Fatalf("expected BSLConverted to be false when falling back to commercial claims evaluation without authoritative time")
+	}
+	if validRes.Claims.Plan != "enterprise" {
+		t.Errorf("expected plan 'enterprise', got %s", validRes.Claims.Plan)
+	}
+
+	// 3. Expired commercial license fails with ErrExpired past ChangeDate without authoritative time
+	expiredClaims := license.Claims{
+		Product:   "gitlab-fleet-governor",
+		Plan:      "enterprise",
+		Customer:  license.Customer{Name: "Expired Customer"},
+		IssuedAt:  releaseDate,
+		ExpiresAt: releaseDate.AddDate(1, 0, 0), // Expired in 2026
+	}
+	expiredToken, err := signer.Sign(expiredClaims)
+	if err != nil {
+		t.Fatalf("failed to sign expired token: %v", err)
+	}
+
+	_, err = validatorUnauthenticated.VerifyWithResultAt(expiredToken, tamperedHostTime)
+	if !errors.Is(err, license.ErrExpired) {
+		t.Fatalf("expected expired commercial license to fail with ErrExpired past ChangeDate without authoritative time, got: %v", err)
+	}
+
+	// 4. Legitimate BSL conversion when server time is attested past ChangeDate:
+	validatorAttested, err := license.NewValidator(pub,
+		license.WithProduct("gitlab-fleet-governor"),
+		license.WithBSLPolicy(bslPolicy),
+		license.WithServerTimeAttestation(tamperedHostTime, 1*time.Hour),
+	)
+	if err != nil {
+		t.Fatalf("failed to create attested validator: %v", err)
+	}
+
+	res, err := validatorAttested.VerifyWithResultAt("", tamperedHostTime)
+	if err != nil {
+		t.Fatalf("expected BSL conversion to succeed with attested server time, got: %v", err)
+	}
+	if !res.BSLConverted {
+		t.Fatalf("expected BSLConverted to be true when server time is attested")
+	}
+	if res.EffectiveLicense != "Apache-2.0" {
+		t.Errorf("expected EffectiveLicense Apache-2.0, got %s", res.EffectiveLicense)
 	}
 }
 

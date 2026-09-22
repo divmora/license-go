@@ -167,6 +167,7 @@ func (v *Validator) resolveEvaluationTimeWithProv(localNow time.Time, prov *Rele
 				}
 			}
 		}
+
 		return evalTime, false, 0, nil
 	}
 

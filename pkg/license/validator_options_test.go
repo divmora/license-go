@@ -239,15 +239,17 @@ func TestValidator_InspectAndBSLEntitlement(t *testing.T) {
 	}
 
 	// 5. Validator.EvaluateBSLEntitlement with BSLPolicy
+	evalNow := time.Now()
 	valWithBSL, err := NewValidator(pub,
 		WithProduct("gitlab-fleet-governor"),
 		WithBSLPolicy(BSLPolicy{
 			Product:     "gitlab-fleet-governor",
-			ReleaseDate: time.Now().Add(-4 * 365 * 24 * time.Hour), // 4 years ago -> converted
+			ReleaseDate: evalNow.Add(-4 * 365 * 24 * time.Hour), // 4 years ago -> converted
 		}),
 		WithCurrentEnvironment("staging"),
 		WithCurrentUsage(map[string]int64{"nodes": 10}),
 		WithCurrentFeatures("sso"),
+		WithServerTimeAttestation(evalNow, 1*time.Hour),
 	)
 	if err != nil {
 		t.Fatal(err)
