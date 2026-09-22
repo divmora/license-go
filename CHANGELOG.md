@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.0](https://github.com/divmora/license-go/compare/v1.2.0...v1.3.0) (2026-09-19)
+
+
+### Features
+
+* **crl:** add dynamic CRL synchronization, caching, and claims distribution point ([b4a1b04](https://github.com/divmora/license-go/commit/b4a1b0420d09de4cca9f9bada5b0ef662cf47c19))
+
 ## [1.2.0](https://github.com/divmora/license-go/compare/v1.1.0...v1.2.0) (2026-09-19)
 
 
