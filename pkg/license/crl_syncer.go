@@ -158,7 +158,7 @@ func (s *CRLSyncer) Sync(ctx context.Context) (*SyncResult, error) {
 
 	req.Header.Set("User-Agent", s.cfg.UserAgent)
 	if currentETag != "" {
-		req.Header.Set("If-None-Match", currentETag)
+		req.Header.Set("If-None-Match", CanonicalETag(currentETag))
 	}
 	if currentModified != "" {
 		req.Header.Set("If-Modified-Since", currentModified)
@@ -242,7 +242,7 @@ func (s *CRLSyncer) Sync(ctx context.Context) (*SyncResult, error) {
 		}
 	}
 
-	newETag := resp.Header.Get("ETag")
+	newETag := CanonicalETag(resp.Header.Get("ETag"))
 	newModified := resp.Header.Get("Last-Modified")
 
 	s.mu.Lock()

@@ -376,3 +376,80 @@ func TestCRLSyncer_MaxDownloadBytes(t *testing.T) {
 		t.Errorf("expected ErrCRLSyncFailed, got: %v", err)
 	}
 }
+
+func TestCRLSyncer_UnquotedAndWeakETagHandling(t *testing.T) {
+	pub, priv := generateCRLTestKeyPair(t)
+	ring := NewKeyRing(pub)
+
+	now := time.Now().UTC()
+	claims := RevocationListClaims{
+		ID:         "crl-test-etag-robustness",
+		Issuer:     "divmora.com/crl",
+		IssuedAt:   now,
+		NextUpdate: now.Add(24 * time.Hour),
+		Entries:    []RevocationEntry{},
+	}
+
+	signedToken, err := SignCRL(claims, priv)
+	if err != nil {
+		t.Fatalf("SignCRL failed: %v", err)
+	}
+
+	var requestCount int32
+	var receivedIfNoneMatch string
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		count := atomic.AddInt32(&requestCount, 1)
+		receivedIfNoneMatch = r.Header.Get("If-None-Match")
+
+		if count == 1 {
+			// Simulate a server returning an unquoted ETag
+			w.Header().Set("ETag", "unquoted-opaque-tag-12345")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(signedToken))
+			return
+		}
+
+		// On second request, verify client sent properly canonicalized RFC 7232 quoted If-None-Match
+		if r.Header.Get("If-None-Match") == `"unquoted-opaque-tag-12345"` {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(signedToken))
+	}))
+	defer ts.Close()
+
+	syncer, err := NewCRLSyncer(CRLSyncConfig{
+		URL:     ts.URL,
+		KeyRing: ring,
+	})
+	if err != nil {
+		t.Fatalf("NewCRLSyncer failed: %v", err)
+	}
+
+	// 1st sync: server sent unquoted ETag
+	res1, err := syncer.Sync(context.Background())
+	if err != nil {
+		t.Fatalf("sync 1 failed: %v", err)
+	}
+	if res1.ETag != `"unquoted-opaque-tag-12345"` {
+		t.Errorf("expected canonicalized ETag %q, got %q", `"unquoted-opaque-tag-12345"`, res1.ETag)
+	}
+	if res1.CleanETag() != "unquoted-opaque-tag-12345" {
+		t.Errorf("expected clean ETag %q, got %q", "unquoted-opaque-tag-12345", res1.CleanETag())
+	}
+
+	// 2nd sync: should send quoted If-None-Match and receive 304
+	res2, err := syncer.Sync(context.Background())
+	if err != nil {
+		t.Fatalf("sync 2 failed: %v", err)
+	}
+	if res2.Source != SyncSourceNotModified {
+		t.Errorf("expected Source %v, got %v", SyncSourceNotModified, res2.Source)
+	}
+	if receivedIfNoneMatch != `"unquoted-opaque-tag-12345"` {
+		t.Errorf("expected server to receive quoted If-None-Match %q, got %q", `"unquoted-opaque-tag-12345"`, receivedIfNoneMatch)
+	}
+}
