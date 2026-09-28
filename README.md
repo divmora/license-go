@@ -273,6 +273,7 @@ type Scope struct {
     Clusters     []string            `json:"clusters,omitempty"`     // Kubernetes / ECS cluster IDs
     Namespaces   []string            `json:"namespaces,omitempty"`   // GitLab groups/projects ["acme-corp/*"]
     Hosts        []string            `json:"hosts,omitempty"`        // Hostnames, FQDNs, domains ["*.acme.corp"]
+    Resources    []string            `json:"resources,omitempty"`    // Monitored resources (ARNs, wildcards, names)
     Custom       map[string][]string `json:"custom,omitempty"`       // Arbitrary product scope dimensions
 }
 
@@ -311,6 +312,13 @@ type Claims struct {
 - `claims.IsClusterAllowed(cluster string) bool`
 - `claims.IsNamespaceAllowed(namespace string) bool`
 - `claims.IsHostAllowed(host string) bool`
+- `claims.IsResourceAllowed(resource string) bool` (supports exact match, glob patterns, short IDs, and AWS ARN suffix extraction)
+- `claims.AssertResource(resource string) error`
+- `claims.CheckResourceLimit(currentUsage int64) error` (checks quota against `Limits["max_resources"]`)
+- `license.GetMaxResources(claims) int` (helper extracting `max_resources` quota limit)
+- `license.GetMaxAccounts(claims) int` (helper extracting `max_accounts` quota limit)
+- `license.GetAllowedResources(claims) []string` (helper extracting allowed resources list)
+- `license.MatchResourcePattern(pattern, resource string) bool` (pattern matching engine for resource IDs and ARNs)
 - `claims.AssertScope(dimension, target string) error`
 - `claims.AssertFeature(name string) error`
 - `claims.CheckLimit(name string, currentUsage int64) error`
@@ -352,6 +360,7 @@ license-cli issue \
   -scope-clusters "prod-eks-01" \
   -scope-namespaces "gitlab.com/acme-corp/*" \
   -scope-hosts "*.acme.corp" \
+  -scope-resources "arn:aws:elasticloadbalancing:*:*:loadbalancer/app/prod-*/*,arn:aws:cloudfront::*:distribution/*" \
   -scope-custom "tier=platinum,gold;datacenter=dc-east,dc-west" \
   -meta "billing_id=inv-9981,contact=admin@acme.corp" \
   -fingerprint "node-cluster-01" \
@@ -368,6 +377,7 @@ license-cli verify \
   -env "production" \
   -namespace "gitlab.com/acme-corp/fleet" \
   -host "runner-01.acme.corp" \
+  -resource "arn:aws:elasticloadbalancing:us-east-1:123456789012:loadbalancer/app/prod-alb/1234567890abcdef" \
   -custom-scope "tier=platinum,datacenter=dc-east" \
   -fingerprint "node-cluster-01" \
   -license ./acme.license.key

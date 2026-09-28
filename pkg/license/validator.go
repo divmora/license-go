@@ -30,6 +30,7 @@ type Validator struct {
 	currentCluster            string
 	currentNamespace          string
 	currentHost               string
+	currentResource           string
 	currentCustomScope        map[string]string
 	requireScopeDimensions    []string
 	currentVersion            string
@@ -162,6 +163,18 @@ func WithCurrentHost(host string) ValidatorOption {
 	return func(v *Validator) {
 		v.currentHost = host
 	}
+}
+
+// WithCurrentResource configures the target monitored resource identifier or ARN to validate against Scope.Resources.
+func WithCurrentResource(resource string) ValidatorOption {
+	return func(v *Validator) {
+		v.currentResource = resource
+	}
+}
+
+// WithResource is an alias for WithCurrentResource.
+func WithResource(resource string) ValidatorOption {
+	return WithCurrentResource(resource)
 }
 
 // WithCurrentCustomScope sets a custom scope dimension and value for multi-tenant boundary checks.

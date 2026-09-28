@@ -45,8 +45,14 @@ var (
 	// ErrLicenseNotFound is returned when no license data is found in the specified source or file.
 	ErrLicenseNotFound = envelope.ErrLicenseNotFound
 
-	// ErrScopeMismatch is returned when an environment, account, region, cluster, namespace, or host is not authorized by the license scope.
+	// ErrScopeMismatch is returned when an environment, account, region, cluster, namespace, host, or resource is not authorized by the license scope.
 	ErrScopeMismatch = errors.New("license: scope mismatch")
+
+	// ErrResourceQuotaExceeded is returned when the monitored resource quota is exceeded.
+	ErrResourceQuotaExceeded = errors.New("license: monitored resource quota exceeded")
+
+	// ErrResourceNotAllowed is returned when a resource identifier is not authorized by the license.
+	ErrResourceNotAllowed = errors.New("license: resource identifier not authorized by license")
 
 	// ErrKeyRevoked is returned when a license was signed by a key that has been marked as revoked.
 	ErrKeyRevoked = errors.New("license: signing key has been revoked")
@@ -159,6 +165,37 @@ func (e *ScopeMismatchError) Error() string {
 
 func (e *ScopeMismatchError) Is(target error) bool {
 	return target == ErrScopeMismatch
+}
+
+// ResourceNotAllowedError provides structured details when a resource identifier is not authorized by the license scope.
+type ResourceNotAllowedError struct {
+	Resource string
+	Allowed  []string
+}
+
+func (e *ResourceNotAllowedError) Error() string {
+	if len(e.Allowed) == 0 {
+		return fmt.Sprintf("license: resource %q is not authorized (no resources allowed)", e.Resource)
+	}
+	return fmt.Sprintf("license: resource %q is not authorized by allowed scope resources %v", e.Resource, e.Allowed)
+}
+
+func (e *ResourceNotAllowedError) Is(target error) bool {
+	return target == ErrResourceNotAllowed || target == ErrScopeMismatch
+}
+
+// ResourceQuotaExceededError provides structured details when monitored resource count exceeds quota.
+type ResourceQuotaExceededError struct {
+	Current int64
+	Allowed int64
+}
+
+func (e *ResourceQuotaExceededError) Error() string {
+	return fmt.Sprintf("license: monitored resource quota exceeded (current: %d, allowed: %d)", e.Current, e.Allowed)
+}
+
+func (e *ResourceQuotaExceededError) Is(target error) bool {
+	return target == ErrResourceQuotaExceeded || target == ErrLimitExceeded
 }
 
 // VersionNotEntitledError provides structured details when a version authorization check fails.

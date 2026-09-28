@@ -1599,3 +1599,68 @@ func TestCLI_CRLSyncAndDynamicVerify(t *testing.T) {
 		t.Fatalf("verify with token-embedded crl-url and -auto-crl failed: %v", err)
 	}
 }
+
+func TestCLI_ScopeResources_IssueAndVerify(t *testing.T) {
+	tempDir := t.TempDir()
+	privKeyPath := filepath.Join(tempDir, "private.pem")
+	pubKeyPath := filepath.Join(tempDir, "public.pem")
+	licPath := filepath.Join(tempDir, "license.key")
+
+	if err := runCLI([]string{"keygen", "-out-dir", tempDir}); err != nil {
+		t.Fatalf("keygen failed: %v", err)
+	}
+
+	// 1. Issue with -scope-resources
+	if err := runCLI([]string{
+		"issue",
+		"-private-key", privKeyPath,
+		"-product", "otel-aws-log-processor",
+		"-customer", "Resource Corp",
+		"-scope-resources", "arn:aws:elasticloadbalancing:*:loadbalancer/app/prod-*/*,waf-prod-*",
+		"-out", licPath,
+	}); err != nil {
+		t.Fatalf("issue with -scope-resources failed: %v", err)
+	}
+
+	// 2. Inspect: ensure Resources are present in Claims.Scope
+	claims, err := license.InspectFromFile(licPath)
+	if err != nil {
+		t.Fatalf("InspectFromFile failed: %v", err)
+	}
+	if claims.Scope == nil || len(claims.Scope.Resources) != 2 {
+		t.Fatalf("expected 2 scope resources, got: %v", claims.Scope)
+	}
+
+	// 3. Verify with matching -resource -> SUCCESS
+	if err := runCLI([]string{
+		"verify",
+		"-public-key", pubKeyPath,
+		"-license", licPath,
+		"-product", "otel-aws-log-processor",
+		"-resource", "arn:aws:elasticloadbalancing:us-east-1:123456789012:loadbalancer/app/prod-alb/50dc",
+	}); err != nil {
+		t.Fatalf("verify with matching resource failed: %v", err)
+	}
+
+	// 4. Verify with short resource -> SUCCESS
+	if err := runCLI([]string{
+		"verify",
+		"-public-key", pubKeyPath,
+		"-license", licPath,
+		"-product", "otel-aws-log-processor",
+		"-resource", "waf-prod-webacl",
+	}); err != nil {
+		t.Fatalf("verify with short resource failed: %v", err)
+	}
+
+	// 5. Verify with mismatched -resource -> FAIL
+	if err := runCLI([]string{
+		"verify",
+		"-public-key", pubKeyPath,
+		"-license", licPath,
+		"-product", "otel-aws-log-processor",
+		"-resource", "arn:aws:elasticloadbalancing:us-east-1:123456789012:loadbalancer/app/dev-alb/50dc",
+	}); err == nil {
+		t.Fatal("expected verify to fail for unauthorized resource")
+	}
+}

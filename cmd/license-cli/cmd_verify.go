@@ -23,6 +23,7 @@ func runVerify(args []string) error {
 	cluster := fs.String("cluster", "", "Current cluster identifier to assert against Scope.Clusters")
 	namespace := fs.String("namespace", "", "Current project/group namespace to assert against Scope.Namespaces")
 	host := fs.String("host", "", "Current hostname or domain to assert against Scope.Hosts")
+	resource := fs.String("resource", "", "Current resource ARN or identifier to assert against Scope.Resources")
 	customScopeFlag := fs.String("custom-scope", "", "Current custom scope assertions in key=val format separated by ';' or ',' (e.g. 'tier=platinum,datacenter=dc-1')")
 	version := fs.String("version", "", "Current running software version to assert (e.g. '1.2.0')")
 	buildDateFlag := fs.String("build-date", "", "Software binary build/release date to assert against maintenance window (RFC3339 or YYYY-MM-DD)")
@@ -100,6 +101,9 @@ func runVerify(args []string) error {
 	}
 	if *host != "" {
 		opts = append(opts, license.WithCurrentHost(*host))
+	}
+	if *resource != "" {
+		opts = append(opts, license.WithCurrentResource(*resource))
 	}
 	if *customScopeFlag != "" {
 		dims := strings.FieldsFunc(*customScopeFlag, func(r rune) bool {

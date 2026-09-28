@@ -369,7 +369,18 @@ func (v *Validator) checkScope(claims *Claims, resolvedFP *MachineFingerprint) e
 			}
 		}
 
-		// 7. Custom dimensions
+		// 7. Resources
+		if len(claims.Scope.Resources) > 0 {
+			targetResource := v.currentResource
+			if targetResource == "" || !claims.IsResourceAllowed(targetResource) {
+				return &ResourceNotAllowedError{
+					Resource: targetResource,
+					Allowed:  claims.Scope.Resources,
+				}
+			}
+		}
+
+		// 8. Custom dimensions
 		if claims.Scope.Custom != nil {
 			for dim, allowed := range claims.Scope.Custom {
 				if len(allowed) > 0 {

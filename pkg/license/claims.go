@@ -1,8 +1,10 @@
 package license
 
 import (
+	"encoding/json"
 	"fmt"
 	"path"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -44,8 +46,30 @@ type Scope struct {
 	// Hosts: authorized hostnames, FQDNs, or domain patterns (e.g., ["*.acme.corp", "runner-*.internal"]).
 	Hosts []string `json:"hosts,omitempty"`
 
+	// Resources specifies authorized resource ARNs, identifiers, or wildcard patterns.
+	Resources []string `json:"resources,omitempty"`
+
 	// Custom: arbitrary product-specific scoping dimensions.
 	Custom map[string][]string `json:"custom,omitempty"`
+}
+
+// UnmarshalJSON implements custom JSON unmarshaling for Scope, supporting the canonical
+// "resources" field and falling back to "allowed_resources" if "resources" is omitted.
+func (s *Scope) UnmarshalJSON(data []byte) error {
+	type Alias Scope
+	aux := struct {
+		*Alias
+		AllowedResources []string `json:"allowed_resources,omitempty"`
+	}{
+		Alias: (*Alias)(s),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if len(s.Resources) == 0 && len(aux.AllowedResources) > 0 {
+		s.Resources = aux.AllowedResources
+	}
+	return nil
 }
 
 // IsEnvironmentAllowed reports whether the target deployment environment is authorized by Scope.Environments.
@@ -102,6 +126,24 @@ func (s *Scope) IsHostAllowed(host string) bool {
 		return true
 	}
 	return matchesHostScope(s.Hosts, host)
+}
+
+// IsResourceAllowed reports whether the target resource ARN or identifier is authorized by Scope.Resources.
+// If Scope.Resources is not defined or empty, all resources are authorized (unrestricted).
+func (s *Scope) IsResourceAllowed(resource string) bool {
+	if s == nil || len(s.Resources) == 0 {
+		return true
+	}
+	resource = strings.TrimSpace(resource)
+	if resource == "" {
+		return false
+	}
+	for _, pattern := range s.Resources {
+		if MatchResourcePattern(pattern, resource) {
+			return true
+		}
+	}
+	return false
 }
 
 // Claims represents the license payload containing identity, validity periods,
@@ -899,8 +941,50 @@ func (c *Claims) IsHostAllowed(host string) bool {
 	return c.Scope.IsHostAllowed(host)
 }
 
+// IsResourceAllowed reports whether the target resource ARN or identifier is authorized.
+// If Scope.Resources is not defined or empty, all resources are authorized (unrestricted).
+func (c *Claims) IsResourceAllowed(resource string) bool {
+	if c == nil || c.Scope == nil || len(c.Scope.Resources) == 0 {
+		return true
+	}
+	return c.Scope.IsResourceAllowed(resource)
+}
+
+// AssertResource asserts that resource is authorized by Scope.Resources,
+// returning *ResourceNotAllowedError if not.
+func (c *Claims) AssertResource(resource string) error {
+	if c.IsResourceAllowed(resource) {
+		return nil
+	}
+	var allowed []string
+	if c != nil && c.Scope != nil {
+		allowed = c.Scope.Resources
+	}
+	return &ResourceNotAllowedError{
+		Resource: resource,
+		Allowed:  allowed,
+	}
+}
+
+// CheckResourceLimit checks if the current resource usage is within the "max_resources" quota limit.
+// If the limit is not found, or is set to -1 (unlimited), it returns nil.
+// If currentUsage exceeds the limit, it returns *ResourceQuotaExceededError.
+func (c *Claims) CheckResourceLimit(currentUsage int64) error {
+	limit, exists := c.GetLimit("max_resources")
+	if !exists || limit == -1 {
+		return nil
+	}
+	if currentUsage > limit {
+		return &ResourceQuotaExceededError{
+			Current: currentUsage,
+			Allowed: limit,
+		}
+	}
+	return nil
+}
+
 // IsInScope checks whether target is permitted under the given dimension name.
-// Supported standard dimensions: "environments", "accounts", "regions", "clusters", "namespaces", "hosts",
+// Supported standard dimensions: "environments", "accounts", "regions", "clusters", "namespaces", "hosts", "resources",
 // or any key in Scope.Custom.
 func (c *Claims) IsInScope(dimension string, target string) bool {
 	dimLower := strings.ToLower(strings.TrimSpace(dimension))
@@ -917,6 +1001,8 @@ func (c *Claims) IsInScope(dimension string, target string) bool {
 		return c.IsNamespaceAllowed(target)
 	case "hosts", "host", "domain", "domains":
 		return c.IsHostAllowed(target)
+	case "resources", "resource":
+		return c.IsResourceAllowed(target)
 	default:
 		if c.Scope != nil && c.Scope.Custom != nil {
 			for k, allowed := range c.Scope.Custom {
@@ -945,6 +1031,8 @@ func (c *Claims) HasScopeDimension(dimension string) bool {
 		return c.Scope != nil && len(c.Scope.Namespaces) > 0
 	case "hosts", "host", "domain", "domains":
 		return c.Scope != nil && len(c.Scope.Hosts) > 0
+	case "resources", "resource":
+		return c.Scope != nil && len(c.Scope.Resources) > 0
 	default:
 		if c.Scope != nil && c.Scope.Custom != nil {
 			for k, allowed := range c.Scope.Custom {
@@ -977,6 +1065,8 @@ func (c *Claims) AssertScope(dimension string, target string) error {
 			allowed = c.Scope.Namespaces
 		case "hosts", "host", "domain", "domains":
 			allowed = c.Scope.Hosts
+		case "resources", "resource":
+			allowed = c.Scope.Resources
 		default:
 			if c.Scope.Custom != nil {
 				for k, v := range c.Scope.Custom {
@@ -1464,4 +1554,187 @@ func matchVersionPattern(pattern, version string) bool {
 // checkMaxVersion asserts that version does not exceed maxVersion.
 func checkMaxVersion(maxVersion, version string) bool {
 	return helpers.CheckMaxVersion(maxVersion, version)
+}
+
+// GetMaxResources returns the maximum authorized monitored resources from Claims.Limits ("max_resources").
+// Returns 0 if unconstrained, omitted, unlimited (-1), or if Claims is nil.
+func GetMaxResources(c *Claims) int {
+	if c == nil {
+		return 0
+	}
+	val, exists := c.GetLimit("max_resources")
+	if !exists || val <= 0 {
+		return 0
+	}
+	return int(val)
+}
+
+// GetMaxAccounts returns the maximum allowed accounts from Claims.Limits ("max_accounts").
+// Returns 0 if unconstrained, omitted, unlimited (-1), or if Claims is nil.
+func GetMaxAccounts(c *Claims) int {
+	if c == nil {
+		return 0
+	}
+	val, exists := c.GetLimit("max_accounts")
+	if !exists || val <= 0 {
+		return 0
+	}
+	return int(val)
+}
+
+// GetAllowedResources returns the list of authorized resource patterns from Claims.Scope.Resources.
+// Returns nil if Claims or Scope is nil, or if Resources is empty.
+func GetAllowedResources(c *Claims) []string {
+	if c == nil || c.Scope == nil {
+		return nil
+	}
+	return c.Scope.Resources
+}
+
+// MatchResourcePattern matches a resource ARN or identifier against an authorized pattern.
+// Supporting exact match, case-insensitive match, * and ? wildcards, and AWS ARN suffix matching.
+func MatchResourcePattern(pattern, resource string) bool {
+	pattern = strings.TrimSpace(pattern)
+	resource = strings.TrimSpace(resource)
+	if pattern == "" || resource == "" {
+		return false
+	}
+
+	if pattern == "*" || strings.EqualFold(pattern, "all") {
+		return true
+	}
+
+	if strings.EqualFold(pattern, resource) {
+		return true
+	}
+
+	// Direct wildcard match
+	if matchWildcard(pattern, resource) {
+		return true
+	}
+
+	patternLower := strings.ToLower(pattern)
+	resourceLower := strings.ToLower(resource)
+
+	separators := []string{
+		":loadbalancer/",
+		":distribution/",
+		"/webacl/",
+		":targetgroup/",
+		":function:",
+		":function/",
+		":table/",
+		":log-group:",
+		":log-group/",
+	}
+
+	// 1. If resource is an ARN, check if pattern matches against the resource suffix
+	if strings.HasPrefix(resourceLower, "arn:") {
+		for _, sep := range separators {
+			if idx := strings.Index(resourceLower, sep); idx != -1 {
+				suffix := resource[idx+len(sep):]
+				if strings.EqualFold(pattern, suffix) || matchWildcard(pattern, suffix) {
+					return true
+				}
+				if parts := strings.Split(suffix, "/"); len(parts) > 1 {
+					for _, p := range parts {
+						if p != "" && (strings.EqualFold(pattern, p) || matchWildcard(pattern, p)) {
+							return true
+						}
+					}
+				}
+			}
+		}
+
+		// 6th colon component: arn:partition:service:region:account:resource-id
+		parts := strings.SplitN(resource, ":", 6)
+		if len(parts) >= 6 {
+			resPart := parts[5]
+			if strings.EqualFold(pattern, resPart) || matchWildcard(pattern, resPart) {
+				return true
+			}
+			if slashIdx := strings.Index(resPart, "/"); slashIdx != -1 {
+				afterSlash := resPart[slashIdx+1:]
+				if strings.EqualFold(pattern, afterSlash) || matchWildcard(pattern, afterSlash) {
+					return true
+				}
+			}
+			if colonIdx := strings.Index(resPart, ":"); colonIdx != -1 {
+				afterColon := resPart[colonIdx+1:]
+				if strings.EqualFold(pattern, afterColon) || matchWildcard(pattern, afterColon) {
+					return true
+				}
+			}
+		}
+	}
+
+	// 2. If pattern is an ARN but resource is a short identifier:
+	if strings.HasPrefix(patternLower, "arn:") && !strings.HasPrefix(resourceLower, "arn:") {
+		for _, sep := range separators {
+			if idx := strings.Index(patternLower, sep); idx != -1 {
+				patternSuffix := pattern[idx+len(sep):]
+				if strings.EqualFold(patternSuffix, resource) || matchWildcard(patternSuffix, resource) {
+					return true
+				}
+				if parts := strings.Split(patternSuffix, "/"); len(parts) > 1 {
+					for _, p := range parts {
+						// Only match if part is not a standalone wildcard "*"
+						if p != "" && p != "*" && (strings.EqualFold(p, resource) || matchWildcard(p, resource)) {
+							return true
+						}
+					}
+				}
+			}
+		}
+		parts := strings.SplitN(pattern, ":", 6)
+		if len(parts) >= 6 {
+			resPart := parts[5]
+			if strings.EqualFold(resPart, resource) || matchWildcard(resPart, resource) {
+				return true
+			}
+			if slashIdx := strings.Index(resPart, "/"); slashIdx != -1 {
+				afterSlash := resPart[slashIdx+1:]
+				if afterSlash != "*" && (strings.EqualFold(afterSlash, resource) || matchWildcard(afterSlash, resource)) {
+					return true
+				}
+			}
+			if colonIdx := strings.Index(resPart, ":"); colonIdx != -1 {
+				afterColon := resPart[colonIdx+1:]
+				if afterColon != "*" && (strings.EqualFold(afterColon, resource) || matchWildcard(afterColon, resource)) {
+					return true
+				}
+			}
+		}
+	}
+
+	return false
+}
+
+// matchWildcard evaluates pattern containing '*' and '?' wildcards against text, case-insensitively.
+func matchWildcard(pattern, text string) bool {
+	if !strings.ContainsAny(pattern, "*?") {
+		return strings.EqualFold(pattern, text)
+	}
+	var b strings.Builder
+	b.WriteString("(?i)^")
+	for i := 0; i < len(pattern); i++ {
+		c := pattern[i]
+		switch c {
+		case '*':
+			b.WriteString(".*")
+		case '?':
+			b.WriteString(".")
+		case '.', '+', '(', ')', '[', ']', '{', '}', '^', '$', '\\', '|':
+			b.WriteByte('\\')
+			b.WriteByte(c)
+		default:
+			b.WriteByte(c)
+		}
+	}
+	b.WriteString("$")
+	re, err := regexp.Compile(b.String())
+	if err != nil {
+		return false
+	}
+	return re.MatchString(text)
 }

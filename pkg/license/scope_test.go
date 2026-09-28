@@ -1,7 +1,9 @@
 package license
 
 import (
+	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -15,6 +17,7 @@ func TestScope_ClaimsHelpers(t *testing.T) {
 		Clusters:     []string{"prod-k8s-*"},
 		Namespaces:   []string{"gitlab.com/acme-corp/*"},
 		Hosts:        []string{"*.acme.corp", "runner-*.internal"},
+		Resources:    []string{"arn:aws:elasticloadbalancing:*:loadbalancer/app/*", "res-*"},
 		Custom: map[string][]string{
 			"tier": {"platinum", "gold"},
 		},
@@ -77,7 +80,18 @@ func TestScope_ClaimsHelpers(t *testing.T) {
 		t.Error("expected evil.com to be disallowed")
 	}
 
-	// 7. Custom dimensions
+	// 7. Resources
+	if !claims.IsResourceAllowed("arn:aws:elasticloadbalancing:us-east-1:123456789012:loadbalancer/app/my-alb/123") {
+		t.Error("expected ALB ARN to be allowed")
+	}
+	if !claims.IsResourceAllowed("res-prod-01") {
+		t.Error("expected res-prod-01 to be allowed by res-*")
+	}
+	if claims.IsResourceAllowed("unauthorized-res") {
+		t.Error("expected unauthorized-res to be disallowed")
+	}
+
+	// 8. Custom dimensions
 	if !claims.IsInScope("tier", "platinum") {
 		t.Error("expected custom tier platinum to be allowed")
 	}
@@ -85,12 +99,18 @@ func TestScope_ClaimsHelpers(t *testing.T) {
 		t.Error("expected custom tier bronze to be disallowed")
 	}
 
-	// 8. AssertScope
+	// 9. AssertScope
 	if err := claims.AssertScope("environments", "production"); err != nil {
 		t.Errorf("AssertScope(environments, production) failed: %v", err)
 	}
 	if err := claims.AssertScope("environments", "dev"); err == nil || !errors.Is(err, ErrScopeMismatch) {
 		t.Errorf("expected ErrScopeMismatch for dev, got %v", err)
+	}
+	if err := claims.AssertScope("resources", "res-prod-01"); err != nil {
+		t.Errorf("AssertScope(resources, res-prod-01) failed: %v", err)
+	}
+	if err := claims.AssertScope("resources", "unauthorized-res"); err == nil || !errors.Is(err, ErrScopeMismatch) {
+		t.Errorf("expected ErrScopeMismatch for unauthorized-res, got %v", err)
 	}
 }
 
@@ -116,6 +136,9 @@ func TestScope_UnscopedPermitsAll(t *testing.T) {
 	}
 	if !unscoped.IsHostAllowed("anything.example.com") {
 		t.Error("expected unscoped to permit any host")
+	}
+	if !unscoped.IsResourceAllowed("any-resource-arn") {
+		t.Error("expected unscoped to permit any resource")
 	}
 }
 
@@ -1269,4 +1292,424 @@ func TestValidator_WithRequireScope(t *testing.T) {
 			t.Fatalf("expected verification to pass with required custom scope, got: %v", err)
 		}
 	})
+}
+
+func TestMatchResourcePattern(t *testing.T) {
+	tests := []struct {
+		name        string
+		pattern     string
+		resource    string
+		wantMatched bool
+	}{
+		// 1. Universal wildcards
+		{name: "wildcard * matches anything", pattern: "*", resource: "arn:aws:elasticloadbalancing:us-east-1:123456789012:loadbalancer/app/my-alb/50dc6c495c0c9188", wantMatched: true},
+		{name: "wildcard all matches anything", pattern: "all", resource: "my-resource", wantMatched: true},
+		{name: "wildcard ALL matches case-insensitively", pattern: "ALL", resource: "my-resource", wantMatched: true},
+
+		// 2. Exact match
+		{name: "exact match", pattern: "my-resource", resource: "my-resource", wantMatched: true},
+		{name: "exact match case-insensitive", pattern: "MY-RESOURCE", resource: "my-resource", wantMatched: true},
+		{name: "exact mismatch", pattern: "my-resource", resource: "other-resource", wantMatched: false},
+
+		// 3. Glob wildcards (* and ?)
+		{name: "prefix wildcard", pattern: "my-alb-*", resource: "my-alb-prod-01", wantMatched: true},
+		{name: "suffix wildcard", pattern: "*-production", resource: "nlb-production", wantMatched: true},
+		{name: "single char wildcard", pattern: "srv-?-prod", resource: "srv-1-prod", wantMatched: true},
+		{name: "single char wildcard mismatch", pattern: "srv-?-prod", resource: "srv-12-prod", wantMatched: false},
+		{name: "middle wildcard", pattern: "team-*-alb", resource: "team-alpha-alb", wantMatched: true},
+		{name: "regex characters escaped safely", pattern: "my.alb+test[1]", resource: "my.alb+test[1]", wantMatched: true},
+
+		// 4. AWS ALB ARN suffix matching
+		{
+			name:        "ALB app/name/* matches full ARN",
+			pattern:     "app/my-alb/*",
+			resource:    "arn:aws:elasticloadbalancing:us-east-1:123456789012:loadbalancer/app/my-alb/50dc6c495c0c9188",
+			wantMatched: true,
+		},
+		{
+			name:        "ALB name only matches full ARN",
+			pattern:     "my-alb",
+			resource:    "arn:aws:elasticloadbalancing:us-east-1:123456789012:loadbalancer/app/my-alb/50dc6c495c0c9188",
+			wantMatched: true,
+		},
+		{
+			name:        "ALB exact suffix matches full ARN",
+			pattern:     "app/my-alb/50dc6c495c0c9188",
+			resource:    "arn:aws:elasticloadbalancing:us-east-1:123456789012:loadbalancer/app/my-alb/50dc6c495c0c9188",
+			wantMatched: true,
+		},
+		{
+			name:        "ALB wildcard in ARN matches full ARN",
+			pattern:     "arn:aws:elasticloadbalancing:us-east-1:*:loadbalancer/app/*",
+			resource:    "arn:aws:elasticloadbalancing:us-east-1:123456789012:loadbalancer/app/my-alb/50dc6c495c0c9188",
+			wantMatched: true,
+		},
+		{
+			name:        "ALB pattern mismatch",
+			pattern:     "app/other-alb/*",
+			resource:    "arn:aws:elasticloadbalancing:us-east-1:123456789012:loadbalancer/app/my-alb/50dc6c495c0c9188",
+			wantMatched: false,
+		},
+
+		// 5. AWS CloudFront Distribution matching
+		{
+			name:        "CloudFront distribution ID matches full ARN",
+			pattern:     "EDFDVBD632BHFR5",
+			resource:    "arn:aws:cloudfront::123456789012:distribution/EDFDVBD632BHFR5",
+			wantMatched: true,
+		},
+		{
+			name:        "CloudFront distribution prefix matches full ARN",
+			pattern:     "distribution/EDFDVBD632BHFR5",
+			resource:    "arn:aws:cloudfront::123456789012:distribution/EDFDVBD632BHFR5",
+			wantMatched: true,
+		},
+		{
+			name:        "CloudFront pattern is full ARN and resource is short ID",
+			pattern:     "arn:aws:cloudfront::123456789012:distribution/EDFDVBD632BHFR5",
+			resource:    "EDFDVBD632BHFR5",
+			wantMatched: true,
+		},
+
+		// 6. AWS WAF WebACL matching
+		{
+			name:        "WAF WebACL name matches full regional ARN",
+			pattern:     "my-webacl",
+			resource:    "arn:aws:wafv2:us-east-1:123456789012:regional/webacl/my-webacl/uuid-1234",
+			wantMatched: true,
+		},
+		{
+			name:        "WAF WebACL pattern with wildcard matches full ARN",
+			pattern:     "my-webacl/*",
+			resource:    "arn:aws:wafv2:us-east-1:123456789012:regional/webacl/my-webacl/uuid-1234",
+			wantMatched: true,
+		},
+		{
+			name:        "WAF WebACL mismatch",
+			pattern:     "other-webacl",
+			resource:    "arn:aws:wafv2:us-east-1:123456789012:regional/webacl/my-webacl/uuid-1234",
+			wantMatched: false,
+		},
+
+		// 7. TargetGroup matching
+		{
+			name:        "TargetGroup name matches full ARN",
+			pattern:     "my-tg",
+			resource:    "arn:aws:elasticloadbalancing:us-east-1:123456789012:targetgroup/my-tg/73e2d6bc24d8a067",
+			wantMatched: true,
+		},
+
+		// 8. Lambda Function matching
+		{
+			name:        "Lambda function name matches full ARN",
+			pattern:     "my-processor",
+			resource:    "arn:aws:lambda:us-east-1:123456789012:function:my-processor",
+			wantMatched: true,
+		},
+
+		// 9. Inverse matching: Pattern is full ARN, resource is short identifier
+		{
+			name:        "Pattern is full ALB ARN, resource is short ALB name",
+			pattern:     "arn:aws:elasticloadbalancing:us-east-1:123456789012:loadbalancer/app/my-alb/50dc6c495c0c9188",
+			resource:    "my-alb",
+			wantMatched: true,
+		},
+
+		// 10. Empty inputs
+		{name: "empty pattern returns false", pattern: "", resource: "my-resource", wantMatched: false},
+		{name: "empty resource returns false", pattern: "my-pattern", resource: "", wantMatched: false},
+		{name: "both empty returns false", pattern: "", resource: "", wantMatched: false},
+		{name: "whitespace only returns false", pattern: "   ", resource: "   ", wantMatched: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := MatchResourcePattern(tt.pattern, tt.resource)
+			if got != tt.wantMatched {
+				t.Errorf("MatchResourcePattern(%q, %q) = %v; want %v", tt.pattern, tt.resource, got, tt.wantMatched)
+			}
+		})
+	}
+}
+
+func TestScope_Resources_AccessorsAndLimits(t *testing.T) {
+	claims := Claims{
+		Customer: Customer{Name: "Acme Corp"},
+		Product:  "otel-aws-log-processor",
+		Plan:     "pro",
+		IssuedAt: time.Now().UTC(),
+		Limits: map[string]int64{
+			"max_resources": 10,
+			"max_accounts":  5,
+		},
+		Scope: &Scope{
+			Resources: []string{
+				"arn:aws:elasticloadbalancing:*:loadbalancer/app/prod-*/*",
+				"EDFDVBD632BHFR5",
+				"waf-prod-*",
+			},
+		},
+	}
+
+	// 1. IsResourceAllowed
+	if !claims.IsResourceAllowed("arn:aws:elasticloadbalancing:us-east-1:123456789012:loadbalancer/app/prod-alb/12345") {
+		t.Error("expected prod-alb to be allowed")
+	}
+	if !claims.IsResourceAllowed("EDFDVBD632BHFR5") {
+		t.Error("expected CloudFront distribution to be allowed")
+	}
+	if !claims.IsResourceAllowed("waf-prod-webacl") {
+		t.Error("expected waf-prod-webacl to be allowed")
+	}
+	if claims.IsResourceAllowed("arn:aws:elasticloadbalancing:us-east-1:123456789012:loadbalancer/app/dev-alb/12345") {
+		t.Error("expected dev-alb to be disallowed")
+	}
+	if claims.IsResourceAllowed("") {
+		t.Error("expected empty resource to be disallowed")
+	}
+
+	// 2. AssertResource
+	if err := claims.AssertResource("waf-prod-webacl"); err != nil {
+		t.Errorf("AssertResource failed for allowed resource: %v", err)
+	}
+	err := claims.AssertResource("unauthorized-res")
+	if err == nil {
+		t.Fatal("expected error from AssertResource for unauthorized resource")
+	}
+	if !errors.Is(err, ErrResourceNotAllowed) {
+		t.Errorf("expected ErrResourceNotAllowed, got: %v", err)
+	}
+	if !errors.Is(err, ErrScopeMismatch) {
+		t.Errorf("expected ErrScopeMismatch compatibility, got: %v", err)
+	}
+	var resErr *ResourceNotAllowedError
+	if !errors.As(err, &resErr) {
+		t.Fatalf("expected *ResourceNotAllowedError, got: %T", err)
+	}
+	if resErr.Resource != "unauthorized-res" {
+		t.Errorf("expected Resource %q, got %q", "unauthorized-res", resErr.Resource)
+	}
+
+	// 3. CheckResourceLimit
+	if err := claims.CheckResourceLimit(5); err != nil {
+		t.Errorf("CheckResourceLimit(5) should pass: %v", err)
+	}
+	if err := claims.CheckResourceLimit(10); err != nil {
+		t.Errorf("CheckResourceLimit(10) should pass: %v", err)
+	}
+	limitErr := claims.CheckResourceLimit(11)
+	if limitErr == nil {
+		t.Fatal("expected error from CheckResourceLimit(11)")
+	}
+	if !errors.Is(limitErr, ErrResourceQuotaExceeded) {
+		t.Errorf("expected ErrResourceQuotaExceeded, got: %v", limitErr)
+	}
+	if !errors.Is(limitErr, ErrLimitExceeded) {
+		t.Errorf("expected ErrLimitExceeded compatibility, got: %v", limitErr)
+	}
+	var quotaErr *ResourceQuotaExceededError
+	if !errors.As(limitErr, &quotaErr) {
+		t.Fatalf("expected *ResourceQuotaExceededError, got: %T", limitErr)
+	}
+	if quotaErr.Current != 11 || quotaErr.Allowed != 10 {
+		t.Errorf("unexpected quotaErr fields: current=%d, allowed=%d", quotaErr.Current, quotaErr.Allowed)
+	}
+
+	// 4. GetMaxResources, GetMaxAccounts, GetAllowedResources
+	if maxRes := GetMaxResources(&claims); maxRes != 10 {
+		t.Errorf("GetMaxResources = %d, want 10", maxRes)
+	}
+	if maxAcc := GetMaxAccounts(&claims); maxAcc != 5 {
+		t.Errorf("GetMaxAccounts = %d, want 5", maxAcc)
+	}
+	allowedList := GetAllowedResources(&claims)
+	if len(allowedList) != 3 {
+		t.Errorf("GetAllowedResources length = %d, want 3", len(allowedList))
+	}
+
+	// Nil / unlimited cases
+	if GetMaxResources(nil) != 0 {
+		t.Error("expected GetMaxResources(nil) == 0")
+	}
+	if GetMaxAccounts(nil) != 0 {
+		t.Error("expected GetMaxAccounts(nil) == 0")
+	}
+	if GetAllowedResources(nil) != nil {
+		t.Error("expected GetAllowedResources(nil) == nil")
+	}
+
+	unlimitedClaims := Claims{
+		Limits: map[string]int64{
+			"max_resources": -1,
+		},
+	}
+	if GetMaxResources(&unlimitedClaims) != 0 {
+		t.Errorf("expected unlimited (-1) to return 0, got %d", GetMaxResources(&unlimitedClaims))
+	}
+	if err := unlimitedClaims.CheckResourceLimit(99999); err != nil {
+		t.Errorf("expected unlimited resources to never fail CheckResourceLimit: %v", err)
+	}
+
+	// 5. IsInScope / HasScopeDimension
+	if !claims.IsInScope("resources", "waf-prod-webacl") {
+		t.Error("expected IsInScope('resources', 'waf-prod-webacl') to be true")
+	}
+	if !claims.IsInScope("resource", "waf-prod-webacl") {
+		t.Error("expected IsInScope('resource', 'waf-prod-webacl') to be true")
+	}
+	if claims.IsInScope("resources", "dev-alb") {
+		t.Error("expected IsInScope('resources', 'dev-alb') to be false")
+	}
+	if !claims.HasScopeDimension("resources") {
+		t.Error("expected HasScopeDimension('resources') to be true")
+	}
+	if !claims.HasScopeDimension("resource") {
+		t.Error("expected HasScopeDimension('resource') to be true")
+	}
+}
+
+func TestScope_Resources_ValidatorEnforcement(t *testing.T) {
+	pub, priv, err := GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("GenerateKeyPair failed: %v", err)
+	}
+	signer, err := NewSigner(priv)
+	if err != nil {
+		t.Fatalf("NewSigner failed: %v", err)
+	}
+
+	claims := Claims{
+		Customer: Customer{Name: "Acme Corp"},
+		Product:  "otel-aws-log-processor",
+		Plan:     "pro",
+		IssuedAt: time.Now().UTC(),
+		Scope: &Scope{
+			Resources: []string{
+				"arn:aws:elasticloadbalancing:*:loadbalancer/app/prod-*/*",
+				"waf-prod-*",
+			},
+		},
+	}
+	token, err := signer.Sign(claims)
+	if err != nil {
+		t.Fatalf("Sign failed: %v", err)
+	}
+
+	// 1. Validator matching resource -> SUCCESS
+	vMatching, err := NewValidator(pub,
+		WithProduct("otel-aws-log-processor"),
+		WithCurrentResource("arn:aws:elasticloadbalancing:us-east-1:123456789012:loadbalancer/app/prod-alb/50dc"),
+	)
+	if err != nil {
+		t.Fatalf("NewValidator failed: %v", err)
+	}
+	if _, err := vMatching.Verify(token); err != nil {
+		t.Fatalf("expected verification to succeed with matching resource: %v", err)
+	}
+
+	// 2. Validator matching short resource -> SUCCESS
+	vShort, _ := NewValidator(pub,
+		WithProduct("otel-aws-log-processor"),
+		WithResource("waf-prod-api"),
+	)
+	if _, err := vShort.Verify(token); err != nil {
+		t.Fatalf("expected verification to succeed with short resource: %v", err)
+	}
+
+	// 3. Validator mismatching resource -> FAIL with ErrResourceNotAllowed
+	vMismatch, _ := NewValidator(pub,
+		WithProduct("otel-aws-log-processor"),
+		WithCurrentResource("arn:aws:elasticloadbalancing:us-east-1:123456789012:loadbalancer/app/dev-alb/50dc"),
+	)
+	_, err = vMismatch.Verify(token)
+	if err == nil {
+		t.Fatal("expected verification failure for mismatched resource")
+	}
+	if !errors.Is(err, ErrResourceNotAllowed) {
+		t.Errorf("expected ErrResourceNotAllowed, got: %v", err)
+	}
+	if !errors.Is(err, ErrScopeMismatch) {
+		t.Errorf("expected ErrScopeMismatch compatibility, got: %v", err)
+	}
+	var resErr *ResourceNotAllowedError
+	if !errors.As(err, &resErr) {
+		t.Fatalf("expected *ResourceNotAllowedError, got: %T", err)
+	}
+	if resErr.Resource != "arn:aws:elasticloadbalancing:us-east-1:123456789012:loadbalancer/app/dev-alb/50dc" {
+		t.Errorf("unexpected resource in error: %s", resErr.Resource)
+	}
+
+	// 4. Validator with no resource configured when Scope.Resources is required -> FAIL
+	vNoResource, _ := NewValidator(pub,
+		WithProduct("otel-aws-log-processor"),
+	)
+	_, err = vNoResource.Verify(token)
+	if err == nil || !errors.Is(err, ErrResourceNotAllowed) {
+		t.Errorf("expected ErrResourceNotAllowed when resource is unconfigured, got: %v", err)
+	}
+
+	// 5. RequireScope("resources") option
+	vRequireScopePass, _ := NewValidator(pub,
+		WithProduct("otel-aws-log-processor"),
+		WithCurrentResource("waf-prod-api"),
+		WithRequireScope("resources"),
+	)
+	if _, err := vRequireScopePass.Verify(token); err != nil {
+		t.Errorf("expected verification to pass when required scope is present: %v", err)
+	}
+
+	unscopedClaims := Claims{
+		Customer: Customer{Name: "Acme Corp"},
+		Product:  "otel-aws-log-processor",
+		Plan:     "pro",
+		IssuedAt: time.Now().UTC(),
+	}
+	unscopedToken, _ := signer.Sign(unscopedClaims)
+
+	vRequireScopeFail, _ := NewValidator(pub,
+		WithProduct("otel-aws-log-processor"),
+		WithRequireScope("resources"),
+	)
+	_, err = vRequireScopeFail.Verify(unscopedToken)
+	if err == nil || !errors.Is(err, ErrScopeMismatch) {
+		t.Errorf("expected ErrScopeMismatch when required resources scope is missing, got: %v", err)
+	}
+}
+
+func TestScope_Resources_JSONSerialization(t *testing.T) {
+	// 1. Unmarshal JSON with "resources"
+	jsonCanonical := `{"resources": ["arn:aws:alb:*:loadbalancer/*", "res-1"]}`
+	var scope1 Scope
+	if err := json.Unmarshal([]byte(jsonCanonical), &scope1); err != nil {
+		t.Fatalf("failed to unmarshal canonical resources: %v", err)
+	}
+	if len(scope1.Resources) != 2 || scope1.Resources[0] != "arn:aws:alb:*:loadbalancer/*" {
+		t.Errorf("unexpected unmarshaled resources: %v", scope1.Resources)
+	}
+
+	// 2. Unmarshal JSON with "allowed_resources" (backward compatibility fallback)
+	jsonLegacy := `{"allowed_resources": ["arn:aws:alb:*:loadbalancer/*", "res-legacy"]}`
+	var scope2 Scope
+	if err := json.Unmarshal([]byte(jsonLegacy), &scope2); err != nil {
+		t.Fatalf("failed to unmarshal legacy allowed_resources: %v", err)
+	}
+	if len(scope2.Resources) != 2 || scope2.Resources[1] != "res-legacy" {
+		t.Errorf("unexpected unmarshaled legacy resources: %v", scope2.Resources)
+	}
+
+	// 3. Marshal Scope produces "resources"
+	scopeToMarshal := Scope{
+		Resources: []string{"res-a", "res-b"},
+	}
+	data, err := json.Marshal(scopeToMarshal)
+	if err != nil {
+		t.Fatalf("failed to marshal Scope: %v", err)
+	}
+	jsonStr := string(data)
+	if !strings.Contains(jsonStr, `"resources":["res-a","res-b"]`) {
+		t.Errorf("expected JSON to contain 'resources', got: %s", jsonStr)
+	}
+	if strings.Contains(jsonStr, `"allowed_resources"`) {
+		t.Errorf("expected JSON NOT to contain 'allowed_resources', got: %s", jsonStr)
+	}
 }

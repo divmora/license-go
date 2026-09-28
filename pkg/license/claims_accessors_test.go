@@ -41,6 +41,9 @@ func TestScope_NilAndEmptyScopeMethods(t *testing.T) {
 	if !nilScope.IsHostAllowed("app.acme.corp") {
 		t.Error("expected nilScope.IsHostAllowed to return true")
 	}
+	if !nilScope.IsResourceAllowed("arn:aws:loadbalancer") {
+		t.Error("expected nilScope.IsResourceAllowed to return true")
+	}
 
 	emptyScope := &Scope{}
 	if !emptyScope.IsEnvironmentAllowed("prod") {
@@ -60,6 +63,9 @@ func TestScope_NilAndEmptyScopeMethods(t *testing.T) {
 	}
 	if !emptyScope.IsHostAllowed("app.acme.corp") {
 		t.Error("expected emptyScope.IsHostAllowed to return true")
+	}
+	if !emptyScope.IsResourceAllowed("arn:aws:loadbalancer") {
+		t.Error("expected emptyScope.IsResourceAllowed to return true")
 	}
 }
 

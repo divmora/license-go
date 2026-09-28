@@ -42,6 +42,7 @@ type Scope struct {
     Clusters     []string            `json:"clusters,omitempty"`     // Kubernetes / ECS cluster IDs
     Namespaces   []string            `json:"namespaces,omitempty"`   // GitLab groups/projects ["acme-corp/*"]
     Hosts        []string            `json:"hosts,omitempty"`        // Hostnames, FQDNs, domains ["*.acme.corp"]
+    Resources    []string            `json:"resources,omitempty"`    // Monitored resources (ARNs, wildcards, names)
     Custom       map[string][]string `json:"custom,omitempty"`       // Product-specific scope dimensions
 }
 
@@ -106,6 +107,7 @@ license-cli issue \
   -scope-clusters "prod-eks-01" \
   -scope-namespaces "acme-corp/*" \
   -scope-hosts "*.acme.corp" \
+  -scope-resources "arn:aws:elasticloadbalancing:*:*:loadbalancer/app/prod-*/*,arn:aws:cloudfront::*:distribution/*" \
   -scope-custom "tier=platinum,gold;datacenter=dc-east,dc-west" \
   -meta "billing_id=inv-9981,contact=admin@customer.com" \
   -out ./license.key \
@@ -129,6 +131,7 @@ license-cli verify \
   -cluster "prod-eks-01" \
   -namespace "acme-corp/fleet" \
   -host "srv-01.acme.corp" \
+  -resource "arn:aws:elasticloadbalancing:us-east-1:123456789012:loadbalancer/app/prod-alb/1234567890abcdef" \
   -custom-scope "tier=platinum,datacenter=dc-east" \
   -fingerprint "<host-fingerprint>" \
   -license ./license.key
@@ -687,6 +690,8 @@ mgr, err := license.NewManager(license.ManagerConfig{
 | `ErrCommercialLicenseRequired` | Operational usage or environment is not authorized under BSL 1.1 Additional Use Grants | Acquire and configure a commercial license key, or reduce resource usage below free tier bounds. |
 | `ErrFingerprintMismatch` | License node/cluster fingerprint does not match host | Pass expected host fingerprint or check machine identity. |
 | `ErrScopeMismatch` | Deployment environment, cloud account, region, host, or cluster is not allowed | Verify the license `Scope` allowlist contains the target deployment infrastructure. |
+| `ErrResourceNotAllowed` | Monitored resource (ARN, short name, wildcard) is not permitted under license scope | Ensure resource matches allowed patterns in `claims.Scope.Resources`. |
+| `ErrResourceQuotaExceeded` | Total monitored resources exceed licensed `max_resources` capacity limit | Increase `max_resources` in license `Limits` map. |
 | `ErrVersionNotEntitled` | Running software version exceeds `claims.MaxVersion` or is not in `claims.AllowedVersions` | Upgrade perpetual license to entitle the newer major version. |
 | `ErrMaintenanceExpired` | Software build date exceeds `claims.MaintenanceExpiresAt` | Customer's annual maintenance contract has expired. Renew maintenance to unlock newer binary releases. |
 | `ErrClockTamperingDetected` | Local system clock was advanced forward to bypass BSL or license checks | Ensure the system clock is synchronized via NTP. Authoritative server time is used to enforce genuine validity. |

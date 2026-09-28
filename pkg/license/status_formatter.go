@@ -524,7 +524,7 @@ func formatFeatureList(b *strings.Builder, features []string) {
 func formatScopeSection(b *strings.Builder, c *Claims) {
 	hasScope := c.Scope != nil && (len(c.Scope.Environments) > 0 || len(c.Scope.Accounts) > 0 ||
 		len(c.Scope.Regions) > 0 || len(c.Scope.Clusters) > 0 || len(c.Scope.Namespaces) > 0 ||
-		len(c.Scope.Hosts) > 0 || len(c.Scope.Custom) > 0)
+		len(c.Scope.Hosts) > 0 || len(c.Scope.Resources) > 0 || len(c.Scope.Custom) > 0)
 	hasFingerprint := c.Fingerprint != ""
 	hasEnv := c.Environment != ""
 
@@ -557,6 +557,9 @@ func formatScopeSection(b *strings.Builder, c *Claims) {
 		}
 		if len(c.Scope.Hosts) > 0 {
 			fmt.Fprintf(b, "  %-22s %s\n", "Hosts:", strings.Join(c.Scope.Hosts, ", "))
+		}
+		if len(c.Scope.Resources) > 0 {
+			fmt.Fprintf(b, "  %-22s %s\n", "Resources:", strings.Join(c.Scope.Resources, ", "))
 		}
 	}
 }

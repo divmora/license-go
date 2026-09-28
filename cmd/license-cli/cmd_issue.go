@@ -32,6 +32,7 @@ func runIssue(args []string) error {
 	scopeClusters := fs.String("scope-clusters", "", "Comma-separated authorized clusters (e.g. 'prod-eks-01')")
 	scopeNamespaces := fs.String("scope-namespaces", "", "Comma-separated authorized namespaces/groups (e.g. 'gitlab.com/acme/*')")
 	scopeHosts := fs.String("scope-hosts", "", "Comma-separated authorized hostnames/domains (e.g. '*.acme.corp,runner-*.internal')")
+	scopeResources := fs.String("scope-resources", "", "Comma-separated authorized resource ARNs/patterns (e.g. 'arn:aws:elasticloadbalancing:*:loadbalancer/app/*,my-resource-*')")
 	scopeCustomFlag := fs.String("scope-custom", "", "Custom scope dimensions in key=val format; multiple dimensions separated by ';' and values separated by ',' (e.g. 'tier=platinum,gold;datacenter=dc-1')")
 	armored := fs.Bool("armored", true, "Output license in armored text format (default: true)")
 	outFile := fs.String("out", "", "Output file path (default: stdout)")
@@ -139,10 +140,11 @@ func runIssue(args []string) error {
 	clusters := parseSlice(*scopeClusters)
 	namespaces := parseSlice(*scopeNamespaces)
 	hosts := parseSlice(*scopeHosts)
+	resources := parseSlice(*scopeResources)
 	customScope := parseCustomScope(*scopeCustomFlag)
 
 	var scope *license.Scope
-	if len(envs) > 0 || len(accounts) > 0 || len(regions) > 0 || len(clusters) > 0 || len(namespaces) > 0 || len(hosts) > 0 || len(customScope) > 0 {
+	if len(envs) > 0 || len(accounts) > 0 || len(regions) > 0 || len(clusters) > 0 || len(namespaces) > 0 || len(hosts) > 0 || len(resources) > 0 || len(customScope) > 0 {
 		scope = &license.Scope{
 			Environments: envs,
 			Accounts:     accounts,
@@ -150,6 +152,7 @@ func runIssue(args []string) error {
 			Clusters:     clusters,
 			Namespaces:   namespaces,
 			Hosts:        hosts,
+			Resources:    resources,
 			Custom:       customScope,
 		}
 	}
