@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.0](https://github.com/divmora/license-go/compare/v1.3.1...v1.4.0) (2026-09-28)
+
+
+### Features
+
+* **scope:** support resource quotas and allowed resource patterns in claims ([f42be7d](https://github.com/divmora/license-go/commit/f42be7d5d9e967ec5bd5f4f5ad0926e4d6a2b2ad))
+
 ## [1.3.1](https://github.com/divmora/license-go/compare/v1.3.0...v1.3.1) (2026-09-22)
 
 
