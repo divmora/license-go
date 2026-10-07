@@ -336,18 +336,20 @@ func TestValidator_VerifyWithResult_StatusMessageRoundTrip(t *testing.T) {
 	}
 
 	// 4. BSL converted
+	bslEvalTime := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
 	bslValidator, err := NewValidator(pubKey,
 		WithProduct("gitlab-fleet-governor"),
 		WithBSLPolicy(BSLPolicy{
 			ReleaseDate:       time.Date(2023, 1, 1, 0, 0, 0, 0, time.UTC),
 			ChangePeriodYears: 3,
 		}),
+		WithServerTimeAttestation(bslEvalTime, 1*time.Hour),
 	)
 	if err != nil {
 		t.Fatalf("NewValidator failed: %v", err)
 	}
 
-	resBSL, err := bslValidator.VerifyWithResultAt("", time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC))
+	resBSL, err := bslValidator.VerifyWithResultAt("", bslEvalTime)
 	if err != nil {
 		t.Fatalf("VerifyWithResultAt BSL failed: %v", err)
 	}
