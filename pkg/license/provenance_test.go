@@ -328,9 +328,20 @@ func TestEvaluateProvenance_BSLConversionSpoofingDefeated(t *testing.T) {
 		t.Fatalf("expected ErrLicenseNotFound before conversion, got: res=%v, err=%v", resBefore, err)
 	}
 
-	// Evaluation at 2029-06-02 (after 3 years from 2026-06-01): Converts legally!
+	// Evaluation at 2029-06-02 (after 3 years from 2026-06-01): Converts legally with server time attestation!
 	evalTimeAfter := time.Date(2029, 6, 2, 0, 0, 0, 0, time.UTC)
-	resAfter, err := legitVal.VerifyWithResultAt("", evalTimeAfter)
+	legitValAttested, err := NewValidator(pub,
+		WithProduct("gitlab-fleet-governor"),
+		WithCurrentVersion("v1.0.0"),
+		WithBSLPolicy(legitBSL),
+		WithReleaseAttestation(attestationToken),
+		WithServerTimeAttestation(evalTimeAfter, 1*time.Hour),
+	)
+	if err != nil {
+		t.Fatalf("NewValidator failed: %v", err)
+	}
+
+	resAfter, err := legitValAttested.VerifyWithResultAt("", evalTimeAfter)
 	if err != nil {
 		t.Fatalf("expected conversion after change date, got error: %v", err)
 	}

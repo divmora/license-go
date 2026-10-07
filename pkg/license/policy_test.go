@@ -427,7 +427,8 @@ func TestManager_PolicyDegraded_BSLConversionRecovery(t *testing.T) {
 	}
 
 	// Release date 4 years ago (BSL Change Date arrived 1 year ago!)
-	releaseDate := time.Now().AddDate(-4, 0, 0)
+	now := time.Now()
+	releaseDate := now.AddDate(-4, 0, 0)
 	bslPolicy := license.BSLPolicy{
 		ReleaseDate:       releaseDate,
 		ChangePeriodYears: 3,
@@ -436,6 +437,7 @@ func TestManager_PolicyDegraded_BSLConversionRecovery(t *testing.T) {
 	validator, err := license.NewValidator(pub,
 		license.WithProduct("gitlab-fleet-governor"),
 		license.WithBSLPolicy(bslPolicy),
+		license.WithServerTimeAttestation(now, 1*time.Hour),
 	)
 	if err != nil {
 		t.Fatalf("NewValidator failed: %v", err)
