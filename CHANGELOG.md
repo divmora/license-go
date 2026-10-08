@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.4.1](https://github.com/divmora/license-go/compare/v1.4.0...v1.4.1) (2026-10-08)
+
+
+### Bug Fixes
+
+* **security:** prevent forward clock tampering BSL conversion without authoritative time ([#55](https://github.com/divmora/license-go/issues/55)) ([ba9625e](https://github.com/divmora/license-go/commit/ba9625e1ee1708285f2af8a7124da608a5dd4ef0)), closes [#49](https://github.com/divmora/license-go/issues/49)
+* **security:** prevent Kubernetes resolver spoofing via unauthenticated env vars (fixes [#46](https://github.com/divmora/license-go/issues/46)) ([#62](https://github.com/divmora/license-go/issues/62)) ([91d4273](https://github.com/divmora/license-go/commit/91d42739378b63f3f4f40217b23fdaa11ce7b777))
+
 ## [1.4.0](https://github.com/divmora/license-go/compare/v1.3.1...v1.4.0) (2026-09-28)
 
 
