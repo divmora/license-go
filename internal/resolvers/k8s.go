@@ -111,17 +111,31 @@ type k8sNamespaceMetadata struct {
 	} `json:"metadata"`
 }
 
+// hasValidServiceAccountDir verifies whether a candidate serviceaccount directory
+// contains non-empty cryptographic credentials (ca.crt, token, or namespace).
+func hasValidServiceAccountDir(dir string) bool {
+	fi, err := os.Stat(dir)
+	if err != nil || !fi.IsDir() {
+		return false
+	}
+	for _, file := range []string{"ca.crt", "token", "namespace"} {
+		p := filepath.Join(dir, file)
+		if sfi, err := os.Stat(p); err == nil && !sfi.IsDir() && sfi.Size() > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // Resolve evaluates in-cluster credentials and cluster UID to return a MachineFingerprint.
 func (r *KubernetesResolver) Resolve(ctx context.Context) (*MachineFingerprint, error) {
 	// 1. Detect if running within Kubernetes
-	hasSvcAcct := false
-	if fi, err := os.Stat(r.serviceAccountDir); err == nil && fi.IsDir() {
-		hasSvcAcct = true
-	}
-	hasHostEnv := os.Getenv("KUBERNETES_SERVICE_HOST") != ""
-	hasEnvID := r.clusterID != "" || os.Getenv("KUBERNETES_CLUSTER_ID") != "" || os.Getenv("CLUSTER_UID") != ""
+	hasSvcAcct := hasValidServiceAccountDir(r.serviceAccountDir)
+	hasExplicitClusterID := r.clusterID != ""
 
-	if !hasSvcAcct && !hasHostEnv && !hasEnvID {
+	// An unauthenticated environment variable (KUBERNETES_CLUSTER_ID, CLUSTER_UID, or KUBERNETES_SERVICE_HOST)
+	// must NEVER bypass the in-cluster execution guard on non-Kubernetes hosts.
+	if !hasSvcAcct && !hasExplicitClusterID {
 		return nil, errors.New("kubernetes: not running inside a kubernetes cluster")
 	}
 
@@ -156,25 +170,27 @@ func (r *KubernetesResolver) Resolve(ctx context.Context) (*MachineFingerprint, 
 
 	// 3. Resolve cluster UID
 	clusterUID := r.clusterID
-	if clusterUID == "" {
-		clusterUID = os.Getenv("KUBERNETES_CLUSTER_ID")
-	}
-	if clusterUID == "" {
-		clusterUID = os.Getenv("CLUSTER_UID")
-	}
-	if clusterUID == "" {
-		// Try reading /etc/kubernetes/cluster-id if available
-		if data, err := os.ReadFile("/etc/kubernetes/cluster-id"); err == nil {
-			clusterUID = strings.TrimSpace(string(data))
-		}
-	}
 
-	// If cluster UID is still not found, try querying Kubernetes API for kube-system namespace UID
+	// If no explicit cluster ID was configured programmatically, attempt to query
+	// the authoritative Kubernetes API for the immutable kube-system namespace UID first.
 	if clusterUID == "" {
 		uid, err := r.queryKubeSystemNamespaceUID(ctx)
 		if err == nil && uid != "" {
 			clusterUID = uid
 		}
+	}
+
+	// If API query was restricted (e.g. RBAC 403), check local node files or in-cluster env vars.
+	if clusterUID == "" {
+		if data, err := os.ReadFile("/etc/kubernetes/cluster-id"); err == nil {
+			clusterUID = strings.TrimSpace(string(data))
+		}
+	}
+	if clusterUID == "" {
+		clusterUID = os.Getenv("KUBERNETES_CLUSTER_ID")
+	}
+	if clusterUID == "" {
+		clusterUID = os.Getenv("CLUSTER_UID")
 	}
 
 	// Extract in-cluster serviceaccount ca.crt to compute stable cryptographic cluster CA anchor
