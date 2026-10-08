@@ -39,6 +39,12 @@ func (r *AutoDetectResolver) Platform() Platform {
 	return PlatformGeneric
 }
 
+var k8sServiceAccountDir = defaultK8sServiceAcctDir
+
+func isKubernetesRuntime() bool {
+	return hasValidServiceAccountDir(k8sServiceAccountDir)
+}
+
 // DetectEnvironment inspects runtime markers to determine the current execution platform.
 func DetectEnvironment() Platform {
 	// 1. AWS Lambda
@@ -47,10 +53,7 @@ func DetectEnvironment() Platform {
 	}
 
 	// 2. Kubernetes
-	if _, err := os.Stat(defaultK8sServiceAcctDir); err == nil {
-		return PlatformKubernetes
-	}
-	if os.Getenv("KUBERNETES_SERVICE_HOST") != "" {
+	if isKubernetesRuntime() {
 		return PlatformKubernetes
 	}
 

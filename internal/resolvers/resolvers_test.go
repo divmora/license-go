@@ -573,6 +573,90 @@ func TestAWSLambda_SpoofProtection(t *testing.T) {
 	}
 }
 
+func TestKubernetes_SpoofProtection(t *testing.T) {
+	// Attacker sets KUBERNETES_CLUSTER_ID outside Kubernetes environment without runtime serviceaccount
+	t.Setenv("KUBERNETES_CLUSTER_ID", "target-cluster-id")
+	t.Setenv("CLUSTER_UID", "target-cluster-uid")
+	t.Setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
+
+	// 1. KubernetesResolver.Resolve must fail closed
+	r := NewKubernetesResolver()
+	_, err := r.Resolve(context.Background())
+	if err == nil {
+		t.Fatal("security vulnerability: KubernetesResolver.Resolve accepted spoofed environment variables outside cluster")
+	}
+
+	// 2. DetectEnvironment must not detect PlatformKubernetes
+	if env := DetectEnvironment(); env == PlatformKubernetes {
+		t.Fatal("security vulnerability: DetectEnvironment detected PlatformKubernetes with spoofed env var")
+	}
+
+	// 3. NewDefaultCompositeResolver must not return a Kubernetes fingerprint
+	comp := NewDefaultCompositeResolver()
+	fp, err := comp.Resolve(context.Background())
+	if err != nil {
+		t.Fatalf("DefaultCompositeResolver failed: %v", err)
+	}
+	if fp.Platform == PlatformKubernetes {
+		t.Fatalf("security vulnerability: DefaultCompositeResolver resolved Kubernetes fingerprint on spoofed environment")
+	}
+	if fp.Platform != PlatformHost {
+		t.Errorf("expected PlatformHost fallback, got %s", fp.Platform)
+	}
+
+	// 4. AutoDetectResolver must also fall back to Host, not Kubernetes
+	auto := NewAutoDetectResolver()
+	fpAuto, err := auto.Resolve(context.Background())
+	if err != nil {
+		t.Fatalf("AutoDetectResolver failed: %v", err)
+	}
+	if fpAuto.Platform == PlatformKubernetes {
+		t.Fatalf("security vulnerability: AutoDetectResolver resolved Kubernetes fingerprint on spoofed environment")
+	}
+}
+
+func TestKubernetesResolver_APITakesPrecedenceOverEnvClusterID(t *testing.T) {
+	tmpDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmpDir, "namespace"), []byte("prod-fleet"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "token"), []byte("mock-k8s-jwt-token"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/namespaces/kube-system" {
+			http.NotFound(w, r)
+			return
+		}
+		resp := k8sNamespaceMetadata{}
+		resp.Metadata.UID = "authoritative-kube-system-uid-12345"
+		resp.Metadata.Name = "kube-system"
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer apiServer.Close()
+
+	// Attacker injects KUBERNETES_CLUSTER_ID to try to spoof a different cluster UID
+	t.Setenv("KUBERNETES_CLUSTER_ID", "spoofed-cluster-uid-attempt")
+
+	resolver := NewKubernetesResolver(
+		WithKubernetesServiceAccountDir(tmpDir),
+		WithKubernetesAPIBaseURL(apiServer.URL),
+		WithKubernetesHTTPClient(apiServer.Client()),
+		WithKubernetesTimeout(2*time.Second),
+	)
+
+	fp, err := resolver.Resolve(context.Background())
+	if err != nil {
+		t.Fatalf("KubernetesResolver.Resolve() error = %v", err)
+	}
+	if fp.Components["cluster_uid"] != "authoritative-kube-system-uid-12345" {
+		t.Errorf("security vulnerability: authoritative API UID was overridden by env var! got %q, expected %q",
+			fp.Components["cluster_uid"], "authoritative-kube-system-uid-12345")
+	}
+}
+
 func TestAutoDetectResolver_MetadataAndDetection(t *testing.T) {
 	r := NewAutoDetectResolver()
 	if r.Name() != "auto-detect" {
@@ -609,7 +693,14 @@ func TestAutoDetectResolver_MetadataAndDetection(t *testing.T) {
 
 	// Test Kubernetes environment detection and fallback
 	t.Setenv("AWS_LAMBDA_FUNCTION_NAME", "")
-	t.Setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
+	tmpK8sDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmpK8sDir, "token"), []byte("mock-token"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	origK8sDir := k8sServiceAccountDir
+	k8sServiceAccountDir = tmpK8sDir
+	t.Cleanup(func() { k8sServiceAccountDir = origK8sDir })
+
 	if env := DetectEnvironment(); env != PlatformKubernetes {
 		t.Errorf("expected PlatformKubernetes, got %s", env)
 	}
@@ -620,7 +711,8 @@ func TestAutoDetectResolver_MetadataAndDetection(t *testing.T) {
 	if fpK8sFallback == nil {
 		t.Fatal("expected non-nil fallback fingerprint")
 	}
-	t.Setenv("KUBERNETES_SERVICE_HOST", "")
+	// Restore default service account dir
+	k8sServiceAccountDir = origK8sDir
 
 	// Test GenericContainerResolver methods
 	gen := NewGenericContainerResolver()

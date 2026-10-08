@@ -477,6 +477,33 @@ func TestKubernetesResolver_ExplicitClusterIDPrecedence(t *testing.T) {
 	}
 }
 
+func TestKubernetesResolver_EnvSpoofing_Rejected(t *testing.T) {
+	// Set unauthenticated K8s env vars outside of a real Kubernetes cluster
+	t.Setenv("KUBERNETES_CLUSTER_ID", "spoofed-cluster-id")
+	t.Setenv("CLUSTER_UID", "spoofed-cluster-uid")
+	t.Setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
+
+	// 1. KubernetesResolver must fail closed without valid serviceaccount credentials
+	res := NewKubernetesResolver()
+	_, err := res.Resolve(context.Background())
+	if err == nil {
+		t.Fatal("security vulnerability: KubernetesResolver.Resolve succeeded with unauthenticated environment variables outside cluster")
+	}
+
+	// 2. Default composite resolver must NOT return a Kubernetes fingerprint
+	comp := NewDefaultCompositeResolver()
+	fp, err := comp.Resolve(context.Background())
+	if err != nil {
+		t.Fatalf("DefaultCompositeResolver failed: %v", err)
+	}
+	if fp.Platform == PlatformKubernetes {
+		t.Fatalf("security vulnerability: DefaultCompositeResolver resolved PlatformKubernetes on spoofed host")
+	}
+	if fp.Platform != PlatformHost {
+		t.Errorf("expected fallback to PlatformHost, got %s", fp.Platform)
+	}
+}
+
 func TestCompositeResolver(t *testing.T) {
 	// Mock resolvers
 	k8sFp := &MachineFingerprint{
