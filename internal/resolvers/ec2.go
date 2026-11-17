@@ -14,8 +14,15 @@ import (
 
 const (
 	defaultEC2BaseURL = "http://169.254.169.254"
-	defaultEC2Timeout = 500 * time.Millisecond
+	// defaultEC2Timeout bounds each IMDS attempt. IMDS normally answers in
+	// milliseconds but can stall under load; a too-short timeout makes the
+	// resolver fail intermittently, which flips the machine fingerprint.
+	defaultEC2Timeout  = 1 * time.Second
+	defaultEC2Attempts = 3
 )
+
+// errNotEC2 is returned by a detection-gated resolver when the process does not run on EC2.
+var errNotEC2 = errors.New("aws-ec2: not running on an EC2 instance")
 
 // AWSEC2Option configures an AWSEC2Resolver.
 type AWSEC2Option func(*AWSEC2Resolver)
@@ -24,6 +31,7 @@ type AWSEC2Option func(*AWSEC2Resolver)
 func WithAWSEC2BaseURL(rawURL string) AWSEC2Option {
 	return func(r *AWSEC2Resolver) {
 		r.baseURL = strings.TrimRight(rawURL, "/")
+		r.customBaseURL = true
 	}
 }
 
@@ -41,18 +49,44 @@ func WithAWSEC2HTTPClient(client *http.Client) AWSEC2Option {
 	}
 }
 
+// WithAWSEC2Attempts sets how many times IMDSv2 is queried before giving up
+// (minimum 1). Transient failures such as timeouts or HTTP 5xx are retried.
+func WithAWSEC2Attempts(n int) AWSEC2Option {
+	return func(r *AWSEC2Resolver) {
+		if n < 1 {
+			n = 1
+		}
+		r.attempts = n
+		r.attemptsSet = true
+	}
+}
+
+// withEC2DetectionGate makes the resolver fail fast unless IsLikelyAWSEC2
+// reports true. The default composite resolver uses it so non-EC2 machines do
+// not pay for IMDS retries on every licence check.
+func withEC2DetectionGate() AWSEC2Option {
+	return func(r *AWSEC2Resolver) {
+		r.requireDetection = true
+	}
+}
+
 // AWSEC2Resolver inspects AWS EC2 IMDSv2 metadata to extract instance identity.
 type AWSEC2Resolver struct {
-	baseURL    string
-	timeout    time.Duration
-	httpClient *http.Client
+	baseURL          string
+	timeout          time.Duration
+	attempts         int
+	attemptsSet      bool
+	customBaseURL    bool
+	httpClient       *http.Client
+	requireDetection bool
 }
 
 // NewAWSEC2Resolver creates a new AWSEC2Resolver with optional configuration.
 func NewAWSEC2Resolver(opts ...AWSEC2Option) *AWSEC2Resolver {
 	r := &AWSEC2Resolver{
-		baseURL: defaultEC2BaseURL,
-		timeout: defaultEC2Timeout,
+		baseURL:  strings.TrimRight(ec2ProbeBaseURL, "/"),
+		timeout:  defaultEC2Timeout,
+		attempts: defaultEC2Attempts,
 	}
 	for _, opt := range opts {
 		opt(r)
@@ -86,7 +120,49 @@ type ec2IdentityDocument struct {
 }
 
 // Resolve queries the IMDSv2 metadata endpoint and returns a MachineFingerprint.
+// Transient failures are retried up to the configured number of attempts, within
+// the deadline of ctx. The returned fingerprint carries the host-hardware
+// fingerprint in Alternates so licences bound to either identity keep matching.
 func (r *AWSEC2Resolver) Resolve(ctx context.Context) (*MachineFingerprint, error) {
+	if r.requireDetection && !IsLikelyAWSEC2() {
+		return nil, errNotEC2
+	}
+
+	attempts := r.attempts
+	// Off EC2 the default IMDS address usually black-holes, so retrying would only
+	// add latency. Retry by default only where EC2 was detected (or when the caller
+	// configured an endpoint or attempt count explicitly).
+	if !r.attemptsSet && !r.customBaseURL && !IsLikelyAWSEC2() {
+		attempts = 1
+	}
+	if attempts < 1 {
+		attempts = 1
+	}
+	var lastErr error
+	for i := 0; i < attempts; i++ {
+		if i > 0 {
+			select {
+			case <-ctx.Done():
+				return nil, fmt.Errorf("%w (last error: %v)", ctx.Err(), lastErr)
+			case <-time.After(time.Duration(i) * retryBackoff):
+			}
+		}
+		fp, err := r.resolveOnce(ctx)
+		if err == nil {
+			if host, herr := NewHostResolver().Resolve(ctx); herr == nil && host != nil {
+				fp.Alternates = []MachineFingerprint{*host}
+			}
+			return fp, nil
+		}
+		lastErr = err
+		if !isRetryableHTTPError(err) || ctx.Err() != nil {
+			break
+		}
+	}
+	return nil, lastErr
+}
+
+func (r *AWSEC2Resolver) resolveOnce(ctx context.Context) (*MachineFingerprint, error) {
 	reqCtx, cancel := context.WithTimeout(ctx, r.timeout)
 	defer cancel()
 
@@ -105,7 +181,7 @@ func (r *AWSEC2Resolver) Resolve(ctx context.Context) (*MachineFingerprint, erro
 	defer func() { _ = tokenResp.Body.Close() }()
 
 	if tokenResp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("aws-ec2: IMDSv2 token endpoint returned HTTP %d", tokenResp.StatusCode)
+		return nil, &httpStatusError{code: tokenResp.StatusCode, msg: fmt.Sprintf("aws-ec2: IMDSv2 token endpoint returned HTTP %d", tokenResp.StatusCode)}
 	}
 
 	tokenBytes, err := io.ReadAll(io.LimitReader(tokenResp.Body, 1024))
@@ -132,7 +208,7 @@ func (r *AWSEC2Resolver) Resolve(ctx context.Context) (*MachineFingerprint, erro
 	defer func() { _ = docResp.Body.Close() }()
 
 	if docResp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("aws-ec2: instance identity endpoint returned HTTP %d", docResp.StatusCode)
+		return nil, &httpStatusError{code: docResp.StatusCode, msg: fmt.Sprintf("aws-ec2: instance identity endpoint returned HTTP %d", docResp.StatusCode)}
 	}
 
 	var doc ec2IdentityDocument

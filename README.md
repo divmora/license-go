@@ -255,6 +255,16 @@ if err != nil {
 }
 ```
 
+### 5. Node-Locked Licences & Machine Fingerprints
+
+`WithAutoFingerprint(true)` resolves the local identity with the default resolver chain (Lambda → Kubernetes → EC2 → host) and compares it with `claims.Fingerprint`. Primary identifiers look like `fp:<platform>:<16 hex>`.
+
+- **EC2 detection is stable.** Local DMI markers (`sys_vendor` / `bios_vendor` = `Amazon EC2`, `board_asset_tag` = instance ID, `ec2`-prefixed `product_uuid`) are checked first. IMDS is probed only when those are inconclusive, with a 1 s timeout and one retry. The answer is cached for the process lifetime (`license.IsLikelyAWSEC2()`).
+- **IMDS calls are retried.** `AWSEC2Resolver` retries timeouts, HTTP 429 and HTTP 5xx (3 attempts by default, `WithAWSEC2Attempts(n)`). A successful EC2 identity is cached for the process, so a later IMDS outage cannot switch it to the host fallback.
+- **EC2 fingerprints also carry the host identity.** `MachineFingerprint.Alternates` holds the host-hardware fingerprint, and `Matches` accepts either one. A licence bound to `fp:host:…` or to `fp:aws:…` on an EC2 instance therefore keeps verifying, whichever identity detection picks. When IMDS is unreachable, only the host identity can be resolved, so issue licences for EC2 against the `fp:host:…` value (`license-cli fingerprint` prints it as "Also Matches") if IMDS may be disabled.
+- **Kubernetes identity is stable too.** The kube-system namespace UID lookup retries timeouts, HTTP 429 and HTTP 5xx (3 attempts, `WithKubernetesAttempts(n)`). RBAC denials (401/403) are not retried and use the fallback identity as before. A UID read from the API is cached for the process. The fingerprint then carries the fallback identity (`/etc/kubernetes/cluster-id`, `KUBERNETES_CLUSTER_ID` / `CLUSTER_UID`, or the cluster CA hash) in `Alternates`, so a licence bound while the API was unreachable keeps matching once it answers, and vice versa. An explicit `WithKubernetesClusterID` never calls the API.
+- **Tests:** call `license.ResetFingerprintCache()` when simulating different environments in one process.
+
 ---
 
 ## Claims Structure Reference

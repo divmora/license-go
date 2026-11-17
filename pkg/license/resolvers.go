@@ -26,6 +26,26 @@ func WithAWSEC2HTTPClient(client *http.Client) AWSEC2Option {
 	return resolvers.WithAWSEC2HTTPClient(client)
 }
 
+// WithAWSEC2Attempts sets how many times IMDSv2 is queried before giving up (minimum 1).
+// Transient failures such as timeouts, HTTP 429 and HTTP 5xx are retried.
+func WithAWSEC2Attempts(n int) AWSEC2Option {
+	return resolvers.WithAWSEC2Attempts(n)
+}
+
+// IsLikelyAWSEC2 reports whether the process runs on AWS EC2. It checks local DMI
+// markers first and probes IMDS only when they are inconclusive. The result is
+// cached for the process lifetime so platform detection never flips between calls.
+func IsLikelyAWSEC2() bool {
+	return resolvers.IsLikelyAWSEC2()
+}
+
+// ResetFingerprintCache clears the cached EC2 detection result, the cached
+// default machine fingerprint and the cached Kubernetes cluster UIDs. Production code should not need it; it exists for
+// tests that simulate different environments within one process.
+func ResetFingerprintCache() {
+	resolvers.ResetDetectionCache()
+}
+
 // AWSEC2Resolver inspects AWS EC2 IMDSv2 metadata to extract instance identity.
 type AWSEC2Resolver = resolvers.AWSEC2Resolver
 
@@ -106,6 +126,12 @@ func WithKubernetesServiceAccountDir(dir string) KubernetesOption {
 // WithKubernetesAPIBaseURL sets the base URL for the Kubernetes API.
 func WithKubernetesAPIBaseURL(rawURL string) KubernetesOption {
 	return resolvers.WithKubernetesAPIBaseURL(rawURL)
+}
+
+// WithKubernetesAttempts sets how many times the kube-system namespace lookup is attempted
+// (minimum 1). Timeouts, HTTP 429 and HTTP 5xx are retried; RBAC denials are not.
+func WithKubernetesAttempts(n int) KubernetesOption {
+	return resolvers.WithKubernetesAttempts(n)
 }
 
 // WithKubernetesTimeout sets the HTTP timeout for Kubernetes API requests.

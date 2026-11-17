@@ -50,6 +50,33 @@ type MachineFingerprint struct {
 
 	// ResolvedAt records the timestamp when the machine identity was resolved.
 	ResolvedAt time.Time `json:"resolved_at"`
+
+	// Alternates holds other identities of the same machine resolved at a
+	// different layer. On AWS EC2 it contains the host-hardware fingerprint, so a
+	// licence bound with either identity matches no matter which one platform
+	// detection selected. Alternates never contain further alternates.
+	Alternates []MachineFingerprint `json:"alternates,omitempty"`
+}
+
+// clone returns a deep copy so cached fingerprints cannot be mutated by callers.
+func (f *MachineFingerprint) clone() *MachineFingerprint {
+	if f == nil {
+		return nil
+	}
+	c := *f
+	if f.Components != nil {
+		c.Components = make(map[string]string, len(f.Components))
+		for k, v := range f.Components {
+			c.Components[k] = v
+		}
+	}
+	if f.Alternates != nil {
+		c.Alternates = make([]MachineFingerprint, len(f.Alternates))
+		for i := range f.Alternates {
+			c.Alternates[i] = *f.Alternates[i].clone()
+		}
+	}
+	return &c
 }
 
 // FingerprintResolver defines the interface for resolving machine or cluster identity.
@@ -66,7 +93,8 @@ type FingerprintResolver interface {
 
 // Matches checks whether the given claimed fingerprint string matches this resolved machine fingerprint.
 // Supports exact primary matches, canonical digests, short digests, prefix tolerance,
-// and matching against individual strong hardware components.
+// matching against individual strong hardware components, and matching against any
+// alternate identity of the same machine (see Alternates).
 func (f *MachineFingerprint) Matches(claimed string) bool {
 	if f == nil {
 		return false
@@ -75,6 +103,18 @@ func (f *MachineFingerprint) Matches(claimed string) bool {
 	if claimed == "" {
 		return false
 	}
+	if f.matchesSelf(claimed) {
+		return true
+	}
+	for i := range f.Alternates {
+		if f.Alternates[i].matchesSelf(claimed) {
+			return true
+		}
+	}
+	return false
+}
+
+func (f *MachineFingerprint) matchesSelf(claimed string) bool {
 
 	// 1. Direct match against Primary, CanonicalDigest, or ShortDigest
 	if helpers.ConstantTimeFingerprintMatch(claimed, f.Primary) ||

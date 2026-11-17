@@ -66,6 +66,9 @@ func runFingerprint(args []string) error {
 	fmt.Printf("  %-20s %s\n", "Short Digest:", fp.ShortDigest)
 	fmt.Printf("  %-20s %s\n", "Canonical Digest:", fp.CanonicalDigest)
 	fmt.Printf("  %-20s %s\n", "Resolved At:", fp.ResolvedAt.Format(time.RFC3339))
+	for _, alt := range fp.Alternates {
+		fmt.Printf("  %-20s %s (%s)\n", "Also Matches:", alt.Primary, alt.Platform)
+	}
 
 	if len(fp.Components) > 0 {
 		fmt.Println("\nHARDWARE & SYSTEM COMPONENTS:")
