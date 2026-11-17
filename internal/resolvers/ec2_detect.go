@@ -55,8 +55,8 @@ func IsLikelyAWSEC2() bool {
 	return ec2DetectResult
 }
 
-// ResetDetectionCache clears the cached EC2 detection result and the cached
-// default fingerprint so the next call re-detects the environment. It is meant
+// ResetDetectionCache clears the cached EC2 detection result, the cached
+// default fingerprint and the cached Kubernetes cluster UIDs so the next call re-detects the environment. It is meant
 // for tests that change the simulated environment within one process.
 func ResetDetectionCache() {
 	ec2DetectMu.Lock()
@@ -64,6 +64,7 @@ func ResetDetectionCache() {
 	ec2DetectResult = false
 	ec2DetectMu.Unlock()
 	resetDefaultFingerprintCache()
+	resetK8sUIDCache()
 }
 
 func readDMI(name string) string {

@@ -39,8 +39,8 @@ func IsLikelyAWSEC2() bool {
 	return resolvers.IsLikelyAWSEC2()
 }
 
-// ResetFingerprintCache clears the cached EC2 detection result and the cached
-// default machine fingerprint. Production code should not need it; it exists for
+// ResetFingerprintCache clears the cached EC2 detection result, the cached
+// default machine fingerprint and the cached Kubernetes cluster UIDs. Production code should not need it; it exists for
 // tests that simulate different environments within one process.
 func ResetFingerprintCache() {
 	resolvers.ResetDetectionCache()
@@ -126,6 +126,12 @@ func WithKubernetesServiceAccountDir(dir string) KubernetesOption {
 // WithKubernetesAPIBaseURL sets the base URL for the Kubernetes API.
 func WithKubernetesAPIBaseURL(rawURL string) KubernetesOption {
 	return resolvers.WithKubernetesAPIBaseURL(rawURL)
+}
+
+// WithKubernetesAttempts sets how many times the kube-system namespace lookup is attempted
+// (minimum 1). Timeouts, HTTP 429 and HTTP 5xx are retried; RBAC denials are not.
+func WithKubernetesAttempts(n int) KubernetesOption {
+	return resolvers.WithKubernetesAttempts(n)
 }
 
 // WithKubernetesTimeout sets the HTTP timeout for Kubernetes API requests.

@@ -19,7 +19,6 @@ const (
 	// resolver fail intermittently, which flips the machine fingerprint.
 	defaultEC2Timeout  = 1 * time.Second
 	defaultEC2Attempts = 3
-	ec2RetryBackoff    = 100 * time.Millisecond
 )
 
 // errNotEC2 is returned by a detection-gated resolver when the process does not run on EC2.
@@ -145,7 +144,7 @@ func (r *AWSEC2Resolver) Resolve(ctx context.Context) (*MachineFingerprint, erro
 			select {
 			case <-ctx.Done():
 				return nil, fmt.Errorf("%w (last error: %v)", ctx.Err(), lastErr)
-			case <-time.After(time.Duration(i) * ec2RetryBackoff):
+			case <-time.After(time.Duration(i) * retryBackoff):
 			}
 		}
 		fp, err := r.resolveOnce(ctx)
@@ -156,28 +155,11 @@ func (r *AWSEC2Resolver) Resolve(ctx context.Context) (*MachineFingerprint, erro
 			return fp, nil
 		}
 		lastErr = err
-		if !isRetryableEC2Error(err) || ctx.Err() != nil {
+		if !isRetryableHTTPError(err) || ctx.Err() != nil {
 			break
 		}
 	}
 	return nil, lastErr
-}
-
-// ec2HTTPStatusError carries a non-OK HTTP status from IMDS; only 429 and 5xx are retried.
-type ec2HTTPStatusError struct {
-	msg  string
-	code int
-}
-
-func (e *ec2HTTPStatusError) Error() string { return e.msg }
-
-func isRetryableEC2Error(err error) bool {
-	var se *ec2HTTPStatusError
-	if errors.As(err, &se) {
-		return se.code >= 500 || se.code == http.StatusTooManyRequests
-	}
-	// Network errors, timeouts, truncated bodies: transient.
-	return true
 }
 
 func (r *AWSEC2Resolver) resolveOnce(ctx context.Context) (*MachineFingerprint, error) {
@@ -199,7 +181,7 @@ func (r *AWSEC2Resolver) resolveOnce(ctx context.Context) (*MachineFingerprint, 
 	defer func() { _ = tokenResp.Body.Close() }()
 
 	if tokenResp.StatusCode != http.StatusOK {
-		return nil, &ec2HTTPStatusError{code: tokenResp.StatusCode, msg: fmt.Sprintf("aws-ec2: IMDSv2 token endpoint returned HTTP %d", tokenResp.StatusCode)}
+		return nil, &httpStatusError{code: tokenResp.StatusCode, msg: fmt.Sprintf("aws-ec2: IMDSv2 token endpoint returned HTTP %d", tokenResp.StatusCode)}
 	}
 
 	tokenBytes, err := io.ReadAll(io.LimitReader(tokenResp.Body, 1024))
@@ -226,7 +208,7 @@ func (r *AWSEC2Resolver) resolveOnce(ctx context.Context) (*MachineFingerprint, 
 	defer func() { _ = docResp.Body.Close() }()
 
 	if docResp.StatusCode != http.StatusOK {
-		return nil, &ec2HTTPStatusError{code: docResp.StatusCode, msg: fmt.Sprintf("aws-ec2: instance identity endpoint returned HTTP %d", docResp.StatusCode)}
+		return nil, &httpStatusError{code: docResp.StatusCode, msg: fmt.Sprintf("aws-ec2: instance identity endpoint returned HTTP %d", docResp.StatusCode)}
 	}
 
 	var doc ec2IdentityDocument

@@ -17,7 +17,7 @@ This document tracks upcoming capabilities, planned optimizations, and ecosystem
 - [ ] *(Additional multi-tenancy capabilities will be tracked here)*
 
 ### 🛡️ Validation & Diagnostic Reporting
-- [ ] **Stable Kubernetes fingerprints**: `KubernetesResolver` uses `cluster_uid` from the API server when RBAC allows and falls back to the cluster CA hash otherwise, so a transient API error can change the fingerprint. Cache the API-derived identity per process and attach the CA-hash identity as an `Alternate`, as is already done for EC2.
+- [ ] *(Additional validation capabilities will be tracked here)*
 
 ### 🖥️ Developer Experience & CLI Tooling
 - [ ] *(Additional CLI capabilities will be tracked here)*
