@@ -563,7 +563,12 @@ func (m *Manager) syncCRL(ctx context.Context) {
 	}
 
 	if res != nil && res.Claims != nil {
-		WithCRLClaims(res.Claims)(m.cfg.Validator)
+		if err := m.cfg.Validator.adoptCRL(res.Claims); err != nil {
+			if m.cfg.OnError != nil {
+				m.cfg.OnError(err)
+			}
+			return
+		}
 
 		if res.Source == SyncSourceRemote && m.cfg.OnCRLUpdated != nil {
 			m.cfg.OnCRLUpdated(res.Claims)

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -658,5 +659,174 @@ func TestValidator_ClaimsEmbeddedCRLURL(t *testing.T) {
 	}
 	if metaClaims.GetCRLURL() != "https://meta.example.com/crl" {
 		t.Fatalf("expected GetCRLURL to fallback to metadata, got: %s", metaClaims.GetCRLURL())
+	}
+}
+
+// signTestLicense issues a minimal license for product "app" used by CRL validator tests.
+func signTestLicense(t *testing.T, priv ed25519.PrivateKey, id, crlURL string) string {
+	t.Helper()
+	signer, err := NewSigner(priv)
+	if err != nil {
+		t.Fatalf("NewSigner failed: %v", err)
+	}
+	tok, err := signer.Sign(Claims{
+		ID:       id,
+		Customer: Customer{Name: "Acme Corp"},
+		Product:  "app",
+		Plan:     "enterprise",
+		IssuedAt: time.Now().UTC(),
+		CRLURL:   crlURL,
+	})
+	if err != nil {
+		t.Fatalf("signer.Sign failed: %v", err)
+	}
+	return tok
+}
+
+func signAppCRL(t *testing.T, priv ed25519.PrivateKey, id string, seq uint64, issued, next time.Time, revoked ...string) string {
+	t.Helper()
+	claims := RevocationListClaims{ID: id, Product: "app", Sequence: seq, IssuedAt: issued, NextUpdate: next}
+	for _, r := range revoked {
+		claims.Entries = append(claims.Entries, RevocationEntry{ID: r, RevokedAt: issued, Reason: "test"})
+	}
+	tok, err := SignCRL(claims, priv)
+	if err != nil {
+		t.Fatalf("SignCRL failed: %v", err)
+	}
+	return tok
+}
+
+func TestValidator_WithCRLURL_RejectsRollbackAndStaleMirror(t *testing.T) {
+	pub, priv := generateCRLTestKeyPair(t)
+	ring := NewKeyRing(pub)
+	now := time.Now().UTC()
+
+	newer := signAppCRL(t, priv, "crl-app-2", 2, now, now.Add(24*time.Hour), "lic-revoked")
+	older := signAppCRL(t, priv, "crl-app-1", 1, now.Add(-time.Hour), now.Add(24*time.Hour))
+	stale := signAppCRL(t, priv, "crl-app-3", 3, now.Add(-40*24*time.Hour), now.Add(-30*24*time.Hour))
+
+	var serving atomic.Value
+	serving.Store(newer)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(serving.Load().(string)))
+	}))
+	defer ts.Close()
+	cacheFile := filepath.Join(t.TempDir(), "crl.cache")
+
+	newValidator := func() *Validator {
+		v, err := NewValidatorWithKeyRing(ring, WithProduct("app"), WithCRLURL(ts.URL, WithCRLSyncCacheFile(cacheFile)))
+		if err != nil {
+			t.Fatalf("NewValidatorWithKeyRing failed: %v", err)
+		}
+		return v
+	}
+	revokedLic := signTestLicense(t, priv, "lic-revoked", "")
+
+	// 1. Newer CRL is fetched and cached; the revoked license is rejected.
+	if _, err := newValidator().Verify(revokedLic); !errors.Is(err, ErrLicenseRevoked) {
+		t.Fatalf("expected ErrLicenseRevoked, got: %v", err)
+	}
+
+	// 2. Mirror replays the older CRL (from before the revocation): fails closed with ErrCRLRollback.
+	serving.Store(older)
+	if _, err := newValidator().Verify(revokedLic); !errors.Is(err, ErrCRLRollback) {
+		t.Fatalf("expected ErrCRLRollback from replayed CRL, got: %v", err)
+	}
+
+	// 3. Mirror serves a CRL that expired 30 days ago: fails closed with ErrCRLExpired.
+	serving.Store(stale)
+	if _, err := newValidator().Verify(revokedLic); !errors.Is(err, ErrCRLExpired) {
+		t.Fatalf("expected ErrCRLExpired from stale mirror, got: %v", err)
+	}
+
+	// The cache still holds the newest trusted CRL.
+	if cached, _ := os.ReadFile(cacheFile); string(cached) != newer {
+		t.Fatalf("cache must keep the newest trusted CRL")
+	}
+}
+
+func TestValidator_OptionalAutoResolvedCRL_DoesNotBlockWhenStaleOrUnreachable(t *testing.T) {
+	pub, priv := generateCRLTestKeyPair(t)
+	ring := NewKeyRing(pub)
+	now := time.Now().UTC()
+
+	t.Setenv(EnvCRL, "")
+	t.Setenv(EnvCRLFile, "")
+	if _, err := os.Lstat(DefaultCRLPath); err == nil {
+		t.Skipf("%s exists on this host; auto-resolution would pick it up", DefaultCRLPath)
+	}
+
+	// Stale cache (expired 30 days ago) that still lists a revoked license.
+	cacheFile := filepath.Join(t.TempDir(), "crl.cache")
+	stale := signAppCRL(t, priv, "crl-app-stale", 1, now.Add(-40*24*time.Hour), now.Add(-30*24*time.Hour), "lic-revoked")
+	if err := os.WriteFile(cacheFile, []byte(stale), 0644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(EnvCRLCacheFile, cacheFile)
+
+	// Unreachable distribution point embedded in the license.
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	deadURL := ts.URL
+	ts.Close()
+
+	newValidator := func() *Validator {
+		v, err := NewValidatorWithKeyRing(ring, WithProduct("app"), WithAutoResolvedRevocationList())
+		if err != nil {
+			t.Fatalf("NewValidatorWithKeyRing failed: %v", err)
+		}
+		return v
+	}
+
+	// A valid license is not blocked by the unreachable network or the stale cache.
+	if _, err := newValidator().Verify(signTestLicense(t, priv, "lic-good", deadURL)); err != nil {
+		t.Fatalf("optional auto-resolved CRL must not block validation, got: %v", err)
+	}
+	// Known revocations from the stale cache are still applied (best effort, deny-only).
+	if _, err := newValidator().Verify(signTestLicense(t, priv, "lic-revoked", deadURL)); !errors.Is(err, ErrLicenseRevoked) {
+		t.Fatalf("expected revocation from stale cache to still apply, got: %v", err)
+	}
+}
+
+func TestValidator_LocalCRLNewerThanSyncedWins(t *testing.T) {
+	pub, priv := generateCRLTestKeyPair(t)
+	ring := NewKeyRing(pub)
+	now := time.Now().UTC()
+
+	mirrorOld := signAppCRL(t, priv, "crl-app-1", 1, now.Add(-time.Hour), now.Add(24*time.Hour))
+	localNew := signAppCRL(t, priv, "crl-app-5", 5, now, now.Add(24*time.Hour), "lic-revoked")
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(mirrorOld))
+	}))
+	defer ts.Close()
+
+	v, err := NewValidatorWithKeyRing(ring, WithProduct("app"),
+		WithRevocationList(localNew),
+		WithCRLURL(ts.URL, WithCRLSyncCacheFile(filepath.Join(t.TempDir(), "crl.cache"))))
+	if err != nil {
+		t.Fatalf("NewValidatorWithKeyRing failed: %v", err)
+	}
+	if _, err := v.Verify(signTestLicense(t, priv, "lic-revoked", "")); !errors.Is(err, ErrLicenseRevoked) {
+		t.Fatalf("expected newer local CRL to win over older mirrored CRL, got: %v", err)
+	}
+}
+
+func TestValidator_AdoptCRL_RejectsRollback(t *testing.T) {
+	now := time.Now().UTC()
+	v := &Validator{}
+	newer := &RevocationListClaims{ID: "n", Sequence: 2, IssuedAt: now}
+	older := &RevocationListClaims{ID: "o", Sequence: 1, IssuedAt: now}
+
+	if err := v.adoptCRL(newer); err != nil {
+		t.Fatalf("adopting first CRL failed: %v", err)
+	}
+	if err := v.adoptCRL(older); !errors.Is(err, ErrCRLRollback) {
+		t.Fatalf("expected ErrCRLRollback, got: %v", err)
+	}
+	if v.crl.ID != "n" {
+		t.Fatalf("expected newer CRL to be kept, got %s", v.crl.ID)
+	}
+	if err := v.adoptCRL(&RevocationListClaims{ID: "n2", Sequence: 2, IssuedAt: now}); err != nil {
+		t.Fatalf("equal-version CRL should be accepted: %v", err)
 	}
 }

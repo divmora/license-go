@@ -496,6 +496,7 @@ Manage and enforce cryptographically signed Revocation Lists (`DIVCRL1`) for air
 license-cli crl sign \
   -private-key ./keys/private.pem \
   -entries "lic-corp-1234=compromised,lic-corp-5678=refunded" \
+  -sequence 42 \
   -next-update "30d" \
   -product "gitlab-fleet-governor" \
   -out ./crl.divcrl
@@ -530,6 +531,17 @@ license-cli verify \
   -crl-url "https://crl.divmora.com/gitlab-fleet-governor.divcrl" \
   -require-crl
 ```
+
+#### CRL Mirrors, Proxies & Replay Protection
+
+Operators may point `DIVMORA_CRL_URL` at their own mirror or proxy (Nexus, Artifactory, an internal HTTP server), or drop a signed `.divcrl` file on disk for air-gapped installs. A mirror cannot forge a CRL (signature, product and size checks), and since v1.4.2 it also cannot **replay an older one** or keep serving one forever:
+
+- **Rollback protection.** `CRLSyncer` only accepts a CRL that is at least as new as the one it already trusts, in memory or in the cache file. CRLs are ordered by the optional signed `sequence` field (higher wins), then by `issued_at`. A CRL without a `sequence` counts as older than any CRL that has one. An older CRL fails with `ErrCRLRollback`, and the trusted copy stays in memory and on disk. The same rule applies when the cache file is older than the in-memory copy, when `Manager` adopts a synced CRL, and when a local file (`WithRevocationList*`) is combined with a synced CRL: the newest one wins.
+- **Freshness.** Without `StrictExpiry`, a downloaded, `304`-revalidated or cached CRL is accepted for up to **7 days** past its `next_update` (`DefaultCRLMaxStaleness`). After that, `Sync` returns `ErrCRLExpired`. Tune this with `CRLSyncConfig.MaxStaleness` / `WithCRLSyncMaxStaleness(d)`. A negative value turns the check off (not recommended). `StrictExpiry` still means zero grace. CRLs with no `next_update` never go stale.
+- **What fails closed.** With an explicit `WithCRLURL(...)` / `ManagerConfig.CRLURL`, or with `WithRequireRevocationList(true)`, a rollback or stale CRL fails validation. With the optional auto-resolved CRL (`WithAutoResolvedRevocationList()`), an unreachable network, a rollback or a stale CRL **never blocks validation**. Any revocations in the newest CRL already trusted (even a stale one) still apply.
+- **Local files** (`DIVMORA_CRL`, `DIVMORA_CRL_FILE`, `/etc/divmora/crl.divcrl`) keep their previous behaviour. They are only checked for expiry when `WithCRLStrictExpiry(true)` is set, so an air-gapped install that is slow to receive a new file keeps working.
+
+Issuers should set `-sequence` (`RevocationListClaims.Sequence`) and increase it for every CRL published at a given URL. Once a URL serves sequenced CRLs, keep setting the field.
 
 ---
 

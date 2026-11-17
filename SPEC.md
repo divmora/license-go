@@ -53,6 +53,7 @@ This document defines the **Divmora License Protocol (`DIV1`)**, an enterprise-g
     - [11.7 HTTP Caching Semantics (`ETag` & `304 Not Modified`)](#117-http-caching-semantics-etag--304-not-modified)
     - [11.8 4-Tier CRL Distribution Point (`CRLURL`) Resolution Hierarchy](#118-4-tier-crl-distribution-point-crlurl-resolution-hierarchy)
     - [11.9 Local Atomic Disk Caching & Air-Gap Resilience](#119-local-atomic-disk-caching--air-gap-resilience)
+    - [11.10 Rollback Protection & Freshness (v1.4.2+)](#1110-rollback-protection--freshness-v142)
 
 ---
 
@@ -442,7 +443,8 @@ Conforming implementations MUST distinguish the following typed error conditions
 | `ErrMissingPublicKey` | `DIV_ERR_MISSING_KEY` | No public keys configured in KeyRing for verification. |
 | `ErrLicenseRevoked` | `DIV_ERR_LICENSE_REVOKED` | License ID is explicitly revoked in Certificate Revocation List (CRL). |
 | `ErrInvalidCRL` | `DIV_ERR_INVALID_CRL` | CRL token format, magic prefix, or cryptographic signature is invalid. |
-| `ErrCRLExpired` | `DIV_ERR_CRL_EXPIRED` | CRL has passed its `next_update` expiration date under strict policy. |
+| `ErrCRLExpired` | `DIV_ERR_CRL_EXPIRED` | CRL has passed its `next_update` expiration date under strict policy, or a synced CRL is past `next_update` + `MaxStaleness`. |
+| `ErrCRLRollback` | `DIV_ERR_CRL_ROLLBACK` | CRL is older (by `sequence`, then `issued_at`) than the CRL already trusted (rollback/replay rejected). |
 | `ErrExpired` | `DIV_ERR_EXPIRED` | License expiration date (and grace period) has passed. |
 | `ErrNotYetValid` | `DIV_ERR_NOT_YET_VALID` | Current time is before `not_before` activation timestamp. |
 | `ErrProductMismatch` | `DIV_ERR_PRODUCT_MISMATCH` | License product does not authorize this application. |
@@ -547,6 +549,7 @@ The authenticated JSON payload encodes the revocation list metadata and entry in
   "product": "gitlab-fleet-governor",
   "kid": "lic-root-2026",
   "issued_at": "2026-09-19T10:42:17Z",
+  "sequence": 42,
   "next_update": "2026-10-19T10:42:17Z",
   "entries": [
     {
@@ -581,7 +584,7 @@ Each record within the `entries` array represents an invalidated license:
 During license evaluation (Step 5b in Section 7.2):
 
 1. **Digital Signature Verification**: The CRL signature over `DIVCRL1.<payloadB64>` is verified against the trusted public `KeyRing`. Reject with `ErrInvalidCRL` if untrusted or malformed.
-2. **Freshness & Staleness**: If `next_update` is present and non-zero, assert $\text{Now} \le \text{NextUpdate} + \text{ClockSkew}$. If expired, reject with `ErrCRLExpired` under strict validation modes.
+2. **Freshness & Staleness**: If `next_update` is present and non-zero, assert $\text{Now} \le \text{NextUpdate} + \text{ClockSkew}$. If expired, reject with `ErrCRLExpired` under strict validation modes. CRLs obtained by dynamic synchronization (Section 11.6) are additionally bounded by `MaxStaleness` (Section 11.10) even when strict mode is off.
 3. **Product Scope Filtering**: If `product` is populated, the CRL applies exclusively to the designated product (or all products if empty or `*`).
 4. **Revocation Assertion**: Check `claims.ID` against `entries`:
    - If found: Verification halts immediately and returns `ErrLicenseRevoked` wrapping structured `*LicenseRevokedError` containing revocation timestamp and reason.
@@ -632,4 +635,18 @@ To ensure that distributed services survive transient network dropouts or upstre
 - **Atomic Writes**: Downloaded CRLs are written to a temporary file (`.crl-tmp-*`) within the target directory, chmodded to `0644`, and atomically renamed (`os.Rename`) to prevent partial or corrupt cache reads.
 - **Symlink Defense**: Syncer checks `os.Lstat` and rejects symlinked cache targets (`ErrSymlinkNotAllowed`) to protect against path traversal attacks.
 - **Automatic Fallback**: If the network connection fails (DNS resolution failure, timeout, 5xx), the syncer automatically falls back to reading and verifying the local disk cache without interrupting service operations.
+
+### 11.10 Rollback Protection & Freshness (v1.4.2+)
+
+Distribution points may be operator-run mirrors or proxies. They cannot forge CRLs, but without further checks they could replay an older, validly signed CRL to hide a later revocation, or keep serving one CRL forever.
+
+**Claims field.** `sequence` (`uint64`, optional, signed) is a monotonically increasing CRL number. Issuers increment it for every CRL published at a distribution point. It is omitted when zero, so CRLs minted without it keep verifying unchanged.
+
+**Ordering.** CRLs are compared lexicographically on (`sequence`, `issued_at`): a higher `sequence` is newer; with equal `sequence` (including both absent) the later `issued_at` is newer. An absent `sequence` is therefore older than any sequenced CRL.
+
+**Rollback rule.** A conforming syncer MUST reject (`ErrCRLRollback`, `DIV_ERR_CRL_ROLLBACK`) a verified CRL that is older than the newest CRL it already trusts in memory or in its cache file. Equal or newer CRLs are accepted. On rejection, the trusted CRL MUST be kept in memory and on disk. A cache file older than the in-memory CRL is ignored in favour of the in-memory CRL.
+
+**Freshness rule.** A CRL obtained by synchronization (HTTP 200, HTTP 304 revalidation, or cache fallback) is rejected with `ErrCRLExpired` when $\text{Now} > \text{NextUpdate} + \text{MaxStaleness}$ (default 7 days), or when $\text{Now} > \text{NextUpdate}$ under `StrictExpiry`. Once the trusted CRL is stale, the syncer stops sending conditional headers so that a `304` cannot extend its life.
+
+**Fail-closed scope.** Rollback and freshness errors fail validation when the CRL is explicitly configured (`WithCRLURL`) or required (`WithRequireRevocationList`). For the optional auto-resolved CRL they never block validation. Revocations from the newest trusted CRL (even a stale one) are still enforced, because a revocation list can only deny.
 
