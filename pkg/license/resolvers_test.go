@@ -499,8 +499,10 @@ func TestKubernetesResolver_EnvSpoofing_Rejected(t *testing.T) {
 	if fp.Platform == PlatformKubernetes {
 		t.Fatalf("security vulnerability: DefaultCompositeResolver resolved PlatformKubernetes on spoofed host")
 	}
-	if fp.Platform != PlatformHost {
-		t.Errorf("expected fallback to PlatformHost, got %s", fp.Platform)
+	// The fallback is the machine's real identity: host, or aws-ec2 when the
+	// test runner itself is an EC2 instance (IMDS-backed, not env-spoofable).
+	if fp.Platform != PlatformHost && fp.Platform != PlatformAWSEC2 {
+		t.Errorf("expected PlatformHost or PlatformAWSEC2 fallback, got %s", fp.Platform)
 	}
 }
 

@@ -600,8 +600,10 @@ func TestKubernetes_SpoofProtection(t *testing.T) {
 	if fp.Platform == PlatformKubernetes {
 		t.Fatalf("security vulnerability: DefaultCompositeResolver resolved Kubernetes fingerprint on spoofed environment")
 	}
-	if fp.Platform != PlatformHost {
-		t.Errorf("expected PlatformHost fallback, got %s", fp.Platform)
+	// The fallback is the machine's real identity: host, or aws-ec2 when the
+	// test runner itself is an EC2 instance (IMDS-backed, not env-spoofable).
+	if fp.Platform != PlatformHost && fp.Platform != PlatformAWSEC2 {
+		t.Errorf("expected PlatformHost or PlatformAWSEC2 fallback, got %s", fp.Platform)
 	}
 
 	// 4. AutoDetectResolver must also fall back to Host, not Kubernetes
