@@ -532,6 +532,14 @@ func WithCRLSyncStrictExpiry(strict bool) CRLSyncOption {
 	}
 }
 
+// WithCRLSyncMaxStaleness bounds how long past NextUpdate a remote, mirrored or cached CRL is accepted.
+// Zero keeps DefaultCRLMaxStaleness (7 days); a negative value disables the check (not recommended).
+func WithCRLSyncMaxStaleness(d time.Duration) CRLSyncOption {
+	return func(cfg *CRLSyncConfig) {
+		cfg.MaxStaleness = d
+	}
+}
+
 // WithCRLURL configures dynamic Certificate Revocation List synchronization from a remote HTTPS endpoint.
 func WithCRLURL(url string, opts ...CRLSyncOption) ValidatorOption {
 	return func(v *Validator) {
@@ -633,11 +641,14 @@ func (v *Validator) EvaluateCRL(claimsHint ...*Claims) (*RevocationListClaims, e
 			if v.crlSyncerCfg != nil {
 				return nil, err
 			}
-			// For optional auto-resolved CRL, continue without CRL if network is unreachable
+			// For optional auto-resolved CRL, never block validation on a sync failure (unreachable
+			// network, rollback or stale download). Still apply the revocations from the newest CRL the
+			// syncer already trusts, if any: a deny list can only make validation stricter.
+			if trusted := v.crlSyncer.Claims(); trusted != nil {
+				return v.adoptNewestOf(trusted), nil
+			}
 		} else if res != nil && res.Claims != nil {
-			v.crl = res.Claims
-			v.crlRaw = v.crlSyncer.Raw()
-			return v.crl, nil
+			return v.adoptNewestOf(res.Claims), nil
 		}
 	}
 
@@ -668,6 +679,35 @@ func (v *Validator) EvaluateCRL(claimsHint ...*Claims) (*RevocationListClaims, e
 	}
 
 	return nil, nil
+}
+
+// adoptNewestOf activates whichever is newer (by CompareCRLVersion): the syncer-provided claims or a
+// locally configured CRL (WithRevocationList / WithRevocationListFile) that verifies against the KeyRing.
+// This keeps an older synced or mirrored CRL from overriding a newer CRL dropped on disk, and vice versa.
+func (v *Validator) adoptNewestOf(synced *RevocationListClaims) *RevocationListClaims {
+	if strings.TrimSpace(v.crlRaw) != "" && v.crlRaw != v.crlSyncer.Raw() {
+		if local, matchedKey, err := VerifyCRL(v.crlRaw, v.keyRing); err == nil && CompareCRLVersion(local, synced) > 0 {
+			v.crl = local
+			if matchedKey != nil {
+				v.crlVerifiedKeyID = matchedKey.ID
+				v.crlVerifiedKeyStatus = matchedKey.Status
+			}
+			return v.crl
+		}
+	}
+	v.crl = synced
+	v.crlRaw = v.crlSyncer.Raw()
+	return v.crl
+}
+
+// adoptCRL replaces the validator's active CRL with claims unless that would roll back to an older CRL.
+// It returns ErrCRLRollback (wrapped) and keeps the current CRL when claims are older.
+func (v *Validator) adoptCRL(claims *RevocationListClaims) error {
+	if err := CheckCRLRollback(claims, v.crl); err != nil {
+		return err
+	}
+	v.crl = claims
+	return nil
 }
 
 // RequireRevocationList reports whether revocation list evaluation is required by policy.

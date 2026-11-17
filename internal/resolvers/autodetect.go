@@ -90,7 +90,7 @@ func isLikelyAWSEC2() bool {
 	req.Header.Set("X-aws-ec2-metadata-token-ttl-seconds", "10")
 	resp, err := client.Do(req)
 	if err == nil {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		return resp.StatusCode == http.StatusOK
 	}
 	return false

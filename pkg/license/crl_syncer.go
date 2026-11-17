@@ -18,6 +18,11 @@ const DefaultCRLSyncTimeout = 10 * time.Second
 // DefaultCRLMaxDownloadBytes limits the maximum downloaded CRL payload to 10MB to defend against memory exhaustion.
 const DefaultCRLMaxDownloadBytes int64 = 10 * 1024 * 1024
 
+// DefaultCRLMaxStaleness is how long past its NextUpdate cutoff a remote, mirrored or cached CRL is still
+// accepted by CRLSyncer when StrictExpiry is off. It tolerates a late publish or a short outage of the
+// distribution point, but stops a mirror from serving one signed CRL indefinitely.
+const DefaultCRLMaxStaleness = 7 * 24 * time.Hour
+
 // DefaultCRLSyncUserAgent is the default HTTP User-Agent sent by CRLSyncer.
 const DefaultCRLSyncUserAgent = "divmora-license-go/crl-syncer"
 
@@ -53,7 +58,18 @@ type CRLSyncConfig struct {
 	Timeout time.Duration
 
 	// StrictExpiry rejects CRLs whose NextUpdate has passed relative to local evaluation time.
+	// It is equivalent to a zero MaxStaleness.
 	StrictExpiry bool
+
+	// MaxStaleness bounds how long past NextUpdate a downloaded, 304-revalidated or cached CRL is accepted.
+	// Zero selects DefaultCRLMaxStaleness (7 days). A negative value disables the check and restores the
+	// pre-v1.4.2 behaviour of trusting an expired CRL indefinitely (not recommended). CRLs without a
+	// NextUpdate never go stale. Ignored when StrictExpiry is set.
+	MaxStaleness time.Duration
+
+	// Now overrides the clock used for freshness checks (e.g. to plug in an authoritative time source).
+	// Defaults to time.Now.
+	Now func() time.Time
 
 	// MaxDownloadBytes limits the maximum allowable response body size. Defaults to 10MB.
 	MaxDownloadBytes int64
@@ -116,6 +132,12 @@ func NewCRLSyncer(cfg CRLSyncConfig) (*CRLSyncer, error) {
 	if cfg.UserAgent == "" {
 		cfg.UserAgent = DefaultCRLSyncUserAgent
 	}
+	if cfg.MaxStaleness == 0 {
+		cfg.MaxStaleness = DefaultCRLMaxStaleness
+	}
+	if cfg.Now == nil {
+		cfg.Now = time.Now
+	}
 	if cfg.HTTPClient == nil {
 		cfg.HTTPClient = &http.Client{
 			Timeout: cfg.Timeout,
@@ -128,7 +150,7 @@ func NewCRLSyncer(cfg CRLSyncConfig) (*CRLSyncer, error) {
 
 	// If a local cache file exists, eagerly load it to pre-populate in-memory claims
 	if cfg.CacheFile != "" {
-		if claims, raw, err := syncer.loadCacheFile(cfg.CacheFile); err == nil && claims != nil {
+		if claims, raw, err := syncer.loadCacheFile(cfg.CacheFile); err == nil && claims != nil && syncer.checkProduct(claims) == nil {
 			syncer.cachedClaims = claims
 			syncer.rawContent = raw
 		}
@@ -140,6 +162,11 @@ func NewCRLSyncer(cfg CRLSyncConfig) (*CRLSyncer, error) {
 // Sync performs a synchronization cycle against the remote CRL distribution point.
 // Uses HTTP conditional headers (If-None-Match, If-Modified-Since) to minimize bandwidth.
 // If the remote server is unreachable, automatically falls back to local disk cache.
+//
+// A downloaded CRL is only accepted if it is at least as new (by Sequence, then IssuedAt) as the CRL
+// already trusted in memory or in the cache file; an older one fails with ErrCRLRollback. CRLs past
+// NextUpdate by more than MaxStaleness (or at all, with StrictExpiry) fail with ErrCRLExpired. On any
+// rejection the previously trusted CRL stays in memory and on disk.
 func (s *CRLSyncer) Sync(ctx context.Context) (*SyncResult, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -157,18 +184,22 @@ func (s *CRLSyncer) Sync(ctx context.Context) (*SyncResult, error) {
 	}
 
 	req.Header.Set("User-Agent", s.cfg.UserAgent)
-	if currentETag != "" {
-		req.Header.Set("If-None-Match", CanonicalETag(currentETag))
-	}
-	if currentModified != "" {
-		req.Header.Set("If-Modified-Since", currentModified)
+	// Only revalidate conditionally while the trusted copy is still fresh; once it is stale,
+	// ask for the full body so a 304 cannot keep an expired CRL alive.
+	if s.freshnessError(currentClaims) == nil {
+		if currentETag != "" {
+			req.Header.Set("If-None-Match", CanonicalETag(currentETag))
+		}
+		if currentModified != "" {
+			req.Header.Set("If-Modified-Since", currentModified)
+		}
 	}
 
 	resp, err := s.cfg.HTTPClient.Do(req)
 	if err != nil {
 		return s.handleFallback(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	// 1. HTTP 304 Not Modified
 	if resp.StatusCode == http.StatusNotModified {
@@ -177,6 +208,9 @@ func (s *CRLSyncer) Sync(ctx context.Context) (*SyncResult, error) {
 		s.mu.Unlock()
 
 		if currentClaims != nil {
+			if err := s.freshnessError(currentClaims); err != nil {
+				return nil, fmt.Errorf("%w (remote answered 304 Not Modified)", err)
+			}
 			return &SyncResult{
 				Claims:       currentClaims,
 				Source:       SyncSourceNotModified,
@@ -222,19 +256,40 @@ func (s *CRLSyncer) Sync(ctx context.Context) (*SyncResult, error) {
 	}
 
 	// 5. Product scope assertion
-	if s.cfg.ExpectedProduct != "" && verifiedClaims.Product != "" && verifiedClaims.Product != "*" {
-		if !strings.EqualFold(strings.TrimSpace(verifiedClaims.Product), strings.TrimSpace(s.cfg.ExpectedProduct)) {
-			return nil, fmt.Errorf("%w: crl product %q does not match expected product %q",
-				ErrProductMismatch, verifiedClaims.Product, s.cfg.ExpectedProduct)
+	if err := s.checkProduct(verifiedClaims); err != nil {
+		return nil, err
+	}
+
+	// 6. Rollback protection: never move backwards from the newest CRL already trusted,
+	// whether it is held in memory or persisted in the cache file (possibly by another process).
+	trusted := currentClaims
+	if s.cfg.CacheFile != "" {
+		if cacheClaims, _, err := s.loadCacheFile(s.cfg.CacheFile); err == nil && s.checkProduct(cacheClaims) == nil {
+			if CompareCRLVersion(cacheClaims, trusted) > 0 {
+				trusted = cacheClaims
+			}
 		}
 	}
-
-	// 6. Strict expiration check
-	if s.cfg.StrictExpiry && verifiedClaims.IsExpiredAt(time.Now().UTC()) {
-		return nil, ErrCRLExpired
+	if err := CheckCRLRollback(verifiedClaims, trusted); err != nil {
+		return nil, fmt.Errorf("downloaded crl from %s rejected: %w", s.cfg.URL, err)
 	}
 
-	// 7. Atomic persistence to local disk cache (if configured)
+	// 7. Freshness check (StrictExpiry, or NextUpdate + MaxStaleness)
+	if err := s.freshnessError(verifiedClaims); err != nil {
+		return nil, fmt.Errorf("downloaded crl from %s rejected: %w", s.cfg.URL, err)
+	}
+
+	newETag := CanonicalETag(resp.Header.Get("ETag"))
+	newModified := resp.Header.Get("Last-Modified")
+
+	s.mu.Lock()
+	// Re-check under the lock in case a concurrent Sync adopted a newer CRL meanwhile.
+	if err := CheckCRLRollback(verifiedClaims, s.cachedClaims); err != nil {
+		s.mu.Unlock()
+		return nil, fmt.Errorf("downloaded crl from %s rejected: %w", s.cfg.URL, err)
+	}
+
+	// 8. Atomic persistence to local disk cache (if configured)
 	if s.cfg.CacheFile != "" {
 		if err := atomicWriteFile(s.cfg.CacheFile, bodyBytes, 0644); err != nil {
 			// Log/record cache write error, but return verified claims since memory is authoritative
@@ -242,10 +297,6 @@ func (s *CRLSyncer) Sync(ctx context.Context) (*SyncResult, error) {
 		}
 	}
 
-	newETag := CanonicalETag(resp.Header.Get("ETag"))
-	newModified := resp.Header.Get("Last-Modified")
-
-	s.mu.Lock()
 	s.lastETag = newETag
 	s.lastModified = newModified
 	s.cachedClaims = verifiedClaims
@@ -305,6 +356,9 @@ func (s *CRLSyncer) handleFallback(origErr error) (*SyncResult, error) {
 	}
 
 	claims, raw, err := s.loadCacheFile(s.cfg.CacheFile)
+	if err == nil {
+		err = s.checkProduct(claims)
+	}
 	if err != nil {
 		if origErr != nil {
 			return nil, &CRLSyncError{
@@ -315,20 +369,58 @@ func (s *CRLSyncer) handleFallback(origErr error) (*SyncResult, error) {
 		return nil, fmt.Errorf("%w: failed to read cache: %v", ErrCRLSyncFailed, err)
 	}
 
-	if s.cfg.StrictExpiry && claims.IsExpiredAt(time.Now().UTC()) {
-		return nil, fmt.Errorf("%w: cached crl has expired", ErrCRLExpired)
-	}
-
+	// Rollback protection: a cache file older than the in-memory copy (e.g. restored from a backup or
+	// overwritten by another process) is ignored in favour of the newer in-memory CRL.
 	s.mu.Lock()
+	if CompareCRLVersion(claims, s.cachedClaims) < 0 {
+		claims, raw = s.cachedClaims, s.rawContent
+	}
 	s.cachedClaims = claims
 	s.rawContent = raw
 	s.mu.Unlock()
+
+	if err := s.freshnessError(claims); err != nil {
+		return nil, fmt.Errorf("cached crl rejected: %w", err)
+	}
 
 	return &SyncResult{
 		Claims:       claims,
 		Source:       SyncSourceCache,
 		NetworkError: origErr,
 	}, nil
+}
+
+// freshnessError returns an error wrapping ErrCRLExpired if claims are too old to trust under the syncer's
+// freshness policy: past NextUpdate with StrictExpiry, or past NextUpdate + MaxStaleness otherwise.
+func (s *CRLSyncer) freshnessError(claims *RevocationListClaims) error {
+	if claims == nil {
+		return nil
+	}
+	now := s.cfg.Now().UTC()
+	if s.cfg.StrictExpiry {
+		if claims.IsExpiredAt(now) {
+			return fmt.Errorf("%w: crl %q next_update %s has passed", ErrCRLExpired,
+				claims.ID, claims.NextUpdate.UTC().Format(time.RFC3339))
+		}
+		return nil
+	}
+	if claims.IsStaleAt(now, s.cfg.MaxStaleness) {
+		return fmt.Errorf("%w: crl %q next_update %s passed more than %s ago", ErrCRLExpired,
+			claims.ID, claims.NextUpdate.UTC().Format(time.RFC3339), s.cfg.MaxStaleness)
+	}
+	return nil
+}
+
+// checkProduct asserts that the CRL product scope matches the configured ExpectedProduct.
+func (s *CRLSyncer) checkProduct(claims *RevocationListClaims) error {
+	if s.cfg.ExpectedProduct == "" || claims == nil || claims.Product == "" || claims.Product == "*" {
+		return nil
+	}
+	if !strings.EqualFold(strings.TrimSpace(claims.Product), strings.TrimSpace(s.cfg.ExpectedProduct)) {
+		return fmt.Errorf("%w: crl product %q does not match expected product %q",
+			ErrProductMismatch, claims.Product, s.cfg.ExpectedProduct)
+	}
+	return nil
 }
 
 // loadCacheFile reads and cryptographically verifies a CRL file from disk.

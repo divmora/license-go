@@ -102,7 +102,7 @@ func (r *AWSEC2Resolver) Resolve(ctx context.Context) (*MachineFingerprint, erro
 	if err != nil {
 		return nil, fmt.Errorf("aws-ec2: IMDSv2 token acquisition failed: %w", err)
 	}
-	defer tokenResp.Body.Close()
+	defer func() { _ = tokenResp.Body.Close() }()
 
 	if tokenResp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("aws-ec2: IMDSv2 token endpoint returned HTTP %d", tokenResp.StatusCode)
@@ -129,7 +129,7 @@ func (r *AWSEC2Resolver) Resolve(ctx context.Context) (*MachineFingerprint, erro
 	if err != nil {
 		return nil, fmt.Errorf("aws-ec2: failed to fetch instance identity document: %w", err)
 	}
-	defer docResp.Body.Close()
+	defer func() { _ = docResp.Body.Close() }()
 
 	if docResp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("aws-ec2: instance identity endpoint returned HTTP %d", docResp.StatusCode)

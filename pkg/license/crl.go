@@ -50,6 +50,13 @@ type RevocationListClaims struct {
 	// IssuedAt indicates when this CRL was minted.
 	IssuedAt time.Time `json:"issued_at"`
 
+	// Sequence is an optional, monotonically increasing CRL number (analogous to the X.509 CRLNumber
+	// extension). Issuers should increment it for every new CRL they publish for a given product scope.
+	// Consumers use (Sequence, IssuedAt) ordering to reject rollbacks to an older, validly signed CRL.
+	// Zero means "unset" and is treated as older than any CRL that carries a sequence, so CRLs minted
+	// before this field existed remain valid and are superseded by the first sequenced CRL.
+	Sequence uint64 `json:"sequence,omitempty"`
+
 	// NextUpdate specifies the cutoff timestamp after which this CRL should be considered stale/expired.
 	// A zero time indicates a perpetual/unexpiring revocation list.
 	NextUpdate time.Time `json:"next_update,omitempty"`
@@ -106,6 +113,55 @@ func (c *RevocationListClaims) IsExpiredAt(now time.Time) bool {
 	return now.After(c.NextUpdate)
 }
 
+// IsStaleAt reports whether this CRL is past its NextUpdate cutoff by more than maxStaleness at reference time `now`.
+// A CRL with a zero NextUpdate never becomes stale. A negative maxStaleness disables the check.
+func (c *RevocationListClaims) IsStaleAt(now time.Time, maxStaleness time.Duration) bool {
+	if c == nil || c.NextUpdate.IsZero() || maxStaleness < 0 {
+		return false
+	}
+	return now.After(c.NextUpdate.Add(maxStaleness))
+}
+
+// CompareCRLVersion orders two revocation lists by recency. It returns -1 if a is older than b,
+// +1 if a is newer than b, and 0 if they are the same version.
+//
+// Ordering is lexicographic on (Sequence, IssuedAt): a higher Sequence always wins; when the
+// sequences are equal (including both unset), the later IssuedAt wins. A nil list is older than
+// any non-nil list.
+func CompareCRLVersion(a, b *RevocationListClaims) int {
+	switch {
+	case a == nil && b == nil:
+		return 0
+	case a == nil:
+		return -1
+	case b == nil:
+		return 1
+	}
+	if a.Sequence != b.Sequence {
+		if a.Sequence < b.Sequence {
+			return -1
+		}
+		return 1
+	}
+	return a.IssuedAt.Compare(b.IssuedAt)
+}
+
+// CheckCRLRollback returns an error wrapping ErrCRLRollback if candidate is older than trusted
+// according to CompareCRLVersion. Equal or newer candidates are accepted. A nil trusted list
+// accepts any candidate.
+func CheckCRLRollback(candidate, trusted *RevocationListClaims) error {
+	if trusted == nil || candidate == nil {
+		return nil
+	}
+	if CompareCRLVersion(candidate, trusted) < 0 {
+		return fmt.Errorf("%w: crl %q (sequence %d, issued %s) is older than trusted crl %q (sequence %d, issued %s)",
+			ErrCRLRollback,
+			candidate.ID, candidate.Sequence, candidate.IssuedAt.UTC().Format(time.RFC3339),
+			trusted.ID, trusted.Sequence, trusted.IssuedAt.UTC().Format(time.RFC3339))
+	}
+	return nil
+}
+
 // FormatInspect returns a formatted, multi-line summary of the CRL claims for terminal inspection.
 func (c *RevocationListClaims) FormatInspect() string {
 	if c == nil {
@@ -131,6 +187,9 @@ func (c *RevocationListClaims) FormatInspect() string {
 	}
 	if !c.IssuedAt.IsZero() {
 		fmt.Fprintf(&b, "%-24s %s\n", "Issued At:", c.IssuedAt.UTC().Format(time.RFC3339))
+	}
+	if c.Sequence != 0 {
+		fmt.Fprintf(&b, "%-24s %d\n", "Sequence:", c.Sequence)
 	}
 	if !c.NextUpdate.IsZero() {
 		fmt.Fprintf(&b, "%-24s %s\n", "Next Update:", c.NextUpdate.UTC().Format(time.RFC3339))

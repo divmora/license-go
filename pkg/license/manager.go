@@ -563,7 +563,12 @@ func (m *Manager) syncCRL(ctx context.Context) {
 	}
 
 	if res != nil && res.Claims != nil {
-		WithCRLClaims(res.Claims)(m.cfg.Validator)
+		if err := m.cfg.Validator.adoptCRL(res.Claims); err != nil {
+			if m.cfg.OnError != nil {
+				m.cfg.OnError(err)
+			}
+			return
+		}
 
 		if res.Source == SyncSourceRemote && m.cfg.OnCRLUpdated != nil {
 			m.cfg.OnCRLUpdated(res.Claims)
@@ -585,7 +590,8 @@ func (m *Manager) syncCRL(ctx context.Context) {
 					Reason:    entry.Reason,
 					CRLID:     res.Claims.ID,
 				}
-				if m.cfg.Policy == PolicyStrict {
+				switch m.cfg.Policy {
+				case PolicyStrict:
 					if m.cfg.OnError != nil {
 						m.cfg.OnError(revErr)
 					}
@@ -593,9 +599,9 @@ func (m *Manager) syncCRL(ctx context.Context) {
 						m.cfg.OnExpired(m.Claims())
 					}
 					m.transitionToDegraded(revErr)
-				} else if m.cfg.Policy == PolicyDegraded {
+				case PolicyDegraded:
 					m.transitionToDegraded(revErr)
-				} else if m.cfg.Policy == PolicyWarnOnly {
+				case PolicyWarnOnly:
 					log.Printf("[SECURITY ALERT] Active license %s has been REVOKED in CRL %s (reason: %s)",
 						currentID, res.Claims.ID, entry.Reason)
 				}

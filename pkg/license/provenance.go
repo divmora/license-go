@@ -248,7 +248,7 @@ func ComputeFileDigest(filePath string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("failed to open file for digest: %w", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	return ComputeReaderDigest(f)
 }
 

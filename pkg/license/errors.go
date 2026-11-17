@@ -111,6 +111,11 @@ var (
 	// ErrCRLExpired is returned when a CRL has exceeded its NextUpdate validity cutoff.
 	ErrCRLExpired = errors.New("license: certificate revocation list has expired")
 
+	// ErrCRLRollback is returned when a CRL is older (by Sequence, then IssuedAt) than the CRL already trusted
+	// in memory or in the local cache. This blocks a mirror or proxy from replaying an old, validly signed CRL
+	// to hide a later revocation. The previously trusted CRL is kept.
+	ErrCRLRollback = errors.New("license: certificate revocation list is older than the trusted copy (rollback rejected)")
+
 	// ErrCRLMissing is returned when a Certificate Revocation List is required by policy but not provided or resolved.
 	ErrCRLMissing = errors.New("license: certificate revocation list required by policy but not found")
 

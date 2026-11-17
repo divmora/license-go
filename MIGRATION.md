@@ -103,6 +103,21 @@ if errors.Is(err, license.ErrLicenseRevoked) {
 ```
 3. Operators in air-gapped environments can supply CRL files via `/etc/divmora/crl.divcrl`, `DIVMORA_CRL_FILE`, or `DIVMORA_CRL`.
 
+### CRL Rollback Protection & Freshness (v1.4.2+) — Behaviour Change
+
+`CRLSyncer` (used by `WithCRLURL`, `ManagerConfig.CRLURL` and the auto-resolved remote CRL) now:
+
+1. **Rejects rollbacks** with `ErrCRLRollback` when a downloaded CRL is older than the CRL it already trusts in memory or in the cache file. Ordering is by the new optional `sequence` claim, then `issued_at`. The trusted CRL is kept.
+2. **Rejects stale CRLs** with `ErrCRLExpired` once they are more than 7 days past `next_update` (`DefaultCRLMaxStaleness`). Before this release, such a CRL was trusted indefinitely unless `StrictExpiry` was set.
+
+What changes for you:
+
+- **Explicit `WithCRLURL` / `ManagerConfig.CRLURL`:** if the distribution point (or your mirror) has served nothing newer than 7 days past `next_update`, and no fresh cache exists, `Verify` now fails with `ErrCRLExpired` where it used to succeed. Keep mirrors in sync, or widen the window with `WithCRLSyncMaxStaleness(30 * 24 * time.Hour)`. `WithCRLSyncMaxStaleness(-1)` restores the old behaviour.
+- **Optional `WithAutoResolvedRevocationList()`:** validation is never blocked by an unreachable network, a rollback or a stale CRL. Revocations from the newest trusted CRL now still apply after such errors. Previously, sync errors meant no CRL was applied at all.
+- **`Manager`:** a synced CRL older than the validator's active CRL is reported through `OnError` (`ErrCRLRollback`) and is not adopted.
+- **Local CRL files:** unchanged. Expiry is only enforced with `WithCRLStrictExpiry(true)`.
+- **Claims format:** `RevocationListClaims` gains `Sequence uint64` (`json:"sequence,omitempty"`). Existing CRLs and consumers stay compatible. Issuers should start setting it (`license-cli crl sign -sequence N`) and keep increasing it. Note that a sequenced CRL makes every unsequenced CRL older, so once you start setting it, keep setting it.
+
 ### For Unit Tests in Downstream Services
 
 If downstream unit tests previously generated dynamic keypairs and signed mock licenses using `license.GenerateKeyPair()` and `license.NewSigner()`:

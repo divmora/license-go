@@ -23,6 +23,7 @@ func runSignCRL(args []string) error {
 	issuerName := fs.String("issuer", "divmora.com/crl", "Issuing authority name")
 	product := fs.String("product", "", "Product scope restriction (empty for all products)")
 	keyID := fs.String("key-id", "", "Signing Key ID hint")
+	sequence := fs.Uint64("sequence", 0, "Monotonic CRL sequence number; increment for every CRL published for this product (enables rollback protection, recommended)")
 	nextUpdateFlag := fs.String("next-update", "", "CRL expiration/next update timestamp (RFC3339, YYYY-MM-DD, or duration e.g. '30d')")
 	entriesFlag := fs.String("entries", "", "Revoked license IDs: 'id1=reason,id2=reason' or 'id1,id2'")
 	entriesFile := fs.String("entries-file", "", "Path to JSON or text file containing revoked entries")
@@ -102,6 +103,7 @@ func runSignCRL(args []string) error {
 		Product:    *product,
 		KeyID:      *keyID,
 		IssuedAt:   now,
+		Sequence:   *sequence,
 		NextUpdate: nextUpdate,
 		Entries:    entries,
 		Metadata:   meta,
@@ -252,6 +254,9 @@ func runVerifyCRL(args []string) error {
 		fmt.Printf("Product:       %s\n", claims.Product)
 	}
 	fmt.Printf("Issued At:     %s\n", claims.IssuedAt.Format(time.RFC3339))
+	if claims.Sequence != 0 {
+		fmt.Printf("Sequence:      %d\n", claims.Sequence)
+	}
 	if !claims.NextUpdate.IsZero() {
 		expired := claims.IsExpiredAt(time.Now())
 		status := "Active"
