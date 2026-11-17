@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.2](https://github.com/divmora/license-go/compare/v1.4.1...v1.4.2) (2026-11-17)
+
+
+### Bug Fixes
+
+* **security:** reject CRL rollback and stale CRLs in CRLSyncer ([#63](https://github.com/divmora/license-go/issues/63)) ([f53c6e7](https://github.com/divmora/license-go/commit/f53c6e79a18597c017edd26e124473181f3f2665))
+
 ## [1.4.1](https://github.com/divmora/license-go/compare/v1.4.0...v1.4.1) (2026-10-08)
 
 
