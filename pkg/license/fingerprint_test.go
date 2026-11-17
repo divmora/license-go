@@ -3,6 +3,8 @@ package license
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"runtime"
 	"strings"
 	"testing"
@@ -304,8 +306,10 @@ func TestValidator_AutoFingerprint_Match(t *testing.T) {
 	if res.ResolvedFingerprint == nil {
 		t.Fatal("expected non-nil ResolvedFingerprint in result")
 	}
-	if res.ResolvedFingerprint.Primary != localFP.Primary {
-		t.Errorf("ResolvedFingerprint.Primary = %q, want %q", res.ResolvedFingerprint.Primary, localFP.Primary)
+	// On EC2 the default resolver returns the aws-ec2 identity with the host
+	// identity as an alternate, so compare by match rather than by Primary.
+	if !res.ResolvedFingerprint.Matches(localFP.Primary) {
+		t.Errorf("ResolvedFingerprint %q does not match host fingerprint %q", res.ResolvedFingerprint.Primary, localFP.Primary)
 	}
 }
 
@@ -499,5 +503,67 @@ func TestValidator_AutoFingerprint_AWSLambda(t *testing.T) {
 	}
 	if !errors.Is(err, ErrFingerprintMismatch) {
 		t.Errorf("expected ErrFingerprintMismatch, got %v", err)
+	}
+}
+
+// Regression for divmora/gitlab-fleet-governor#98: a licence bound to the host
+// fingerprint must still verify when the validator resolves the EC2 identity.
+func TestValidator_AutoFingerprint_HostBoundLicenceOnEC2(t *testing.T) {
+	pub, priv, err := GenerateKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := NewSigner(priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/latest/api/token":
+			_, _ = w.Write([]byte("tok"))
+		case "/latest/dynamic/instance-identity/document":
+			_, _ = w.Write([]byte(`{"instanceId":"i-0abc","accountId":"123456789012","region":"us-east-1"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer ts.Close()
+	ec2 := NewAWSEC2Resolver(WithAWSEC2BaseURL(ts.URL))
+
+	hostFP, err := ResolveHostFingerprint()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ec2FP, err := ec2.Resolve(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, bound := range []string{hostFP.Primary, ec2FP.Primary} {
+		token, err := signer.Sign(Claims{
+			Customer:    Customer{Name: "Acme Corp"},
+			Product:     "gitlab-fleet-governor",
+			Fingerprint: bound,
+			ExpiresAt:   time.Now().Add(24 * time.Hour),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		val, err := NewValidator(pub,
+			WithProduct("gitlab-fleet-governor"),
+			WithAutoFingerprint(true),
+			WithFingerprintResolver(ec2),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res, err := val.VerifyWithResult(token)
+		if err != nil {
+			t.Fatalf("licence bound to %q failed on EC2: %v", bound, err)
+		}
+		if !res.FingerprintMatched || res.ResolvedFingerprint.Platform != PlatformAWSEC2 {
+			t.Fatalf("matched=%v platform=%s", res.FingerprintMatched, res.ResolvedFingerprint.Platform)
+		}
 	}
 }

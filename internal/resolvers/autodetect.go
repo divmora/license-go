@@ -3,10 +3,7 @@ package resolvers
 import (
 	"context"
 	"fmt"
-	"net/http"
 	"os"
-	"strings"
-	"time"
 )
 
 // AutoDetectResolver automatically probes the runtime environment and delegates to the appropriate resolver.
@@ -57,8 +54,8 @@ func DetectEnvironment() Platform {
 		return PlatformKubernetes
 	}
 
-	// 3. AWS EC2 (quick IMDS probe)
-	if isLikelyAWSEC2() {
+	// 3. AWS EC2 (DMI signals, then IMDS probe; cached for the process lifetime)
+	if IsLikelyAWSEC2() {
 		return PlatformAWSEC2
 	}
 
@@ -72,28 +69,6 @@ func DetectEnvironment() Platform {
 
 	// 5. Bare-metal / standard VM host
 	return PlatformHost
-}
-
-func isLikelyAWSEC2() bool {
-	// Fast check: DMI product UUID on EC2 often starts with "ec2" or "EC2"
-	if uuid := getLinuxProductUUID(); uuid != "" {
-		if strings.HasPrefix(strings.ToLower(uuid), "ec2") {
-			return true
-		}
-	}
-	// Attempt quick probe to 169.254.169.254 with 100ms timeout
-	client := &http.Client{Timeout: 100 * time.Millisecond}
-	req, err := http.NewRequest(http.MethodPut, "http://169.254.169.254/latest/api/token", nil)
-	if err != nil {
-		return false
-	}
-	req.Header.Set("X-aws-ec2-metadata-token-ttl-seconds", "10")
-	resp, err := client.Do(req)
-	if err == nil {
-		_ = resp.Body.Close()
-		return resp.StatusCode == http.StatusOK
-	}
-	return false
 }
 
 // Resolve automatically detects the environment and resolves the machine fingerprint.

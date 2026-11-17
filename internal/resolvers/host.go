@@ -132,7 +132,9 @@ func getDarwinPlatformUUID(ctx context.Context) string {
 	if p, err := exec.LookPath("ioreg"); err == nil {
 		cmdPath = p
 	}
-	ctxTimeout, cancel := context.WithTimeout(ctx, 2*time.Second)
+	// Detach from the caller's deadline: an almost-expired context must not drop
+	// system_uuid and silently change the host fingerprint.
+	ctxTimeout, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
 	defer cancel()
 
 	out, err := exec.CommandContext(ctxTimeout, cmdPath, "-rd1", "-c", "IOPlatformExpertDevice").Output()
