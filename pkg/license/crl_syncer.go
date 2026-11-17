@@ -199,7 +199,7 @@ func (s *CRLSyncer) Sync(ctx context.Context) (*SyncResult, error) {
 	if err != nil {
 		return s.handleFallback(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	// 1. HTTP 304 Not Modified
 	if resp.StatusCode == http.StatusNotModified {

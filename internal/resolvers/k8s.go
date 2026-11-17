@@ -276,7 +276,7 @@ func (r *KubernetesResolver) queryKubeSystemNamespaceUID(ctx context.Context) (s
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("kube-system API returned HTTP %d", resp.StatusCode)

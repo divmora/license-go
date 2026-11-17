@@ -202,25 +202,22 @@ func TestIsValidEmail(t *testing.T) {
 }
 
 func TestResolveEnvFromProcess(t *testing.T) {
-	os.Unsetenv("DIVMORA_ENV")
-	os.Unsetenv("DIVMORA_ENVIRONMENT")
+	t.Setenv("DIVMORA_ENV", "")
+	t.Setenv("DIVMORA_ENVIRONMENT", "")
 
 	if got := ResolveEnvFromProcess(); got != "" {
 		t.Errorf("expected empty env, got %q", got)
 	}
 
-	os.Setenv("DIVMORA_ENVIRONMENT", "staging")
+	t.Setenv("DIVMORA_ENVIRONMENT", "staging")
 	if got := ResolveEnvFromProcess(); got != "staging" {
 		t.Errorf("expected 'staging', got %q", got)
 	}
 
-	os.Setenv("DIVMORA_ENV", "production")
+	t.Setenv("DIVMORA_ENV", "production")
 	if got := ResolveEnvFromProcess(); got != "production" {
 		t.Errorf("expected 'production', got %q", got)
 	}
-
-	os.Unsetenv("DIVMORA_ENV")
-	os.Unsetenv("DIVMORA_ENVIRONMENT")
 }
 
 func TestFilesHelper(t *testing.T) {
