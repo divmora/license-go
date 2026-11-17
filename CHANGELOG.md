@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.3](https://github.com/divmora/license-go/compare/v1.4.2...v1.4.3) (2026-11-17)
+
+
+### Bug Fixes
+
+* **fingerprint:** keep EC2 and Kubernetes node identities stable so node-locked licences stop flipping ([#65](https://github.com/divmora/license-go/issues/65)) ([caeb3fd](https://github.com/divmora/license-go/commit/caeb3fdeded9d309370bf2896dece36e0f6b72c6))
+
 ## [1.4.2](https://github.com/divmora/license-go/compare/v1.4.1...v1.4.2) (2026-11-17)
 
 
